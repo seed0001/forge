@@ -469,6 +469,17 @@ export class AgentSession {
   /** image_ref -> data URL, keyed by mtime so an image_ref never re-reads/re-encodes the same file every turn. */
   private imageCache = new Map<string, { mtimeMs: number; dataUrl: string }>();
 
+  /**
+   * Per-run tallies, reset at the start of send() and rolled into one
+   * consolidated activity row by flushMessage — a task with dozens of tool
+   * calls should read as a sentence, not a scrolling list of every read/edit.
+   */
+  private activityTally: Partial<Record<ActivityEvent['kind'], number>> = {};
+  private activityErrors = 0;
+  private activityAdded = 0;
+  private activityRemoved = 0;
+  private thinkTotalMs = 0;
+
   constructor(rootPath: string, cb: AgentCallbacks, rulesDir: string | null, isSubagent = false) {
     this.rootPath = rootPath;
     this.cb = cb;
@@ -563,7 +574,7 @@ export class AgentSession {
         this.messages.splice(1, 0, { role: 'system', content: formatModule(mod) });
       }
       if (always.length) {
-        this.cb.onActivity({
+        this.trackActivity({
           id: nextId('act'),
           kind: 'thinking',
           detail: `Loaded ruleset: ${always.map((m) => m.id).join(', ')}`,
@@ -577,7 +588,7 @@ export class AgentSession {
       this.messages.push({ role: 'system', content: formatModule(mod) });
     }
     if (progressive.length) {
-      this.cb.onActivity({
+      this.trackActivity({
         id: nextId('act'),
         kind: 'thinking',
         detail: `Engaged rules ${progressive.map((m) => m.id).join(', ')}`,
@@ -677,7 +688,11 @@ export class AgentSession {
     // Subagents run their own independent loop and API calls — aborting only
     // this session's controller left them running unsupervised forever.
     for (const sub of this.activeSubagents) sub.stop();
-    this.cb.onActivity({ id: nextId('act'), kind: 'stopped', detail: 'Stopped by you', status: 'error' });
+    this.trackActivity({ id: nextId('act'), kind: 'stopped', detail: 'Stopped by you', status: 'error' });
+    const summary = this.buildActivitySummary();
+    if (summary) {
+      this.cb.onActivity({ id: nextId('act'), kind: 'done', detail: summary, status: 'error', summary: true });
+    }
     this.cb.onStatus(false);
   }
 
@@ -693,13 +708,13 @@ export class AgentSession {
   private async runSubagent(task: string): Promise<string> {
     const actId = nextId('act');
     const label = task.slice(0, 80);
-    this.cb.onActivity({ id: actId, kind: 'thinking', detail: `Subagent started: ${label}`, status: 'active' });
+    this.trackActivity({ id: actId, kind: 'thinking', detail: `Subagent started: ${label}`, status: 'active' });
 
     let finalText: string | null = null;
     const sub = new AgentSession(
       this.rootPath,
       {
-        onActivity: (evt) => this.cb.onActivity({ ...evt, detail: `[subagent] ${evt.detail}` }),
+        onActivity: (evt) => this.trackActivity({ ...evt, detail: `[subagent] ${evt.detail}` }),
         onTerminal: this.cb.onTerminal,
         onMessage: (text, images) => {
           finalText = text;
@@ -726,18 +741,18 @@ export class AgentSession {
     try {
       await sub.send(task);
     } catch (err) {
-      this.cb.onActivity({ id: actId, kind: 'thinking', detail: `Subagent failed: ${label}`, status: 'error' });
+      this.trackActivity({ id: actId, kind: 'thinking', detail: `Subagent failed: ${label}`, status: 'error' });
       return `ERROR: subagent failed before finishing — ${String(err)}`;
     } finally {
       this.activeSubagents.delete(sub);
     }
 
     if (this.aborted) {
-      this.cb.onActivity({ id: actId, kind: 'thinking', detail: `Subagent stopped: ${label}`, status: 'error' });
+      this.trackActivity({ id: actId, kind: 'thinking', detail: `Subagent stopped: ${label}`, status: 'error' });
       return 'Stopped by the Operator before this subagent finished.';
     }
 
-    this.cb.onActivity({ id: actId, kind: 'thinking', detail: `Subagent finished: ${label}`, status: 'done' });
+    this.trackActivity({ id: actId, kind: 'thinking', detail: `Subagent finished: ${label}`, status: 'done' });
     return finalText ?? 'Subagent finished but returned no final message.';
   }
 
@@ -745,7 +760,7 @@ export class AgentSession {
     if (name === 'list_files') {
       const rel = String(args.path ?? '.');
       const abs = path.resolve(this.rootPath, rel);
-      this.cb.onActivity({ id: nextId('act'), kind: 'list', detail: `Listed ${rel}`, status: 'done' });
+      this.trackActivity({ id: nextId('act'), kind: 'list', detail: `Listed ${rel}`, status: 'done' });
       const tree = await listTree(abs);
       const names = flattenTree(tree).slice(0, 300).join('\n');
       if (!names) return '(empty directory)';
@@ -757,7 +772,7 @@ export class AgentSession {
       const abs = path.resolve(this.rootPath, rel);
       const result = await readFileDetailed(this.rootPath, abs);
       const missing = !result.ok && result.reason === 'missing';
-      this.cb.onActivity({
+      this.trackActivity({
         id: nextId('act'),
         kind: 'read',
         // A file that does not exist is a finding, not a fault.
@@ -785,7 +800,7 @@ export class AgentSession {
       if (!base.ok && base.reason !== 'missing') {
         // Never diff against a failed read: the whole file would look like an
         // addition and accepting it would destroy the real contents.
-        this.cb.onActivity({
+        this.trackActivity({
           id: nextId('act'),
           kind: 'propose',
           detail: `Could not read ${rel} to edit it`,
@@ -808,7 +823,7 @@ export class AgentSession {
 
       if (this.cb.getAutonomy() === 'auto') {
         await this.cb.applyEditAuto(diff);
-        this.cb.onActivity({
+        this.trackActivity({
           id: nextId('act'),
           kind: 'propose',
           detail: `Auto-applied edit to ${rel}`,
@@ -819,7 +834,7 @@ export class AgentSession {
         return `Change to ${rel} (+${added} -${removed}) written to disk immediately — autonomy is set to Auto, so this skipped review.`;
       }
 
-      this.cb.onActivity({
+      this.trackActivity({
         id: nextId('act'),
         kind: 'propose',
         detail: `Proposed edit to ${rel}`,
@@ -843,10 +858,10 @@ export class AgentSession {
       if (!query) return 'ERROR: no search query given.';
 
       const actId = nextId('act');
-      this.cb.onActivity({ id: actId, kind: 'search', detail: `Searched "${query}"`, status: 'active' });
+      this.trackActivity({ id: actId, kind: 'search', detail: `Searched "${query}"`, status: 'active' });
       try {
         const results = await tavilySearch(query);
-        this.cb.onActivity({
+        this.trackActivity({
           id: actId,
           kind: 'search',
           detail: `Searched "${query}"`,
@@ -857,7 +872,7 @@ export class AgentSession {
         const body = results.map((r, i) => `${i + 1}. ${r.title}\n   ${r.url}\n   ${r.snippet}`).join('\n\n');
         return `Search results for "${query}":\n${untrusted(body)}`;
       } catch (err) {
-        this.cb.onActivity({ id: actId, kind: 'search', detail: `Searched "${query}"`, status: 'error' });
+        this.trackActivity({ id: actId, kind: 'search', detail: `Searched "${query}"`, status: 'error' });
         return `ERROR: web search failed — ${String(err)}`;
       }
     }
@@ -871,7 +886,7 @@ export class AgentSession {
       const aspectRatio = typeof args.aspect_ratio === 'string' ? args.aspect_ratio : undefined;
 
       const actId = nextId('act');
-      this.cb.onActivity({
+      this.trackActivity({
         id: actId,
         kind: 'generate',
         detail: `Generating image: "${prompt.slice(0, 60)}"`,
@@ -896,13 +911,13 @@ export class AgentSession {
         });
         if (!resp.ok) {
           const text = await resp.text();
-          this.cb.onActivity({ id: actId, kind: 'generate', detail: 'Image generation failed', status: 'error' });
+          this.trackActivity({ id: actId, kind: 'generate', detail: 'Image generation failed', status: 'error' });
           return `ERROR: OpenRouter image generation failed (${resp.status}): ${text.slice(0, 500)}`;
         }
         const data = await resp.json();
         const item = data.data?.[0];
         if (!item?.b64_json) {
-          this.cb.onActivity({ id: actId, kind: 'generate', detail: 'Image generation failed', status: 'error' });
+          this.trackActivity({ id: actId, kind: 'generate', detail: 'Image generation failed', status: 'error' });
           return `ERROR: unexpected response shape from OpenRouter image API: ${JSON.stringify(data).slice(0, 500)}`;
         }
         const ext = extFromMediaType(item.media_type, 'png');
@@ -913,11 +928,11 @@ export class AgentSession {
         const abs = path.resolve(this.rootPath, rel);
         await writeBinaryFile(this.rootPath, abs, Buffer.from(item.b64_json, 'base64'));
         await audit(this.rootPath, 'write', `generate_image → ${rel}`, `model ${model}`);
-        this.cb.onActivity({ id: actId, kind: 'generate', detail: `Generated image → ${rel}`, status: 'done' });
+        this.trackActivity({ id: actId, kind: 'generate', detail: `Generated image → ${rel}`, status: 'done' });
         this.pendingImages.push({ path: abs, name: path.basename(rel) });
         return `Image generated and saved to ${rel} (model: ${model}).`;
       } catch (err) {
-        this.cb.onActivity({ id: actId, kind: 'generate', detail: 'Image generation failed', status: 'error' });
+        this.trackActivity({ id: actId, kind: 'generate', detail: 'Image generation failed', status: 'error' });
         return `ERROR: image generation request failed — ${String(err)}`;
       }
     }
@@ -936,7 +951,7 @@ export class AgentSession {
       const abs = path.resolve(this.rootPath, rel);
       const file = await readFileBinaryDetailed(this.rootPath, abs);
       const missing = !file.ok && file.reason === 'missing';
-      this.cb.onActivity({
+      this.trackActivity({
         id: nextId('act'),
         kind: 'analyze',
         detail: missing ? `${rel} — not found` : `Analyzing ${rel}`,
@@ -974,19 +989,19 @@ export class AgentSession {
         });
         if (!resp.ok) {
           const text = await resp.text();
-          this.cb.onActivity({ id: actId, kind: 'analyze', detail: `Analysis of ${rel} failed`, status: 'error' });
+          this.trackActivity({ id: actId, kind: 'analyze', detail: `Analysis of ${rel} failed`, status: 'error' });
           return `ERROR: OpenRouter vision request failed (${resp.status}): ${text.slice(0, 500)}`;
         }
         const data = await resp.json();
         const text = data.choices?.[0]?.message?.content;
         if (!text) {
-          this.cb.onActivity({ id: actId, kind: 'analyze', detail: `Analysis of ${rel} failed`, status: 'error' });
+          this.trackActivity({ id: actId, kind: 'analyze', detail: `Analysis of ${rel} failed`, status: 'error' });
           return `ERROR: unexpected response shape from OpenRouter vision API: ${JSON.stringify(data).slice(0, 500)}`;
         }
-        this.cb.onActivity({ id: actId, kind: 'analyze', detail: `Analyzed ${rel}`, status: 'done' });
+        this.trackActivity({ id: actId, kind: 'analyze', detail: `Analyzed ${rel}`, status: 'done' });
         return `Vision analysis of ${rel} (model: ${model}):\n${untrusted(text)}`;
       } catch (err) {
-        this.cb.onActivity({ id: actId, kind: 'analyze', detail: `Analysis of ${rel} failed`, status: 'error' });
+        this.trackActivity({ id: actId, kind: 'analyze', detail: `Analysis of ${rel} failed`, status: 'error' });
         return `ERROR: vision request failed — ${String(err)}`;
       }
     }
@@ -1002,7 +1017,7 @@ export class AgentSession {
         : process.env.OPENROUTER_MUSIC_MODEL || DEFAULT_MUSIC_MODEL;
 
       const actId = nextId('act');
-      this.cb.onActivity({
+      this.trackActivity({
         id: actId,
         kind: 'generate',
         detail: `Generating music: "${prompt.slice(0, 60)}"`,
@@ -1019,10 +1034,10 @@ export class AgentSession {
         const abs = path.resolve(this.rootPath, rel);
         await writeBinaryFile(this.rootPath, abs, result.audio);
         await audit(this.rootPath, 'write', `generate_music → ${rel}`, `model ${model}`);
-        this.cb.onActivity({ id: actId, kind: 'generate', detail: `Generated music → ${rel}`, status: 'done' });
+        this.trackActivity({ id: actId, kind: 'generate', detail: `Generated music → ${rel}`, status: 'done' });
         return `Music generated and saved to ${rel} (model: ${model}).`;
       } catch (err) {
-        this.cb.onActivity({ id: actId, kind: 'generate', detail: 'Music generation failed', status: 'error' });
+        this.trackActivity({ id: actId, kind: 'generate', detail: 'Music generation failed', status: 'error' });
         return `ERROR: music generation request failed — ${err instanceof Error ? err.message : String(err)}`;
       }
     }
@@ -1032,22 +1047,22 @@ export class AgentSession {
 
       if (this.cb.getAutonomy() === 'manual') {
         const waitId = nextId('act');
-        this.cb.onActivity({ id: waitId, kind: 'run', detail: `Waiting for approval: ${command}`, status: 'active' });
+        this.trackActivity({ id: waitId, kind: 'run', detail: `Waiting for approval: ${command}`, status: 'active' });
         const approved = await this.cb.requestCommandApproval(command);
         if (this.aborted) return 'Stopped by the Operator before this command ran.';
         if (!approved) {
-          this.cb.onActivity({ id: waitId, kind: 'run', detail: `Denied: ${command}`, status: 'error' });
+          this.trackActivity({ id: waitId, kind: 'run', detail: `Denied: ${command}`, status: 'error' });
           return `The Operator did not approve this command. Do not run it and do not try an equivalent workaround — ask what they'd like instead.`;
         }
-        this.cb.onActivity({ id: waitId, kind: 'run', detail: `Approved: ${command}`, status: 'done' });
+        this.trackActivity({ id: waitId, kind: 'run', detail: `Approved: ${command}`, status: 'done' });
       }
 
       // One activity row that transitions in place from running to finished.
       const actId = nextId('act');
-      this.cb.onActivity({ id: actId, kind: 'run', detail: `Ran ${command}`, status: 'active' });
+      this.trackActivity({ id: actId, kind: 'run', detail: `Ran ${command}`, status: 'active' });
       const requestId = nextId('term');
       const { exitCode, output } = await this.runShell(requestId, command);
-      this.cb.onActivity({
+      this.trackActivity({
         id: actId,
         kind: 'run',
         detail: `Ran ${command}`,
@@ -1210,7 +1225,7 @@ export class AgentSession {
     this.messages = [...this.messages.slice(0, firstNonSystem), summaryMessage, ...tail];
     this.cb.onCompaction();
 
-    this.cb.onActivity({
+    this.trackActivity({
       id: nextId('act'),
       kind: 'compact',
       detail: `Compacted ${older.length} earlier messages to free up context (was ${Math.round(
@@ -1220,15 +1235,71 @@ export class AgentSession {
     });
   }
 
+  /**
+   * Forwards an activity event to the renderer for live display AND tallies
+   * it into this run's running totals, so flushMessage can later collapse
+   * everything into one summary row. 'active' rows (still in flight) and
+   * 'thinking' rows (timed separately via thinkTotalMs) are forwarded but
+   * not tallied.
+   */
+  private trackActivity(evt: ActivityEvent) {
+    this.cb.onActivity(evt);
+    if (evt.status === 'active' || evt.kind === 'thinking') return;
+    this.activityTally[evt.kind] = (this.activityTally[evt.kind] ?? 0) + 1;
+    // A manual stop reports status 'error' so it renders distinctly in the
+    // live trail, but it isn't a failure — don't let it read as one in the summary.
+    if (evt.status === 'error' && evt.kind !== 'stopped') this.activityErrors++;
+    if (evt.added !== undefined) this.activityAdded += evt.added;
+    if (evt.removed !== undefined) this.activityRemoved += evt.removed;
+  }
+
+  private static pluralize(n: number, singular: string, plural = `${singular}s`): string {
+    return `${n} ${n === 1 ? singular : plural}`;
+  }
+
+  /** One sentence describing everything this run did, or null if there's nothing worth summarizing. */
+  private buildActivitySummary(): string | null {
+    const t = this.activityTally;
+    const parts: string[] = [];
+    if (t.list) parts.push(`listed ${AgentSession.pluralize(t.list, 'directory', 'directories')}`);
+    if (t.read) parts.push(`read ${AgentSession.pluralize(t.read, 'file')}`);
+    if (t.propose) {
+      const stats = this.activityAdded || this.activityRemoved ? ` (+${this.activityAdded}/-${this.activityRemoved})` : '';
+      parts.push(`proposed ${AgentSession.pluralize(t.propose, 'edit')}${stats}`);
+    }
+    if (t.run) parts.push(`ran ${AgentSession.pluralize(t.run, 'command')}`);
+    if (t.search) parts.push(`ran ${AgentSession.pluralize(t.search, 'search', 'searches')}`);
+    if (t.generate) parts.push(`generated ${AgentSession.pluralize(t.generate, 'item')}`);
+    if (t.analyze) parts.push(`analyzed ${AgentSession.pluralize(t.analyze, 'image')}`);
+    if (t.compact) parts.push(`compacted context ${AgentSession.pluralize(t.compact, 'time')}`);
+    if (this.activityErrors) parts.push(`${this.activityErrors} failed`);
+    if (t.stopped) parts.push('stopped by you');
+
+    const thinkSecs = Math.round(this.thinkTotalMs / 1000);
+    const thinkPart = thinkSecs >= 1 ? `thought for ${thinkSecs}s total` : null;
+
+    if (!parts.length) return thinkPart;
+    return thinkPart ? `${parts.join(', ')} — ${thinkPart}` : parts.join(', ');
+  }
+
   /** Flushes any images produced this turn (generate_image, bubbled-up subagent output) onto the visible reply. */
   private flushMessage(text: string) {
     const images = this.pendingImages.length ? this.pendingImages : undefined;
     this.pendingImages = [];
+    const summary = this.buildActivitySummary();
+    if (summary) {
+      this.cb.onActivity({ id: nextId('act'), kind: 'done', detail: summary, status: 'done', summary: true });
+    }
     this.cb.onMessage(text, images);
   }
 
   async send(userText: string, images?: ChatImage[]) {
     this.aborted = false;
+    this.activityTally = {};
+    this.activityErrors = 0;
+    this.activityAdded = 0;
+    this.activityRemoved = 0;
+    this.thinkTotalMs = 0;
     this.cb.onStatus(true);
     await this.engageRules(userText);
     if (images?.length) {
@@ -1279,9 +1350,9 @@ export class AgentSession {
       // it's visible the run is alive, not stuck, even with no tool call yet.
       const thinkId = nextId('act');
       const turnStart = Date.now();
-      this.cb.onActivity({ id: thinkId, kind: 'thinking', detail: 'Thinking…', status: 'active' });
+      this.trackActivity({ id: thinkId, kind: 'thinking', detail: 'Thinking…', status: 'active' });
       const tick = setInterval(() => {
-        this.cb.onActivity({
+        this.trackActivity({
           id: thinkId,
           kind: 'thinking',
           detail: `Thinking… ${Math.round((Date.now() - turnStart) / 1000)}s`,
@@ -1311,10 +1382,10 @@ export class AgentSession {
       } catch (err) {
         clearInterval(tick);
         if (this.aborted) {
-          this.cb.onActivity({ id: thinkId, kind: 'thinking', detail: 'Stopped', status: 'error' });
+          this.trackActivity({ id: thinkId, kind: 'thinking', detail: 'Stopped', status: 'error' });
           return;
         }
-        this.cb.onActivity({ id: thinkId, kind: 'thinking', detail: 'Thinking… failed', status: 'error' });
+        this.trackActivity({ id: thinkId, kind: 'thinking', detail: 'Thinking… failed', status: 'error' });
         this.flushMessage(`Request to OpenRouter failed: ${String(err)}`);
         this.cb.onStatus(false);
         return;
@@ -1323,21 +1394,22 @@ export class AgentSession {
       clearInterval(tick);
 
       if (this.aborted) {
-        this.cb.onActivity({ id: thinkId, kind: 'thinking', detail: 'Stopped', status: 'error' });
+        this.trackActivity({ id: thinkId, kind: 'thinking', detail: 'Stopped', status: 'error' });
         return;
       }
 
       if (!resp.ok) {
         const text = await resp.text();
-        this.cb.onActivity({ id: thinkId, kind: 'thinking', detail: 'Thinking… failed', status: 'error' });
+        this.trackActivity({ id: thinkId, kind: 'thinking', detail: 'Thinking… failed', status: 'error' });
         this.flushMessage(`OpenRouter error (${resp.status}): ${text.slice(0, 500)}`);
         this.cb.onStatus(false);
         return;
       }
 
       const data = await resp.json();
+      this.thinkTotalMs += Date.now() - turnStart;
       const thinkSecs = Math.round((Date.now() - turnStart) / 1000);
-      this.cb.onActivity({
+      this.trackActivity({
         id: thinkId,
         kind: 'thinking',
         detail: thinkSecs >= 1 ? `Thought for ${thinkSecs}s` : 'Thought',

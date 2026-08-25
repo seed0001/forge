@@ -143,6 +143,14 @@ export interface ActivityEvent {
   /** Optional diff stats, shown inline on edit rows. */
   added?: number;
   removed?: number;
+  /**
+   * Marks a run's one consolidated closing row (kind 'done', built by
+   * flushMessage from the whole run's tally). The renderer replaces the
+   * entire in-progress trail with just this event rather than appending it,
+   * so a task with dozens of tool calls collapses to one line instead of
+   * leaving every individual row stacked in the transcript.
+   */
+  summary?: true;
 }
 
 export interface Hunk {

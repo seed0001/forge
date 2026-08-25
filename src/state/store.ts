@@ -261,6 +261,10 @@ export const useForge = create<ForgeState>((set, get) => {
 
       forge.agent.onActivity((workspaceId, evt) => {
         patch(workspaceId, (v) => {
+          // A summary event is the whole run's trail collapsed into one row —
+          // replace everything rather than append, so a task with dozens of
+          // tool calls ends as one line instead of a long stacked list.
+          if (evt.summary) return { ...v, activity: [evt] };
           const idx = v.activity.findIndex((a) => a.id === evt.id);
           const activity = idx >= 0 ? v.activity.map((a, i) => (i === idx ? evt : a)) : [...v.activity, evt];
           return { ...v, activity };

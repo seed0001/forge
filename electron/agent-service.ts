@@ -615,6 +615,17 @@ export class AgentSession {
     this.messages = [...preamble, ...(history as unknown as Message[])];
   }
 
+  /**
+   * Folds a one-off page-clip summary (see workspace.ts summarizePage) into
+   * the real conversation, as a user/assistant turn — without this, the clip
+   * only ever lands in the UI chat log, and the agent has no memory of ever
+   * having reviewed the page on the next real turn.
+   */
+  recordClip(userText: string, assistantText: string) {
+    this.messages.push({ role: 'user', content: userText });
+    this.messages.push({ role: 'assistant', content: assistantText });
+  }
+
   /** Reads an attached image off disk and returns it as a data URL, cached by path+mtime. */
   private async dataUrlFor(imgPath: string): Promise<string | null> {
     try {

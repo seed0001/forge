@@ -330,6 +330,13 @@ export class Workspace {
         : markdown;
     const body = `📄 **${title}**\n${url}\n\n${summary}\n\n---\n\n**Full clipped content:**\n\n${clipped}`;
 
+    // Mirror this into the agent's actual conversation, not just the chat
+    // log — otherwise the model has no memory of the review on the next
+    // real turn (session.chat is display-only; session.messages/this.messages
+    // is what's actually sent to the provider).
+    const clipNote = `[Operator clipped this page in the browser]\nTitle: ${title}\nURL: ${url}`;
+    this.ensureAgent(session.id).recordClip(clipNote, body);
+
     const msg: ChatMessage = { role: 'assistant', text: body };
     session.chat.push(msg);
     session.updatedAt = Date.now();

@@ -28,6 +28,8 @@ function normalizeUrlOrSearch(input: string): string {
 export class BrowserViewManager {
   private view: WebContentsView | null = null;
   private win: BrowserWindow | null = null;
+  /** Whether `view` is CURRENTLY a child of `win`'s contentView — tracked explicitly rather than inferred from `win`, because `win` alone can't tell "attached to this same window, but currently detached" apart from "never attached to it yet". Getting that wrong is exactly what silently broke reattaching after switching tabs. */
+  private attached = false;
   private currentWorkspaceId: string | null = null;
   private lastState = new Map<string, BrowserNavState>();
   private emit: BrowserViewEmit;
@@ -72,9 +74,13 @@ export class BrowserViewManager {
   attach(win: BrowserWindow, workspaceId: string, bounds: { x: number; y: number; width: number; height: number }) {
     const view = this.ensureView();
     if (this.win !== win) {
-      this.win?.contentView.removeChildView(view);
-      win.contentView.addChildView(view);
+      if (this.attached && this.win) this.win.contentView.removeChildView(view);
       this.win = win;
+      this.attached = false;
+    }
+    if (!this.attached) {
+      win.contentView.addChildView(view);
+      this.attached = true;
     }
     if (this.currentWorkspaceId !== workspaceId) {
       this.currentWorkspaceId = workspaceId;
@@ -86,7 +92,10 @@ export class BrowserViewManager {
 
   /** Hides the view without destroying it — reused for whichever workspace attaches next. */
   detach() {
-    if (this.view && this.win) this.win.contentView.removeChildView(this.view);
+    if (this.view && this.win && this.attached) {
+      this.win.contentView.removeChildView(this.view);
+      this.attached = false;
+    }
     this.currentWorkspaceId = null;
   }
 

@@ -5,7 +5,7 @@ import { fileURLToPath } from 'node:url';
 
 import { loadEnv, setEnvValue } from './env';
 import { transcribe } from './transcribe';
-import { IPC, SETTINGS_KEYS } from './ipc-channels';
+import { IPC, SETTINGS_KEYS, MAX_TOOL_CALLS_LIMIT } from './ipc-channels';
 import type { WorkspaceHydration, ChatImage, ProviderSettings } from './ipc-channels';
 import * as fsService from './fs-service';
 import { WorkspaceManager } from './workspace-manager';
@@ -351,7 +351,11 @@ app.whenReady().then(() => {
   ipcMain.handle(IPC.settingsSet, async (_e, values: Partial<ProviderSettings>) => {
     for (const key of SETTINGS_KEYS) {
       if (!(key in values)) continue;
-      const value = (values[key] ?? '').trim();
+      let value = (values[key] ?? '').trim();
+      if (key === 'MAX_TOOL_CALLS' && value) {
+        const n = Number.parseInt(value, 10);
+        value = Number.isFinite(n) ? String(Math.min(Math.max(n, 1), MAX_TOOL_CALLS_LIMIT)) : '';
+      }
       process.env[key] = value;
       setEnvValue(envFile, key, value);
     }

@@ -1,6 +1,10 @@
 import { useEffect, useState } from 'react';
 import { useForge } from '../state/store';
-import type { ProviderSettings } from '../../electron/ipc-channels';
+import {
+  MAX_TOOL_CALLS_DEFAULT,
+  MAX_TOOL_CALLS_LIMIT,
+  type ProviderSettings,
+} from '../../electron/ipc-channels';
 import { IconCheck, IconEye, IconEyeOff, IconGear, IconX } from './icons';
 
 interface FieldDef {
@@ -8,14 +12,15 @@ interface FieldDef {
   label: string;
   placeholder: string;
   secret: boolean;
+  numeric?: { min: number; max: number };
 }
 
 interface ProviderDef {
   id: string;
   name: string;
   blurb: string;
-  linkLabel: string;
-  linkHref: string;
+  linkLabel?: string;
+  linkHref?: string;
   fields: FieldDef[];
 }
 
@@ -53,6 +58,20 @@ const PROVIDERS: ProviderDef[] = [
       { key: 'TRANSCRIBE_MODEL', label: 'Model', placeholder: 'whisper-large-v3', secret: false },
     ],
   },
+  {
+    id: 'agent',
+    name: 'Agent behavior',
+    blurb: `How many tool calls (file reads, edits, commands, searches...) the agent may make in a single task before it stops itself. Default is ${MAX_TOOL_CALLS_DEFAULT}, max ${MAX_TOOL_CALLS_LIMIT}.`,
+    fields: [
+      {
+        key: 'MAX_TOOL_CALLS',
+        label: 'Max tool calls per task',
+        placeholder: `${MAX_TOOL_CALLS_DEFAULT} (default)`,
+        secret: false,
+        numeric: { min: 1, max: MAX_TOOL_CALLS_LIMIT },
+      },
+    ],
+  },
 ];
 
 const EMPTY: ProviderSettings = {
@@ -61,6 +80,7 @@ const EMPTY: ProviderSettings = {
   TRANSCRIBE_API_KEY: '',
   TRANSCRIBE_BASE_URL: '',
   TRANSCRIBE_MODEL: '',
+  MAX_TOOL_CALLS: '',
 };
 
 export function SettingsOverlay() {
@@ -143,9 +163,11 @@ export function SettingsOverlay() {
                   />
                   <span className="settings-section-name">{provider.name}</span>
                 </div>
-                <a className="settings-link" href={provider.linkHref} target="_blank" rel="noreferrer">
-                  {provider.linkLabel}
-                </a>
+                {provider.linkHref && (
+                  <a className="settings-link" href={provider.linkHref} target="_blank" rel="noreferrer">
+                    {provider.linkLabel}
+                  </a>
+                )}
               </div>
               <div className="settings-section-blurb">{provider.blurb}</div>
 
@@ -157,12 +179,24 @@ export function SettingsOverlay() {
                     <div className="settings-input-wrap">
                       <input
                         className="settings-input mono"
-                        type={field.secret && !shown ? 'password' : 'text'}
+                        type={field.numeric ? 'number' : field.secret && !shown ? 'password' : 'text'}
+                        min={field.numeric?.min}
+                        max={field.numeric?.max}
+                        step={field.numeric ? 1 : undefined}
                         value={draft[field.key]}
                         placeholder={field.placeholder}
                         spellCheck={false}
                         autoComplete="off"
-                        onChange={(e) => setDraft((d) => ({ ...d, [field.key]: e.target.value }))}
+                        onChange={(e) => {
+                          let value = e.target.value;
+                          if (field.numeric && value) {
+                            const n = Math.round(Number(value));
+                            if (Number.isFinite(n)) {
+                              value = String(Math.min(Math.max(n, field.numeric.min), field.numeric.max));
+                            }
+                          }
+                          setDraft((d) => ({ ...d, [field.key]: value }));
+                        }}
                       />
                       {field.secret && (
                         <button

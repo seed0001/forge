@@ -213,6 +213,7 @@ export interface ProviderSettings {
   TRANSCRIBE_API_KEY: string;
   TRANSCRIBE_BASE_URL: string;
   TRANSCRIBE_MODEL: string;
+  MAX_TOOL_CALLS: string;
 }
 
 export const SETTINGS_KEYS = [
@@ -221,7 +222,12 @@ export const SETTINGS_KEYS = [
   'TRANSCRIBE_API_KEY',
   'TRANSCRIBE_BASE_URL',
   'TRANSCRIBE_MODEL',
+  'MAX_TOOL_CALLS',
 ] as const satisfies readonly (keyof ProviderSettings)[];
+
+/** Bounds enforced wherever MAX_TOOL_CALLS is read or written. */
+export const MAX_TOOL_CALLS_DEFAULT = 24;
+export const MAX_TOOL_CALLS_LIMIT = 1000;
 
 /** Everything the renderer needs to display a workspace it has switched to. */
 export interface WorkspaceHydration {

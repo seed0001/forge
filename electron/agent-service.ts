@@ -8,6 +8,7 @@ import { nextId } from './diff-store';
 import { extFromMediaType, IMAGE_MIME_BY_EXT } from './media-types';
 import { listOpenRouterModels } from './models-service';
 import type { ActivityEvent, TermDataEvent, PendingDiff, FileNode, Autonomy, ChatImage } from './ipc-channels';
+import { MAX_TOOL_CALLS_DEFAULT, MAX_TOOL_CALLS_LIMIT } from './ipc-channels';
 
 type Role = 'system' | 'user' | 'assistant' | 'tool';
 
@@ -1262,8 +1263,13 @@ export class AgentSession {
     }
 
     // Investigating before answering costs tool calls; too low a ceiling is
-    // itself a push toward guessing.
-    const MAX_TURNS = 24;
+    // itself a push toward guessing. Operator-configurable via Settings
+    // (MAX_TOOL_CALLS in .env), clamped to MAX_TOOL_CALLS_LIMIT.
+    const configuredMaxTurns = Number.parseInt(process.env.MAX_TOOL_CALLS || '', 10);
+    const MAX_TURNS =
+      Number.isFinite(configuredMaxTurns) && configuredMaxTurns > 0
+        ? Math.min(configuredMaxTurns, MAX_TOOL_CALLS_LIMIT)
+        : MAX_TOOL_CALLS_DEFAULT;
     for (let turn = 0; turn < MAX_TURNS; turn++) {
       if (this.aborted) return;
       this.controller = new AbortController();

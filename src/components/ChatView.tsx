@@ -69,6 +69,11 @@ export function ChatView() {
   const roadmapNeedsReview = (view?.roadmap ?? []).filter(
     (it) => it.status === 'pending' || it.status === 'needs_revision'
   ).length;
+  // One line, not a stacking transcript: whatever the agent last reported —
+  // an in-progress step, or (per ActivityEvent.summary) the run's single
+  // consolidated closing line — replaces whatever was shown before it.
+  const activityList = view?.activity ?? [];
+  const currentActivity = activityList.length > 0 ? activityList[activityList.length - 1] : null;
 
   // Re-tick while a task is live so the field deepens as the work goes on.
   const [now, setNow] = useState(() => Date.now());
@@ -158,25 +163,23 @@ export function ChatView() {
             )
           )}
 
-          {view.activity.length > 0 && (
+          {currentActivity && (
             <div className="turn agent">
               <div className="trail">
-                {view.activity.map((a) => (
-                  <div className={`trail-row ${a.status}`} key={a.id}>
-                    {a.status === 'active' ? (
-                      <IconDot className="icon-xs" />
-                    ) : a.status === 'error' ? (
-                      <IconXCircle className="icon-xs" />
-                    ) : a.status === 'skipped' ? (
-                      <IconMinusCircle className="icon-xs" />
-                    ) : (
-                      <IconCheckCircle className="icon-xs" />
-                    )}
-                    <span className="trail-detail">{a.detail}</span>
-                    {a.added !== undefined && <span className="stat-add">+{a.added}</span>}
-                    {a.removed !== undefined && <span className="stat-del">−{a.removed}</span>}
-                  </div>
-                ))}
+                <div className={`trail-row ${currentActivity.status}`} key={currentActivity.id}>
+                  {currentActivity.status === 'active' ? (
+                    <IconDot className="icon-xs" />
+                  ) : currentActivity.status === 'error' ? (
+                    <IconXCircle className="icon-xs" />
+                  ) : currentActivity.status === 'skipped' ? (
+                    <IconMinusCircle className="icon-xs" />
+                  ) : (
+                    <IconCheckCircle className="icon-xs" />
+                  )}
+                  <span className="trail-detail">{currentActivity.detail}</span>
+                  {currentActivity.added !== undefined && <span className="stat-add">+{currentActivity.added}</span>}
+                  {currentActivity.removed !== undefined && <span className="stat-del">−{currentActivity.removed}</span>}
+                </div>
               </div>
             </div>
           )}

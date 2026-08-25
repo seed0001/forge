@@ -1,7 +1,7 @@
 import type { SessionSummary } from '../../electron/ipc-channels';
 import { useForge, useActiveWorkspace } from '../state/store';
 import { relativeTime, formatDuration, formatCost } from '../lib/time';
-import { IconPlus, IconX } from './icons';
+import { IconPlus, IconX, IconDot } from './icons';
 
 function formatTokens(n: number): string {
   return n >= 1000 ? `${Math.round(n / 100) / 10}k` : String(n);
@@ -45,6 +45,7 @@ export function SessionList() {
   }
 
   const activeId = view.summary.activeSessionId;
+  const runningIds = view.summary.runningSessionIds;
 
   return (
     <>
@@ -73,6 +74,11 @@ export function SessionList() {
                   onClick={() => selectSession(s.id)}
                 >
                   <div className="sesstop">
+                    {runningIds.includes(s.id) && (
+                      <span title="Working">
+                        <IconDot className="icon-xs sess-live" style={{ color: 'var(--amber)' }} />
+                      </span>
+                    )}
                     <div className="sesstitle">{s.title}</div>
                     <span className="sesstime">{relativeTime(s.updatedAt)}</span>
                     <button

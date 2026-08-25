@@ -62,8 +62,8 @@ export interface ForgeApi {
   agent: {
     send: (id: string, text: string, images?: ChatImage[]) => Promise<boolean>;
     stop: (id: string) => Promise<boolean>;
-    onActivity: (cb: (workspaceId: string, evt: ActivityEvent) => void) => Unsubscribe;
-    onMessage: (cb: (workspaceId: string, msg: ChatMessage) => void) => Unsubscribe;
+    onActivity: (cb: (workspaceId: string, sessionId: string, evt: ActivityEvent) => void) => Unsubscribe;
+    onMessage: (cb: (workspaceId: string, sessionId: string, msg: ChatMessage) => void) => Unsubscribe;
     decideApproval: (id: string, requestId: string, approved: boolean) => Promise<boolean>;
     onApprovalRequest: (cb: (workspaceId: string, req: CommandApproval) => void) => Unsubscribe;
   };

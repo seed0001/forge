@@ -25,8 +25,8 @@ import type {
 
 export interface WorkspaceEmit {
   terminal: (workspaceId: string, evt: TermDataEvent) => void;
-  activity: (workspaceId: string, evt: ActivityEvent) => void;
-  message: (workspaceId: string, msg: ChatMessage) => void;
+  activity: (workspaceId: string, sessionId: string, evt: ActivityEvent) => void;
+  message: (workspaceId: string, sessionId: string, msg: ChatMessage) => void;
   status: (workspaceId: string) => void;
   diffProposed: (workspaceId: string, diff: PendingDiff) => void;
   /** A diff was applied (or otherwise settled) outside the normal decide-in-UI path. */
@@ -34,58 +34,67 @@ export interface WorkspaceEmit {
   /** The session list changed — new session, rename, or a saved update. */
   sessions: (workspaceId: string) => void;
   /** A run_command call is waiting on the Operator at Manual autonomy. */
-  commandApproval: (workspaceId: string, requestId: string, command: string) => void;
-  /** The active session's whole roadmap, sent fresh on every change (propose/decide/edit/push-back/status). */
+  commandApproval: (workspaceId: string, sessionId: string, requestId: string, command: string) => void;
+  /** A session's whole roadmap, sent fresh on every change (propose/decide/edit/push-back/status). */
   roadmapUpdated: (workspaceId: string, sessionId: string, items: RoadmapItem[]) => void;
 }
 
 /**
+ * Everything about "is this session's agent working right now" — one copy
+ * PER SESSION, so switching which session is active can never orphan
+ * another session's still-running turn. Each session's AgentCallbacks close
+ * over a FIXED session id (never "whichever is active"), which is the actual
+ * fix: before this, every session in a workspace shared one AgentSession/
+ * running-flag/pendingApprovals/roadmap-turn-state, so a running turn's
+ * callbacks kept writing into whatever session the Operator switched to.
+ */
+interface SessionRuntime {
+  agent: AgentSession | null;
+  running: boolean;
+  runStartedAt: number | null;
+  pendingApprovals: Map<string, (approved: boolean) => void>;
+  /** This session's OWN shell for agent-run commands — never shared with another session's concurrent command. */
+  terminal: TerminalSession;
+  activeRoadmapItemId: string | null;
+  roadmapTurnSeq: number;
+  pendingRoadmapRestart: RoadmapItem | null;
+}
+
+/**
  * A workspace is a self-contained unit of work: its own folder, terminal,
- * agent conversation and review queue.
+ * and review queue, shared across every session in it (they're all editing
+ * the same project on disk) — but each session gets its own independent
+ * agent conversation and running state (see SessionRuntime).
  *
  * Everything here lives in the main process and is driven by the agent loop, so
- * a task keeps running after the user switches to a different workspace tab or
- * the renderer stops listening. The renderer is a view onto this state, never
- * its owner.
+ * a task keeps running after the user switches to a different session, workspace
+ * tab, or the renderer stops listening. The renderer is a view onto this state,
+ * never its owner.
  */
 export class Workspace {
   readonly id: string;
   name: string;
   rootPath: string | null;
 
+  /** For the Operator's own typed commands in the Terminal tab — distinct from any session's agent-run commands. */
   readonly terminal: TerminalSession;
   readonly diffs: DiffStore;
-  private agent: AgentSession | null = null;
 
-  /** Terminal is workspace-wide; chat and activity belong to the active session. */
+  /** One merged log for the whole workspace — the Terminal tab shows everyone's commands (yours and every session's agent), tagged by source. */
   terminalLines: (TermDataEvent & { id: string })[] = [];
 
   private sessions: Session[] = [];
   private activeSessionId: string | null = null;
   private sessionSeq = 0;
+  private runtimes = new Map<string, SessionRuntime>();
 
-  agentRunning = false;
   /** Set when the agent finishes while the user is looking at another workspace. */
   unseenCompletion = false;
-  /** How much this workspace's agent may do before it must stop and ask. Defaults to today's behavior. */
+  /** How much this workspace's agents may do before they must stop and ask — shared across every session, since they all act on the same project on disk. */
   autonomy: Autonomy = 'balanced';
 
   private emit: WorkspaceEmit;
   private lineSeq = 0;
-  private pendingApprovals = new Map<string, (approved: boolean) => void>();
-  /** When the current agent run began, so its wall-clock duration can be folded into the session's total on completion. */
-  private runStartedAt: number | null = null;
-  /** Id of the roadmap item currently being worked on, if any — at most one at a time. */
-  private activeRoadmapItemId: string | null = null;
-  /**
-   * Bumped every time a roadmap-item turn (re)starts. A push-back bumps this
-   * BEFORE aborting the old turn, so the old turn's now-stale `.then()`
-   * continuation (which can only run later, since abort() rejects the fetch
-   * asynchronously) recognizes it's been superseded and does nothing.
-   */
-  private roadmapTurnSeq = 0;
-  /** Set by pushBackRoadmapItem while waiting for the old turn to actually finish unwinding before restarting it. */
-  private pendingRoadmapRestart: RoadmapItem | null = null;
 
   constructor(id: string, name: string, rootPath: string | null, emit: WorkspaceEmit) {
     this.id = id;
@@ -96,13 +105,43 @@ export class Workspace {
     this.diffs = new DiffStore();
   }
 
+  /** True if ANY session in this workspace has an agent actively working. */
+  get agentRunning(): boolean {
+    for (const rt of this.runtimes.values()) if (rt.running) return true;
+    return false;
+  }
+
+  /** Ids of every session currently running — lets the renderer show exactly which session(s) are live, not just "something in this workspace." */
+  get runningSessionIds(): string[] {
+    return [...this.runtimes.entries()].filter(([, rt]) => rt.running).map(([sid]) => sid);
+  }
+
+  private runtime(sessionId: string): SessionRuntime {
+    let rt = this.runtimes.get(sessionId);
+    if (!rt) {
+      rt = {
+        agent: null,
+        running: false,
+        runStartedAt: null,
+        pendingApprovals: new Map(),
+        terminal: new TerminalSession(this.rootPath ?? process.cwd()),
+        activeRoadmapItemId: null,
+        roadmapTurnSeq: 0,
+        pendingRoadmapRestart: null,
+      };
+      this.runtimes.set(sessionId, rt);
+    }
+    return rt;
+  }
+
   async setRoot(rootPath: string) {
     this.rootPath = rootPath;
     this.name = path.basename(rootPath);
     this.terminal.setCwd(rootPath);
-    this.agent?.setRoot(rootPath);
-    // Sessions are keyed to the folder, so opening a new one swaps the history.
-    this.agent = null;
+    // Sessions are keyed to the folder, so opening a new one swaps the history
+    // entirely — stop whatever every old session's agent was doing first.
+    for (const rt of this.runtimes.values()) rt.agent?.stop();
+    this.runtimes.clear();
     this.sessions = await loadSessions(rootPath);
     this.activeSessionId = this.sessions[0]?.id ?? null;
     if (!this.activeSessionId) this.newSession();
@@ -130,16 +169,11 @@ export class Workspace {
   }
 
   /**
-   * Switching sessions rebuilds `this.agent` from scratch (see selectSession/
-   * newSession below) — doing that while a turn is still in flight would
-   * orphan the running AgentSession's callbacks: they close over
-   * `this.activeSession`, a live getter, so they'd keep firing and write
-   * into whatever session is now active instead of the one they belong to.
-   * Background roadmap execution makes this a routine scenario, not a rare
-   * one, so every session mutator refuses while `agentRunning` is true.
+   * Each session has its own isolated SessionRuntime/AgentSession — nothing
+   * is torn down or rebuilt when you switch which one is active, so this is
+   * always safe, even while other sessions (or this one) are mid-task.
    */
-  newSession(): SessionSummary | null {
-    if (this.agentRunning) return null;
+  newSession(): SessionSummary {
     this.sessionSeq += 1;
     const now = Date.now();
     const session: Session = {
@@ -155,30 +189,30 @@ export class Workspace {
     };
     this.sessions.unshift(session);
     this.activeSessionId = session.id;
-    this.agent = null; // fresh conversation
     void this.persist();
     return summarize(session);
   }
 
   selectSession(sessionId: string): boolean {
-    if (this.agentRunning) return false;
     const session = this.sessions.find((s) => s.id === sessionId);
     if (!session) return false;
     this.activeSessionId = sessionId;
-    // Rebuild the agent against this session's stored conversation.
-    this.agent = null;
-    this.ensureAgent().restoreHistory(session.messages);
+    // That session's own agent (if it has one yet) is untouched — still
+    // running, still idle, whatever it already was. ensureAgent() builds one
+    // lazily on first real use if it doesn't exist yet.
     return true;
   }
 
   deleteSession(sessionId: string) {
-    if (this.agentRunning && sessionId === this.activeSessionId) return;
+    const rt = this.runtimes.get(sessionId);
+    rt?.agent?.stop();
+    for (const [, resolve] of rt?.pendingApprovals ?? []) resolve(false);
+    this.runtimes.delete(sessionId);
+
     this.sessions = this.sessions.filter((s) => s.id !== sessionId);
     if (this.activeSessionId === sessionId) {
       this.activeSessionId = this.sessions[0]?.id ?? null;
-      this.agent = null;
       if (!this.activeSessionId) this.newSession();
-      else this.selectSession(this.activeSessionId);
     }
     void this.persist();
   }
@@ -187,14 +221,17 @@ export class Workspace {
     this.sessions = await loadSessions(this.rootPath);
     this.activeSessionId = this.sessions[0]?.id ?? null;
     if (!this.activeSessionId) this.newSession();
-    else this.selectSession(this.activeSessionId);
   }
 
+  /** Exports every session that currently has a live agent, not just the active one — a background session's history must persist too. */
   private async persist() {
-    const session = this.activeSession;
-    if (session && this.agent) {
-      session.messages = this.agent.exportHistory();
-      session.updatedAt = Date.now();
+    for (const [sessionId, rt] of this.runtimes) {
+      if (!rt.agent) continue;
+      const session = this.sessions.find((s) => s.id === sessionId);
+      if (session) {
+        session.messages = rt.agent.exportHistory();
+        session.updatedAt = Date.now();
+      }
     }
     await saveSessions(this.rootPath, this.sessions);
   }
@@ -215,6 +252,7 @@ export class Workspace {
       unseenCompletion: this.unseenCompletion,
       activeSessionId: this.activeSessionId,
       autonomy: this.autonomy,
+      runningSessionIds: this.runningSessionIds,
     };
   }
 
@@ -223,20 +261,25 @@ export class Workspace {
     this.emit.status(this.id);
   }
 
-  /** Blocks until the Operator decides, or resolves false if the run is stopped first. */
-  requestApproval(command: string): Promise<boolean> {
+  /** Blocks until the Operator decides, or resolves false if that session's run is stopped first. */
+  requestApproval(sessionId: string, command: string): Promise<boolean> {
     const requestId = nextId('appr');
-    this.emit.commandApproval(this.id, requestId, command);
+    this.emit.commandApproval(this.id, sessionId, requestId, command);
     return new Promise((resolve) => {
-      this.pendingApprovals.set(requestId, resolve);
+      this.runtime(sessionId).pendingApprovals.set(requestId, resolve);
     });
   }
 
+  /** requestId is globally unique, so no need to know which session it belongs to. */
   resolveApproval(requestId: string, approved: boolean) {
-    const resolve = this.pendingApprovals.get(requestId);
-    if (!resolve) return;
-    this.pendingApprovals.delete(requestId);
-    resolve(approved);
+    for (const rt of this.runtimes.values()) {
+      const resolve = rt.pendingApprovals.get(requestId);
+      if (resolve) {
+        rt.pendingApprovals.delete(requestId);
+        resolve(approved);
+        return;
+      }
+    }
   }
 
   /** Auto autonomy: accept every hunk immediately and write it, bypassing the review queue. */
@@ -252,14 +295,16 @@ export class Workspace {
    * propose_edit ends the agent's turn immediately ("waiting on review") so a
    * whole batch of files can be queued and reviewed together instead of one
    * at a time — but that means nothing ever tells the agent the review
-   * happened. Call this once a review batch empties out; if the agent is
-   * sitting idle because of it, this is what wakes it back up. A no-op if
-   * the agent is already running (e.g. Auto autonomy, which settles diffs
-   * mid-turn without ever leaving the loop).
+   * happened. Call this once a review batch empties out; if the active
+   * session's agent is sitting idle because of it, this is what wakes it
+   * back up. Diffs are workspace-wide (every session edits the same project
+   * on disk), so this always targets whichever session is currently active
+   * — the one the Operator was actually looking at while reviewing.
    */
   resumeAfterReview() {
-    if (this.agentRunning || !this.activeSession) return;
-    void this.ensureAgent().send(
+    const sessionId = this.activeSessionId;
+    if (!sessionId || this.runtimes.get(sessionId)?.running) return;
+    void this.ensureAgent(sessionId).send(
       "The Operator has finished reviewing your proposed edits. Some may have been accepted, " +
         'some rejected, or edited before accepting — do not assume the outcome. Check the files ' +
         'that matter with read_file, then continue the task.'
@@ -267,53 +312,64 @@ export class Workspace {
   }
 
   // ── Roadmap ──────────────────────────────────────────────────────────────
+  // Public methods below act on whichever session is currently active (the
+  // renderer only ever shows/edits the displayed session's roadmap). The
+  // private helpers take an explicit sessionId because they're also driven
+  // by a specific session's AgentCallbacks, which may not be the active one.
 
-  private findRoadmapItem(itemId: string): RoadmapItem | undefined {
-    return this.activeSession?.roadmap.find((it) => it.id === itemId);
+  private findRoadmapItem(sessionId: string, itemId: string): RoadmapItem | undefined {
+    return this.sessions.find((s) => s.id === sessionId)?.roadmap.find((it) => it.id === itemId);
   }
 
-  private emitRoadmap() {
-    if (!this.activeSession) return;
-    this.emit.roadmapUpdated(this.id, this.activeSession.id, this.activeSession.roadmap);
+  private emitRoadmap(sessionId: string) {
+    const session = this.sessions.find((s) => s.id === sessionId);
+    if (!session) return;
+    this.emit.roadmapUpdated(this.id, sessionId, session.roadmap);
   }
 
-  /** propose_roadmap replaces the active session's whole roadmap. */
-  proposeRoadmap(items: RoadmapItem[]) {
-    const session = this.activeSession;
+  /** propose_roadmap replaces that session's whole roadmap. */
+  proposeRoadmap(sessionId: string, items: RoadmapItem[]) {
+    const session = this.sessions.find((s) => s.id === sessionId);
     if (!session) return;
     session.roadmap = items;
     void this.persist();
-    this.emitRoadmap();
+    this.emitRoadmap(sessionId);
   }
 
   decideRoadmapItem(itemId: string, decision: 'approve' | 'reject') {
-    const item = this.findRoadmapItem(itemId);
+    const sessionId = this.activeSessionId;
+    if (!sessionId) return;
+    const item = this.findRoadmapItem(sessionId, itemId);
     if (!item) return;
     item.status = decision === 'approve' ? 'approved' : 'rejected';
     void this.persist();
-    this.emitRoadmap();
-    this.maybeAdvanceRoadmap();
+    this.emitRoadmap(sessionId);
+    this.maybeAdvanceRoadmap(sessionId);
   }
 
   /** Text-only edit — never touches status or interrupts a running turn. */
   editRoadmapItem(itemId: string, patch: { title?: string; summary?: string; detail?: string }) {
-    const item = this.findRoadmapItem(itemId);
+    const sessionId = this.activeSessionId;
+    if (!sessionId) return;
+    const item = this.findRoadmapItem(sessionId, itemId);
     if (!item) return;
     if (patch.title !== undefined) item.title = patch.title;
     if (patch.summary !== undefined) item.summary = patch.summary;
     if (patch.detail !== undefined) item.detail = patch.detail;
     void this.persist();
-    this.emitRoadmap();
+    this.emitRoadmap(sessionId);
   }
 
   /** Allowed manual status transitions the UI offers (revert/reopen/restore) — always back to 'pending'. */
   setRoadmapItemStatus(itemId: string, status: RoadmapItemStatus) {
-    const item = this.findRoadmapItem(itemId);
+    const sessionId = this.activeSessionId;
+    if (!sessionId) return;
+    const item = this.findRoadmapItem(sessionId, itemId);
     if (!item || item.status === 'in_progress') return; // never touch a running item this way — use pushBack
     item.status = status;
     void this.persist();
-    this.emitRoadmap();
-    if (status === 'approved') this.maybeAdvanceRoadmap();
+    this.emitRoadmap(sessionId);
+    if (status === 'approved') this.maybeAdvanceRoadmap(sessionId);
   }
 
   /**
@@ -333,66 +389,71 @@ export class Workspace {
    * while we're waiting for it to be safe.
    */
   pushBackRoadmapItem(itemId: string, newDetail: string) {
-    const item = this.findRoadmapItem(itemId);
+    const sessionId = this.activeSessionId;
+    if (!sessionId) return;
+    const item = this.findRoadmapItem(sessionId, itemId);
     if (!item) return;
     item.detail = newDetail;
     if (item.status !== 'in_progress') {
       void this.persist();
-      this.emitRoadmap();
+      this.emitRoadmap(sessionId);
       return;
     }
-    this.roadmapTurnSeq++;
-    this.pendingRoadmapRestart = item;
+    const rt = this.runtime(sessionId);
+    rt.roadmapTurnSeq++;
+    rt.pendingRoadmapRestart = item;
     item.status = 'approved'; // reflect "queued to restart", not stuck in_progress
     void this.persist();
-    this.emitRoadmap();
-    this.agent?.stop();
+    this.emitRoadmap(sessionId);
+    rt.agent?.stop();
   }
 
-  /** No-op if a turn is already active, or nothing is approved and waiting. */
-  private maybeAdvanceRoadmap() {
-    if (this.activeRoadmapItemId) return;
-    const roadmap = this.activeSession?.roadmap;
+  /** No-op if that session's turn is already active, or nothing is approved and waiting. */
+  private maybeAdvanceRoadmap(sessionId: string) {
+    const rt = this.runtime(sessionId);
+    if (rt.activeRoadmapItemId) return;
+    const roadmap = this.sessions.find((s) => s.id === sessionId)?.roadmap;
     if (!roadmap?.length) return;
     const next = roadmap.filter((it) => it.status === 'approved').sort((a, b) => a.order - b.order)[0];
-    if (next) this.startRoadmapTurn(next);
+    if (next) this.startRoadmapTurn(sessionId, next);
   }
 
-  private startRoadmapTurn(item: RoadmapItem) {
+  private startRoadmapTurn(sessionId: string, item: RoadmapItem) {
+    const rt = this.runtime(sessionId);
     item.status = 'in_progress';
     item.notes = undefined; // clear any stale needs_revision/done note from a prior attempt
     void this.persist();
-    this.emitRoadmap();
-    this.trackRoadmapActivity(`Started roadmap item: "${item.title}"`);
+    this.emitRoadmap(sessionId);
+    this.trackRoadmapActivity(sessionId, `Started roadmap item: "${item.title}"`);
 
-    this.activeRoadmapItemId = item.id;
-    const seq = ++this.roadmapTurnSeq;
-    void this.ensureAgent()
+    rt.activeRoadmapItemId = item.id;
+    const seq = ++rt.roadmapTurnSeq;
+    void this.ensureAgent(sessionId)
       .send(this.buildRoadmapItemPrompt(item))
       .then(() => {
-        if (seq !== this.roadmapTurnSeq) {
+        if (seq !== rt.roadmapTurnSeq) {
           // Superseded by a push-back. This firing is the actual proof that
           // send() has returned on this AgentSession — only now is it safe
           // to call it again, so this is what starts the restart, not
           // pushBackRoadmapItem itself.
-          const restart = this.pendingRoadmapRestart;
-          this.pendingRoadmapRestart = null;
-          this.activeRoadmapItemId = null;
+          const restart = rt.pendingRoadmapRestart;
+          rt.pendingRoadmapRestart = null;
+          rt.activeRoadmapItemId = null;
           // Only restart if it's still queued for it — the Operator may have
           // rejected it (or otherwise changed its status) while we waited for
           // this old turn to actually finish unwinding.
-          if (restart && restart.status === 'approved') this.startRoadmapTurn(restart);
-          else this.maybeAdvanceRoadmap();
+          if (restart && restart.status === 'approved') this.startRoadmapTurn(sessionId, restart);
+          else this.maybeAdvanceRoadmap(sessionId);
           return;
         }
-        this.activeRoadmapItemId = null;
-        this.onRoadmapTurnEndedFor(item.id);
+        rt.activeRoadmapItemId = null;
+        this.onRoadmapTurnEndedFor(sessionId, item.id);
       });
   }
 
   /** The AgentCallbacks hook for complete_roadmap_item — must answer synchronously so the model learns right away if it failed. */
-  onRoadmapItemDone(itemId: string, summary: string): { ok: boolean; error?: string } {
-    const item = this.findRoadmapItem(itemId);
+  onRoadmapItemDone(sessionId: string, itemId: string, summary: string): { ok: boolean; error?: string } {
+    const item = this.findRoadmapItem(sessionId, itemId);
     if (!item) return { ok: false, error: `No roadmap item with id "${itemId}".` };
     if (item.status !== 'in_progress') {
       return { ok: false, error: `Roadmap item "${itemId}" is not in progress (status: ${item.status}).` };
@@ -400,14 +461,14 @@ export class Workspace {
     item.status = 'done';
     item.notes = summary;
     void this.persist();
-    this.emitRoadmap();
+    this.emitRoadmap(sessionId);
     // Do NOT advance here — the turn (send()) is still running; startRoadmapTurn's
     // .then() calls onRoadmapTurnEndedFor once it actually finishes, which advances.
     return { ok: true };
   }
 
-  private onRoadmapTurnEndedFor(itemId: string) {
-    const item = this.findRoadmapItem(itemId);
+  private onRoadmapTurnEndedFor(sessionId: string, itemId: string) {
+    const item = this.findRoadmapItem(sessionId, itemId);
     if (!item) return;
     if (item.status === 'in_progress') {
       // The turn ended (naturally, or hit the turn limit) without the agent
@@ -416,11 +477,11 @@ export class Workspace {
       item.status = 'needs_revision';
       item.notes = "The agent's turn ended without marking this item done — review needed.";
       void this.persist();
-      this.emitRoadmap();
+      this.emitRoadmap(sessionId);
       return;
     }
     // status is 'done' (via complete_roadmap_item) — keep the queue moving.
-    this.maybeAdvanceRoadmap();
+    this.maybeAdvanceRoadmap(sessionId);
   }
 
   private buildRoadmapItemPrompt(item: RoadmapItem): string {
@@ -433,42 +494,45 @@ export class Workspace {
     );
   }
 
-  private trackRoadmapActivity(detail: string) {
-    const session = this.activeSession;
+  private trackRoadmapActivity(sessionId: string, detail: string) {
+    const session = this.sessions.find((s) => s.id === sessionId);
     if (!session) return;
     const evt: ActivityEvent = { id: nextId('act'), kind: 'roadmap', detail, status: 'done' };
     session.activity.push(evt);
-    this.emit.activity(this.id, evt);
+    this.emit.activity(this.id, sessionId, evt);
   }
 
-  private ensureAgent(): AgentSession {
-    if (!this.agent) {
+  /** Lazily builds — and only builds once — this session's own isolated AgentSession, restoring its persisted history the first time. */
+  private ensureAgent(sessionId: string): AgentSession {
+    const rt = this.runtime(sessionId);
+    if (!rt.agent) {
       const rulesDir = process.env.RULES_DIR?.trim() || null;
-      this.agent = new AgentSession(this.rootPath ?? process.cwd(), {
+      const findSession = () => this.sessions.find((s) => s.id === sessionId);
+      rt.agent = new AgentSession(this.rootPath ?? process.cwd(), {
         onActivity: (evt) => {
-          const session = this.activeSession;
+          const session = findSession();
           if (session) {
             const existing = session.activity.findIndex((a) => a.id === evt.id);
             if (existing >= 0) session.activity[existing] = evt;
             else session.activity.push(evt);
             if (session.activity.length > 200) session.activity.shift();
           }
-          this.emit.activity(this.id, evt);
+          this.emit.activity(this.id, sessionId, evt);
         },
         onTerminal: (evt) => this.recordTerminal(evt),
         onMessage: (text, images) => {
           const msg: ChatMessage = { role: 'assistant', text, images };
-          const session = this.activeSession;
+          const session = findSession();
           session?.chat.push(msg);
-          this.emit.message(this.id, msg);
+          this.emit.message(this.id, sessionId, msg);
 
           // Name the session from its actual content, once, after the first
           // real exchange — never blocking the reply the user is reading.
           const isFirstReply = session && session.chat.filter((m) => m.role === 'assistant').length === 1;
           if (session && isFirstReply && !session.titled) {
-            const sessionId = session.id;
-            void this.agent!.generateTitle().then((title) => {
-              const target = this.sessions.find((s) => s.id === sessionId);
+            const sid = session.id;
+            void rt.agent!.generateTitle().then((title) => {
+              const target = this.sessions.find((s) => s.id === sid);
               if (!target || target.titled) return;
               target.titled = true;
               if (title) target.title = title;
@@ -478,17 +542,17 @@ export class Workspace {
           }
         },
         onStatus: (running) => {
-          const session = this.activeSession;
+          const session = findSession();
           if (running) {
-            this.runStartedAt = Date.now();
-          } else if (this.runStartedAt !== null) {
-            if (session) session.elapsedMs = (session.elapsedMs ?? 0) + (Date.now() - this.runStartedAt);
-            this.runStartedAt = null;
+            rt.runStartedAt = Date.now();
+          } else if (rt.runStartedAt !== null) {
+            if (session) session.elapsedMs = (session.elapsedMs ?? 0) + (Date.now() - rt.runStartedAt);
+            rt.runStartedAt = null;
           }
-          this.agentRunning = running;
+          rt.running = running;
           if (!running) {
             this.unseenCompletion = true;
-            // Checkpoint the conversation whenever the agent goes quiet.
+            // Checkpoint the conversation whenever this session's agent goes quiet.
             void this.persist().then(() => this.emit.sessions(this.id));
           }
           this.emit.status(this.id);
@@ -498,35 +562,37 @@ export class Workspace {
           this.emit.diffProposed(this.id, diff);
           this.emit.status(this.id);
         },
-        onRoadmapProposed: (items) => this.proposeRoadmap(items),
-        onRoadmapItemDone: (itemId, summary) => this.onRoadmapItemDone(itemId, summary),
+        onRoadmapProposed: (items) => this.proposeRoadmap(sessionId, items),
+        onRoadmapItemDone: (itemId, summary) => this.onRoadmapItemDone(sessionId, itemId, summary),
         onUsage: ({ promptTokens, contextWindow }) => {
-          const session = this.activeSession;
+          const session = findSession();
           if (!session) return;
           session.contextUsed = promptTokens;
           session.contextWindow = contextWindow;
           this.emit.sessions(this.id);
         },
         onCost: (usd) => {
-          const session = this.activeSession;
+          const session = findSession();
           if (!session) return;
           session.costUsd = (session.costUsd ?? 0) + usd;
           this.emit.sessions(this.id);
         },
         onCompaction: () => {
-          const session = this.activeSession;
+          const session = findSession();
           if (!session) return;
           session.compactionCount = (session.compactionCount ?? 0) + 1;
           this.emit.sessions(this.id);
         },
         runShell: (requestId, command) =>
-          this.terminal.run(requestId, 'agent', command, (evt) => this.recordTerminal(evt)),
+          rt.terminal.run(requestId, 'agent', command, (evt) => this.recordTerminal(evt)),
         getAutonomy: () => this.autonomy,
-        requestCommandApproval: (command) => this.requestApproval(command),
+        requestCommandApproval: (command) => this.requestApproval(sessionId, command),
         applyEditAuto: (diff) => this.applyEditAuto(diff),
       }, rulesDir);
+      const session = findSession();
+      if (session) rt.agent.restoreHistory(session.messages);
     }
-    return this.agent;
+    return rt.agent;
   }
 
   recordTerminal(evt: TermDataEvent) {
@@ -537,9 +603,11 @@ export class Workspace {
     this.emit.terminal(this.id, evt);
   }
 
+  /** Always acts on whichever session is currently active — the renderer's composer only ever sends to the session it's displaying. */
   async sendToAgent(text: string, images?: ChatImage[]) {
-    if (!this.activeSession) this.newSession();
-    const session = this.activeSession!;
+    if (!this.activeSessionId) this.newSession();
+    const sessionId = this.activeSessionId!;
+    const session = this.sessions.find((s) => s.id === sessionId)!;
 
     const msg: ChatMessage = { role: 'user', text, images };
     session.chat.push(msg);
@@ -550,20 +618,24 @@ export class Workspace {
     session.activity = [];
     session.updatedAt = Date.now();
 
-    this.emit.message(this.id, msg);
+    this.emit.message(this.id, sessionId, msg);
     this.emit.sessions(this.id);
     this.unseenCompletion = false;
     // Deliberately not awaited: the agent loop runs to completion in the
-    // background so the user can switch tabs and come back to the result.
-    void this.ensureAgent().send(text, images);
+    // background so the user can switch sessions/tabs and come back to the result.
+    void this.ensureAgent(sessionId).send(text, images);
   }
 
+  /** Stops whichever session is currently active — same "acts on what's displayed" rule as sendToAgent. */
   stopAgent() {
-    this.agent?.stop();
+    const sessionId = this.activeSessionId;
+    if (!sessionId) return;
+    const rt = this.runtimes.get(sessionId);
+    rt?.agent?.stop();
     // A command stuck waiting on the Operator must not hang forever once the run itself is dead.
-    for (const [requestId, resolve] of this.pendingApprovals) {
-      resolve(false);
-      this.pendingApprovals.delete(requestId);
+    if (rt) {
+      for (const [, resolve] of rt.pendingApprovals) resolve(false);
+      rt.pendingApprovals.clear();
     }
   }
 
@@ -577,7 +649,7 @@ export class Workspace {
   }
 
   dispose() {
-    this.agent?.stop();
+    for (const rt of this.runtimes.values()) rt.agent?.stop();
     this.terminal.kill();
   }
 }

@@ -44,8 +44,8 @@ contextBridge.exposeInMainWorld('forge', {
   agent: {
     send: (id: string, text: string, images?: unknown[]) => ipcRenderer.invoke(IPC.agentSend, id, text, images),
     stop: (id: string) => ipcRenderer.invoke(IPC.agentStop, id),
-    onActivity: (cb: (workspaceId: string, evt: unknown) => void) => on(IPC.agentActivity, cb),
-    onMessage: (cb: (workspaceId: string, msg: unknown) => void) => on(IPC.agentMessage, cb),
+    onActivity: (cb: (workspaceId: string, sessionId: string, evt: unknown) => void) => on(IPC.agentActivity, cb),
+    onMessage: (cb: (workspaceId: string, sessionId: string, msg: unknown) => void) => on(IPC.agentMessage, cb),
     decideApproval: (id: string, requestId: string, approved: boolean) =>
       ipcRenderer.invoke(IPC.cmdApprovalDecide, id, requestId, approved),
     onApprovalRequest: (cb: (workspaceId: string, req: unknown) => void) => on(IPC.cmdApprovalRequest, cb),

@@ -55,8 +55,8 @@ function send(channel: string, ...args: unknown[]) {
 
 const manager = new WorkspaceManager({
   terminal: (workspaceId, evt) => send(IPC.termData, workspaceId, evt),
-  activity: (workspaceId, evt) => send(IPC.agentActivity, workspaceId, evt),
-  message: (workspaceId, msg) => send(IPC.agentMessage, workspaceId, msg),
+  activity: (workspaceId, sessionId, evt) => send(IPC.agentActivity, workspaceId, sessionId, evt),
+  message: (workspaceId, sessionId, msg) => send(IPC.agentMessage, workspaceId, sessionId, msg),
   status: (workspaceId) => {
     const ws = manager.get(workspaceId);
     if (ws) send(IPC.wsUpdated, ws.summary());
@@ -67,8 +67,8 @@ const manager = new WorkspaceManager({
     const ws = manager.get(workspaceId);
     if (ws) send(IPC.sessUpdated, workspaceId, ws.listSessions());
   },
-  commandApproval: (workspaceId, requestId, command) =>
-    send(IPC.cmdApprovalRequest, workspaceId, { requestId, command }),
+  commandApproval: (workspaceId, sessionId, requestId, command) =>
+    send(IPC.cmdApprovalRequest, workspaceId, { requestId, command, sessionId }),
   roadmapUpdated: (workspaceId, sessionId, items) => send(IPC.roadmapUpdated, workspaceId, sessionId, items),
 });
 

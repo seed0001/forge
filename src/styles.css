@@ -103,6 +103,7 @@ input, textarea { font: inherit; color: inherit; }
 .wdot.review { background: var(--green); }
 .wdot.done { background: var(--blue); }
 @keyframes breathe { 0%, 100% { opacity: 1; } 50% { opacity: 0.28; } }
+.sess-live { animation: breathe 1.3s ease-in-out infinite; flex: none; }
 .wnew {
   width: 28px; height: 28px; margin-bottom: 2px; border-radius: var(--r-sm);
   display: flex; align-items: center; justify-content: center; color: var(--fg-3);

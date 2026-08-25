@@ -85,12 +85,16 @@ export interface WorkspaceSummary {
   unseenCompletion: boolean;
   activeSessionId: string | null;
   autonomy: Autonomy;
+  /** Every session in this workspace whose agent is currently working — each session runs independently, so more than one can be live at once. */
+  runningSessionIds: string[];
 }
 
 /** A run_command call waiting on the Operator's yes/no at Manual autonomy. */
 export interface CommandApproval {
   requestId: string;
   command: string;
+  /** Which session raised it — a background session's approval card should only surface while that session is the one being viewed. */
+  sessionId: string;
 }
 
 export interface SessionSummary {

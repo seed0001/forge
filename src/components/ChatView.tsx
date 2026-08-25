@@ -58,7 +58,10 @@ export function ChatView() {
     }
   }
 
-  const running = view?.summary.status === 'running';
+  // Session-scoped, not workspace-wide: another session in this workspace
+  // may be running in the background while this one sits idle, and the
+  // composer/Stop button must reflect the session actually on screen.
+  const running = !!view && view.summary.activeSessionId !== null && view.summary.runningSessionIds.includes(view.summary.activeSessionId);
   const diffs = Object.values(view?.pendingDiffs ?? {});
   const added = diffs.reduce((n, d) => n + d.added, 0);
   const removed = diffs.reduce((n, d) => n + d.removed, 0);

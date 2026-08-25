@@ -274,8 +274,15 @@ export const useForge = create<ForgeState>((set, get) => {
         patch(workspaceId, (v) => ({ ...v, terminalLines: [...v.terminalLines, line].slice(-800) }));
       });
 
-      forge.agent.onActivity((workspaceId, evt) => {
+      forge.agent.onActivity((workspaceId, sessionId, evt) => {
         patch(workspaceId, (v) => {
+          // Each session runs independently now — a background session's
+          // activity is already being persisted server-side regardless;
+          // the visible trail only ever reflects whichever session is on
+          // screen right now, so a broadcast for any other session is
+          // simply not applied here (switching to it later fetches its
+          // real current state via sessions.select, same as today).
+          if (sessionId !== v.summary.activeSessionId) return v;
           // A summary event is the whole run's trail collapsed into one row —
           // replace everything rather than append, so a task with dozens of
           // tool calls ends as one line instead of a long stacked list.
@@ -286,12 +293,12 @@ export const useForge = create<ForgeState>((set, get) => {
         });
       });
 
-      forge.agent.onMessage((workspaceId, msg) => {
-        patch(workspaceId, (v) => ({ ...v, chat: [...v.chat, msg] }));
+      forge.agent.onMessage((workspaceId, sessionId, msg) => {
+        patch(workspaceId, (v) => (sessionId !== v.summary.activeSessionId ? v : { ...v, chat: [...v.chat, msg] }));
       });
 
       forge.agent.onApprovalRequest((workspaceId, req) => {
-        patch(workspaceId, (v) => ({ ...v, pendingApproval: req }));
+        patch(workspaceId, (v) => (req.sessionId !== v.summary.activeSessionId ? v : { ...v, pendingApproval: req }));
       });
 
       forge.sessions.onUpdated((workspaceId, sessions) => {

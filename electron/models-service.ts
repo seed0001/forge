@@ -27,6 +27,19 @@ function supportsTools(raw: RawModel): boolean {
   return raw.supported_parameters === undefined || raw.supported_parameters.includes('tools');
 }
 
+/**
+ * OpenRouter lists batch-only variants of ordinary models as a separate
+ * catalog entry with a literal `:batch` suffix on the id (e.g.
+ * `anthropic/claude-sonnet-5:batch`, alongside the normal
+ * `anthropic/claude-sonnet-5`). They 404 on a regular chat completion
+ * request ("This model is only available through the Batch API. Use the
+ * /api/beta/batches endpoint instead.") since they only exist behind
+ * OpenRouter's async /api/beta/batches endpoint, which this app never calls.
+ */
+function isBatchOnly(raw: RawModel): boolean {
+  return raw.id.endsWith(':batch');
+}
+
 /** Refetching on every dropdown open would hit either provider far more than its list ever changes. */
 const CACHE_MS = 5 * 60_000;
 interface Cache {
@@ -60,7 +73,9 @@ async function fetchOpenRouterModels(): Promise<CatalogModel[]> {
     throw new Error(`OpenRouter models request failed (${res.status})`);
   }
   const data = (await res.json()) as { data?: RawModel[] };
-  return (data.data ?? []).filter(supportsTools).map((m) => toModel(m, 'openrouter'));
+  return (data.data ?? [])
+    .filter((m) => supportsTools(m) && !isBatchOnly(m))
+    .map((m) => toModel(m, 'openrouter'));
 }
 
 /** Unlike OpenRouter's public catalog, FairRouter's /v1/models requires a key — skip the call rather than fail loudly if none is set yet. */
@@ -74,7 +89,9 @@ async function fetchFairRouterModels(): Promise<CatalogModel[]> {
     throw new Error(`FairRouter models request failed (${res.status})`);
   }
   const data = (await res.json()) as { data?: RawModel[] };
-  return (data.data ?? []).filter(supportsTools).map((m) => toModel(m, 'fairrouter'));
+  return (data.data ?? [])
+    .filter((m) => supportsTools(m) && !isBatchOnly(m))
+    .map((m) => toModel(m, 'fairrouter'));
 }
 
 const FETCHERS: Record<ChatProvider, () => Promise<CatalogModel[]>> = {

@@ -12,7 +12,9 @@ const shared = {
   platform: 'node',
   format: 'esm',
   target: 'node20',
-  external: ['electron'],
+  // Kept out of the bundle in dev too, so its behavior matches the packaged
+  // build exactly — see the comment in build-main.mjs.
+  external: ['electron', 'electron-updater'],
   sourcemap: true,
 };
 

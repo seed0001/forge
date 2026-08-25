@@ -11,12 +11,20 @@ import * as fsService from './fs-service';
 import { WorkspaceManager } from './workspace-manager';
 import { saveAttachment, attachmentDirFor, readImageAsDataUrl } from './attachment-store';
 import { listOpenRouterModels } from './models-service';
+import { initAutoUpdater } from './updater';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
-// Ensure a .env exists so first-run users have something to edit.
+/**
+ * In dev, __dirname's parent is the project root — a normal writable folder.
+ * Packaged, it's inside app.asar: read-only, and shared by every user of the
+ * install, so it can never hold this machine's own .env. userData (per-user,
+ * per-app, always writable — e.g. %APPDATA%/Forge on Windows) is the packaged
+ * equivalent; .env.example still ships inside the asar purely as the template
+ * copied from on first run.
+ */
 const envExample = path.join(__dirname, '..', '.env.example');
-const envFile = path.join(__dirname, '..', '.env');
+const envFile = path.join(app.isPackaged ? app.getPath('userData') : path.join(__dirname, '..'), '.env');
 if (!fs.existsSync(envFile) && fs.existsSync(envExample)) {
   fs.copyFileSync(envExample, envFile);
 }
@@ -119,12 +127,14 @@ app.whenReady().then(() => {
   });
   session.defaultSession.setPermissionCheckHandler((_wc, permission) => ALLOWED.has(permission));
 
-  // Start with one workspace pointed at the app's own folder so there is
-  // something real on screen; the user can open any folder from the tab.
-  const first = manager.create(path.join(__dirname, '..'));
+  // In dev, default to the project's own folder so there's something real on
+  // screen immediately. Packaged, that folder is inside the read-only asar and
+  // isn't a real project anyway — start with no root and let the user pick one.
+  const first = manager.create(app.isPackaged ? null : path.join(__dirname, '..'));
   void first.restoreSessions();
 
   createWindow();
+  initAutoUpdater();
 
   ipcMain.handle(IPC.wsList, async () => manager.list().map((w) => w.summary()));
 

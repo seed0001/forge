@@ -1,0 +1,56 @@
+<svg width="1024" height="1024" viewBox="0 0 1024 1024" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#141414"/>
+      <stop offset="100%" stop-color="#000000"/>
+    </linearGradient>
+    <radialGradient id="glow" cx="50%" cy="38%" r="55%">
+      <stop offset="0%" stop-color="#d9a86c" stop-opacity="0.35"/>
+      <stop offset="100%" stop-color="#d9a86c" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="flame" x1="0" y1="1" x2="0" y2="0">
+      <stop offset="0%" stop-color="#b9793f"/>
+      <stop offset="55%" stop-color="#d9a86c"/>
+      <stop offset="100%" stop-color="#ffe1ad"/>
+    </linearGradient>
+    <linearGradient id="anvilTop" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#726b5d"/>
+      <stop offset="100%" stop-color="#443f34"/>
+    </linearGradient>
+    <linearGradient id="anvilBody" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#524c40"/>
+      <stop offset="100%" stop-color="#2a2620"/>
+    </linearGradient>
+    <filter id="soft" x="-50%" y="-50%" width="200%" height="200%">
+      <feGaussianBlur stdDeviation="18"/>
+    </filter>
+  </defs>
+
+  <!-- backdrop -->
+  <rect width="1024" height="1024" rx="188" fill="url(#bg)"/>
+  <rect width="1024" height="1024" rx="188" fill="url(#glow)"/>
+
+  <!-- anvil -->
+  <g>
+    <!-- foot -->
+    <rect x="332" y="712" width="360" height="58" rx="14" fill="url(#anvilBody)"/>
+    <!-- waist -->
+    <path d="M420,614 L604,614 L648,712 L376,712 Z" fill="url(#anvilBody)"/>
+    <!-- horn (tapers left) -->
+    <path d="M420,538 L246,552 Q206,555 206,566 Q206,577 246,580 L420,596 Z" fill="url(#anvilTop)"/>
+    <!-- top / working face -->
+    <rect x="392" y="520" width="300" height="96" rx="20" fill="url(#anvilTop)"/>
+    <rect x="392" y="520" width="300" height="16" rx="8" fill="#a89a7c" opacity="0.5"/>
+  </g>
+
+  <!-- flame rising from the anvil face -->
+  <g filter="url(#soft)" opacity="0.55">
+    <path d="M512,196 C596,300 636,378 610,452 C666,420 690,366 676,308 C748,392 764,486 706,556 C660,610 578,626 522,600 C452,568 428,494 456,428 C412,458 392,506 402,556 C338,510 322,432 366,362 C398,312 452,286 452,286 C440,326 452,350 470,356 C450,300 470,246 512,196 Z" fill="#d9a86c"/>
+  </g>
+  <path d="M512,196 C596,300 636,378 610,452 C666,420 690,366 676,308 C748,392 764,486 706,556 C660,610 578,626 522,600 C452,568 428,494 456,428 C412,458 392,506 402,556 C338,510 322,432 366,362 C398,312 452,286 452,286 C440,326 452,350 470,356 C450,300 470,246 512,196 Z" fill="url(#flame)"/>
+
+  <!-- sparks -->
+  <circle cx="700" cy="250" r="10" fill="#ffe1ad"/>
+  <circle cx="748" cy="200" r="6" fill="#ffe1ad" opacity="0.85"/>
+  <circle cx="330" cy="230" r="7" fill="#ffe1ad" opacity="0.8"/>
+</svg>

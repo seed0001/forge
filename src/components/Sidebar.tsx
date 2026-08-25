@@ -30,8 +30,9 @@ function Node({ node, depth }: { node: FileNode; depth: number }) {
   const fetchedVersion = useRef<number | null>(null);
 
   async function load() {
+    if (!view?.summary.id) return;
     setLoading(true);
-    setChildren(await forge.fs.listDir(node.path));
+    setChildren(await forge.fs.listDir(view.summary.id, node.path));
     fetchedVersion.current = treeVersion;
     setLoading(false);
   }

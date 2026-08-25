@@ -68,8 +68,18 @@ export async function readFile(filePath: string): Promise<string> {
 export function assertInside(root: string, target: string) {
   const rel = path.relative(root, target);
   if (rel.startsWith('..') || path.isAbsolute(rel)) {
-    throw new Error(`Refusing to write outside project root: ${target}`);
+    throw new Error(`Refusing to access outside project root: ${target}`);
   }
+}
+
+/** Root-scoped counterpart to listDir, mirroring the assertInside guard writeFile already uses. */
+export async function listDirDetailed(rootPath: string, dirPath: string): Promise<FileNode[]> {
+  try {
+    assertInside(rootPath, dirPath);
+  } catch {
+    return [];
+  }
+  return listDir(dirPath);
 }
 
 export async function writeFile(rootPath: string, filePath: string, content: string): Promise<void> {

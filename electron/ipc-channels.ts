@@ -58,6 +58,9 @@ export const IPC = {
   cmdApprovalRequest: 'command:approval-request',
   cmdApprovalDecide: 'command:approval-decide',
 
+  subagentCmdApprovalRequest: 'subagent-command:approval-request',
+  subagentCmdApprovalDecide: 'subagent-command:approval-decide',
+
   voiceTranscribe: 'voice:transcribe',
 
   attachmentSave: 'attachment:save',
@@ -124,6 +127,23 @@ export interface CommandApproval {
   command: string;
   /** Which session raised it — a background session's approval card should only surface while that session is the one being viewed. */
   sessionId: string;
+}
+
+/**
+ * A run_command call from a SUBAGENT waiting on the Operator, structurally
+ * distinct from CommandApproval so the two can never be confused in the
+ * renderer: a subagent has no sessionId of its own (it isn't a session), and
+ * this approval must stay visible regardless of which session tab is open,
+ * unlike CommandApproval which is scoped to one. See electron/workspace.ts's
+ * requestSubagentApproval — it fails closed (denied) if never answered.
+ */
+export interface SubagentCommandApproval {
+  requestId: string;
+  command: string;
+  /** Short description of the delegated task, so the Operator has context for what's asking. */
+  label: string;
+  /** The primary session that spawned this subagent — used only to route cleanup on stop, not for display scoping. */
+  parentSessionId: string;
 }
 
 export interface SessionSummary {
@@ -312,6 +332,29 @@ export const SETTINGS_KEYS = [
   'TRANSCRIBE_MODEL',
   'MAX_TOOL_CALLS',
 ] as const satisfies readonly (keyof ProviderSettings)[];
+
+/**
+ * The subset of SETTINGS_KEYS that are actual credentials, as opposed to
+ * plain config (TRANSCRIBE_BASE_URL/MODEL, MAX_TOOL_CALLS). settingsGet masks
+ * these instead of returning them verbatim, terminal-session.ts scrubs them
+ * out of spawned shell environments, and audit-service.ts redacts their live
+ * values out of anything written to AUDIT.md — all three read from this one
+ * list so a newly added credential key only needs to be added here once.
+ */
+export const SECRET_SETTINGS_KEYS = [
+  'OPENROUTER_API_KEY',
+  'FAIRROUTER_API_KEY',
+  'SEARCH_API',
+  'TRANSCRIBE_API_KEY',
+] as const satisfies readonly (keyof ProviderSettings)[];
+
+/**
+ * What settingsGet returns for a SECRET_SETTINGS_KEYS field that is
+ * configured, instead of its real value — shared between main.ts (which
+ * emits it) and the Settings UI (which recognizes it to render "configured,
+ * retype to change" rather than showing the literal sentinel as if typed).
+ */
+export const SECRET_SENTINEL = '••••••••';
 
 /** Bounds enforced wherever MAX_TOOL_CALLS is read or written. */
 export const MAX_TOOL_CALLS_DEFAULT = 24;

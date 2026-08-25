@@ -44,6 +44,7 @@ export function ChatView() {
   const openReview = useForge((s) => s.openReview);
   const setCenter = useForge((s) => s.setCenter);
   const decideApproval = useForge((s) => s.decideApproval);
+  const decideSubagentApproval = useForge((s) => s.decideSubagentApproval);
   const addComposerImage = useForge((s) => s.addComposerImage);
   const removeComposerImage = useForge((s) => s.removeComposerImage);
 
@@ -93,7 +94,13 @@ export function ChatView() {
 
   useEffect(() => {
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: 'smooth' });
-  }, [view?.chat.length, view?.activity.length, diffs.length, view?.pendingApproval]);
+  }, [
+    view?.chat.length,
+    view?.activity.length,
+    diffs.length,
+    view?.pendingApproval,
+    view && Object.keys(view.pendingSubagentApprovals).length,
+  ]);
 
   useEffect(() => {
     const ta = taRef.current;
@@ -195,6 +202,37 @@ export function ChatView() {
               </div>
             </div>
           )}
+
+          {/*
+            Workspace-scoped, not session-scoped: a subagent has no session tab
+            of its own, so this must stay visible regardless of which session
+            the Operator is viewing — visually and textually distinct from the
+            primary agent's own approval card above, so the two are never
+            confused. Fails closed (denied) if left unanswered — see
+            electron/workspace.ts's requestSubagentApproval.
+          */}
+          {Object.values(view.pendingSubagentApprovals).map((req) => (
+            <div className="turn agent" key={req.requestId}>
+              <div className="card approval subagent-approval">
+                <div className="card-top">
+                  <IconBolt className="icon-sm" style={{ color: 'var(--blue)' }} />
+                  <span className="card-title">A subagent wants to run a command</span>
+                </div>
+                <div className="approval-subagent-label">{req.label}</div>
+                <code className="approval-cmd">{req.command}</code>
+                <div className="approval-actions">
+                  <button className="mini reject" onClick={() => decideSubagentApproval(req.requestId, false)}>
+                    <IconX className="icon-xs" />
+                    Deny
+                  </button>
+                  <button className="mini accept" onClick={() => decideSubagentApproval(req.requestId, true)}>
+                    <IconCheck className="icon-xs" />
+                    Approve
+                  </button>
+                </div>
+              </div>
+            </div>
+          ))}
 
           {diffs.length > 0 && (
             <div className="turn agent">

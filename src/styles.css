@@ -545,6 +545,9 @@ input, textarea { font: inherit; color: inherit; }
 .card-title { font-size: var(--t-sm); font-weight: 600; }
 .card .btn-primary { width: 100%; }
 .card.approval { border-color: var(--amber); }
+/* Distinct from the primary agent's own approval card (amber) so a subagent's request is never mistaken for it. */
+.card.approval.subagent-approval { border-color: var(--blue); }
+.approval-subagent-label { font-size: var(--t-sm); color: var(--fg-2); }
 .approval-cmd {
   display: block; font-family: var(--font-mono); font-size: var(--t-sm);
   background: var(--bg-panel); border-radius: var(--r-sm);

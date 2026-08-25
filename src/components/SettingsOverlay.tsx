@@ -3,6 +3,7 @@ import { useForge } from '../state/store';
 import {
   MAX_TOOL_CALLS_DEFAULT,
   MAX_TOOL_CALLS_LIMIT,
+  SECRET_SENTINEL,
   type ProviderSettings,
 } from '../../electron/ipc-channels';
 import { IconCheck, IconEye, IconEyeOff, IconGear, IconX } from './icons';
@@ -184,6 +185,11 @@ export function SettingsOverlay() {
 
               {provider.fields.map((field) => {
                 const shown = revealed.has(field.key);
+                // A secret field that still holds the sentinel means the Operator hasn't
+                // touched it this session — its real value never left the main process.
+                // Show it as empty-with-hint rather than the literal sentinel characters,
+                // which would otherwise look like a real (masked) value was just revealed.
+                const isSentinel = field.secret && draft[field.key] === SECRET_SENTINEL;
                 return (
                   <label key={field.key} className="settings-field">
                     <span className="settings-field-label">{field.label}</span>
@@ -194,8 +200,8 @@ export function SettingsOverlay() {
                         min={field.numeric?.min}
                         max={field.numeric?.max}
                         step={field.numeric ? 1 : undefined}
-                        value={draft[field.key]}
-                        placeholder={field.placeholder}
+                        value={isSentinel ? '' : draft[field.key]}
+                        placeholder={isSentinel ? 'configured — retype to change' : field.placeholder}
                         spellCheck={false}
                         autoComplete="off"
                         onChange={(e) => {

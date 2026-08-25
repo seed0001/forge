@@ -2,7 +2,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { readFileDetailed, readFileBinaryDetailed, writeBinaryFile, listTree } from './fs-service';
 import { RuleSet, formatModule } from './rules-service';
-import { audit } from './audit-service';
+import { audit, isAuditLogPath } from './audit-service';
 import { computeHunks, countChanges } from './diff-service';
 import { nextId } from './diff-store';
 import { extFromMediaType, IMAGE_MIME_BY_EXT } from './media-types';
@@ -89,6 +89,16 @@ export interface AgentCallbacks {
   getAutonomy: () => Autonomy;
   /** Manual only: blocks until the Operator approves or denies this command. */
   requestCommandApproval: (command: string) => Promise<boolean>;
+  /**
+   * Same as requestCommandApproval, but for a subagent's run_command specifically —
+   * routed through a distinct, workspace-scoped, time-bounded approval channel
+   * (see workspace.ts's requestSubagentApproval) since a subagent has no session
+   * of its own to attach a normal approval to, and fails closed (denied) if left
+   * unanswered rather than hanging forever. Only present on the primary session's
+   * callbacks; a subagent's own callbacks never set this (subagents can't spawn
+   * further subagents, so it would never be used).
+   */
+  requestSubagentCommandApproval?: (command: string, label: string) => Promise<boolean>;
   /** Auto only: writes a proposed edit straight to disk instead of queuing it for review. */
   applyEditAuto: (diff: PendingDiff) => Promise<void>;
 }
@@ -307,9 +317,10 @@ const SPAWN_TOOL = {
       'per file, or one per independent piece of a larger task. Each subagent starts with NO memory of this ' +
       'conversation: the task must be fully self-contained (what to do, relevant context, what "done" looks ' +
       'like). A subagent has the same read/write/run/search tools as you, minus this one — it cannot spawn ' +
-      'further subagents. It runs at full autonomy: edits it proposes are written to disk immediately and ' +
-      'commands run without approval, so only delegate work you are comfortable completing unsupervised. Its ' +
-      'reply to you is its FINAL report, not a conversation — you cannot follow up with it.',
+      'further subagents. It runs at the SAME autonomy as this conversation: edits go through the normal ' +
+      'review queue and commands need Operator approval under Manual autonomy, exactly like your own — it is ' +
+      'not a way to bypass what the Operator has configured. Its reply to you is its FINAL report, not a ' +
+      'conversation — you cannot follow up with it.',
     parameters: {
       type: 'object',
       properties: {
@@ -487,9 +498,9 @@ function buildSystemPrompt(rootPath: string, hasRules: boolean, isSubagent = fal
           '- spawn_subagent delegates a self-contained task to an independent subagent that runs to',
           '  completion and reports back. Good for fanning a task out across files or independent',
           '  pieces of work. Each call starts a subagent with no memory of this conversation, so give it',
-          '  everything it needs in the task text. Subagents run at full autonomy — they write edits and',
-          '  run commands without waiting on anyone — so do not delegate anything you would not be',
-          '  comfortable seeing land unsupervised.',
+          '  everything it needs in the task text. It runs at the same autonomy as you — its edits and',
+          '  commands are still subject to whatever review/approval this conversation is, they are not',
+          '  applied unsupervised just because you delegated them.',
           '- propose_roadmap proposes an ordered checklist of milestones, each with its own detailed plan,',
           '  for a genuinely multi-step project. Use your own judgment: only for real multi-milestone work,',
           "  never for a small or single-step ask — just do those directly. It does not start any work; the",
@@ -806,8 +817,15 @@ export class AgentSession {
    * history) but writes through the SAME callbacks as this session — so its
    * edits go through the real diff/checkpoint/audit machinery and its
    * activity shows up in the same trail, tagged so it's distinguishable.
-   * Forced to 'auto' autonomy regardless of the workspace's actual setting:
-   * a subagent with no one watching it cannot sit blocked on approval.
+   *
+   * Autonomy is passed through from the real parent setting, not hardcoded:
+   * edits (propose_edit) go through the normal review queue under
+   * Manual/Balanced exactly like the primary agent's own, since diffProposed
+   * is workspace-scoped and non-blocking regardless of who called it. Commands
+   * (run_command) under Manual autonomy pause for a distinct, time-bounded
+   * Operator approval (requestSubagentCommandApproval) that fails closed
+   * (denied) if the Operator never answers — bounding the "no one watching"
+   * risk without ever letting this tool call hang indefinitely.
    */
   private async runSubagent(task: string): Promise<string> {
     const actId = nextId('act');
@@ -828,7 +846,7 @@ export class AgentSession {
           if (images?.length) this.pendingImages.push(...images);
         },
         onStatus: () => {}, // This whole run already happens inside the parent's own onStatus bracket.
-        onDiffProposed: this.cb.onDiffProposed, // Dead path at forced 'auto' — edits apply immediately instead.
+        onDiffProposed: this.cb.onDiffProposed, // Live under Manual/Balanced now that autonomy is passed through for real.
         // A subagent never has propose_roadmap/complete_roadmap_item in its
         // tool list (SUBAGENT_TOOLS), so these are never actually called.
         onRoadmapProposed: () => {},
@@ -837,8 +855,11 @@ export class AgentSession {
         onCost: this.cb.onCost, // Real money spent on the Operator's behalf — always bubbles up.
         onCompaction: () => {}, // A subagent compacting its own scratch conversation isn't the visible thread's business.
         runShell: this.cb.runShell,
-        getAutonomy: () => 'auto',
-        requestCommandApproval: async () => true, // Never actually called: 'auto' skips the approval gate.
+        getAutonomy: this.cb.getAutonomy,
+        requestCommandApproval: (command) =>
+          this.cb.requestSubagentCommandApproval
+            ? this.cb.requestSubagentCommandApproval(command, label)
+            : Promise.resolve(true),
         applyEditAuto: this.cb.applyEditAuto,
       },
       this.rulesDir,
@@ -929,7 +950,9 @@ export class AgentSession {
         removed,
       };
 
-      if (this.cb.getAutonomy() === 'auto') {
+      const isAuditLog = isAuditLogPath(this.rootPath, abs);
+
+      if (this.cb.getAutonomy() === 'auto' && !isAuditLog) {
         await this.cb.applyEditAuto(diff);
         this.trackActivity({
           id: nextId('act'),
@@ -940,6 +963,19 @@ export class AgentSession {
           removed,
         });
         return `Change to ${rel} (+${added} -${removed}) written to disk immediately — autonomy is set to Auto, so this skipped review.`;
+      }
+
+      if (this.cb.getAutonomy() === 'auto' && isAuditLog) {
+        this.trackActivity({
+          id: nextId('act'),
+          kind: 'propose',
+          detail: `Proposed edit to ${rel}`,
+          status: 'done',
+          added,
+          removed,
+        });
+        this.cb.onDiffProposed(diff);
+        return `Change proposed for ${rel} (+${added} -${removed}). This is the workspace's own audit trail, so it is held for the Operator's review even though autonomy is Auto — not yet applied.`;
       }
 
       this.trackActivity({

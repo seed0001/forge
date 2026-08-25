@@ -2,6 +2,21 @@ import { spawn, ChildProcessWithoutNullStreams } from 'node:child_process';
 import path from 'node:path';
 import fs from 'node:fs';
 import type { TermDataEvent } from './ipc-channels';
+import { SECRET_SETTINGS_KEYS } from './ipc-channels';
+
+/**
+ * A spawned shell inherits process.env by default, which includes every
+ * provider API key (loaded from forge/.env at startup). Nothing in Forge
+ * legitimately needs those in a shelled-out command's environment — every
+ * provider call is made directly via HTTP from the main process — so a
+ * compromised renderer running terminal.run should not be able to pull them
+ * out with `echo %OPENROUTER_API_KEY%`.
+ */
+function scrubbedEnv(): NodeJS.ProcessEnv {
+  const env = { ...process.env };
+  for (const key of SECRET_SETTINGS_KEYS) delete env[key];
+  return env;
+}
 
 /**
  * Windows shells to try, in order, until one actually starts. `shell: true`
@@ -35,7 +50,12 @@ function spawnWithFallback(command: string, cwd: string): Promise<SpawnAttemptRe
   return new Promise((resolve) => {
     function tryAt(i: number) {
       const shellOpt = candidates[i];
-      const child = spawn(command, { shell: shellOpt, cwd, windowsHide: true }) as ChildProcessWithoutNullStreams;
+      const child = spawn(command, {
+        shell: shellOpt,
+        cwd,
+        windowsHide: true,
+        env: scrubbedEnv(),
+      }) as ChildProcessWithoutNullStreams;
       let settled = false;
       child.once('spawn', () => {
         settled = true;

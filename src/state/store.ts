@@ -12,6 +12,7 @@ import type {
   SessionSummary,
   Autonomy,
   CommandApproval,
+  SubagentCommandApproval,
   CatalogModel,
   ChatProvider,
   UpdateStatus,
@@ -68,6 +69,8 @@ export interface WorkspaceView {
   hydrated: boolean;
   /** A run_command call waiting on a yes/no at Manual autonomy, if any. */
   pendingApproval: CommandApproval | null;
+  /** Subagent run_command calls waiting on a yes/no, keyed by requestId — unlike pendingApproval, NOT filtered by activeSessionId, since a subagent has no session tab of its own to be "on". */
+  pendingSubagentApprovals: Record<string, SubagentCommandApproval>;
   /** When the current run began, used to gauge how deep the work has gone. */
   runStartedAt: number | null;
   /** Images attached in the composer, waiting to go out with the next message. */
@@ -111,6 +114,7 @@ interface ForgeState {
   setAutonomy: (level: Autonomy) => Promise<void>;
   setWorkspaceKind: (kind: WorkspaceKind) => Promise<void>;
   decideApproval: (approved: boolean) => Promise<void>;
+  decideSubagentApproval: (requestId: string, approved: boolean) => Promise<void>;
 
   setCenter: (view: CenterView) => void;
   setSidebar: (view: SidebarView) => void;
@@ -185,6 +189,7 @@ function emptyView(summary: WorkspaceSummary): WorkspaceView {
     reviewing: false,
     hydrated: false,
     pendingApproval: null,
+    pendingSubagentApprovals: {},
     runStartedAt: null,
     composerImages: [],
     paintTarget: null,
@@ -317,6 +322,16 @@ export const useForge = create<ForgeState>((set, get) => {
         patch(workspaceId, (v) => (req.sessionId !== v.summary.activeSessionId ? v : { ...v, pendingApproval: req }));
       });
 
+      // Deliberately NOT filtered by activeSessionId — a subagent has no session
+      // tab of its own to be "on", so this must stay visible regardless of which
+      // session the Operator is currently viewing in this workspace.
+      forge.agent.onSubagentApprovalRequest((workspaceId, req) => {
+        patch(workspaceId, (v) => ({
+          ...v,
+          pendingSubagentApprovals: { ...v.pendingSubagentApprovals, [req.requestId]: req },
+        }));
+      });
+
       forge.sessions.onUpdated((workspaceId, sessions) => {
         patch(workspaceId, (v) => ({ ...v, sessions }));
       });
@@ -350,7 +365,7 @@ export const useForge = create<ForgeState>((set, get) => {
         // The agent may have rewritten a file that is open in a buffer.
         const view = get().workspaces[workspaceId];
         if (view?.openFiles.some((f) => f.path === diff.path)) {
-          forge.fs.readFile(diff.path).then((content) => {
+          forge.fs.readFile(workspaceId, diff.path).then((content) => {
             patch(workspaceId, (v) => ({
               ...v,
               openFiles: v.openFiles.map((f) => (f.path === diff.path ? { ...f, content, isDirty: false } : f)),
@@ -463,6 +478,17 @@ export const useForge = create<ForgeState>((set, get) => {
       await forge.agent.decideApproval(id, req.requestId, approved);
     },
 
+    decideSubagentApproval: async (requestId, approved) => {
+      const id = get().activeId;
+      if (!id) return;
+      patch(id, (v) => {
+        const next = { ...v.pendingSubagentApprovals };
+        delete next[requestId];
+        return { ...v, pendingSubagentApprovals: next };
+      });
+      await forge.agent.decideSubagentApproval(id, requestId, approved);
+    },
+
     setCenter: (viewName) => {
       const id = get().activeId;
       if (id) patch(id, (v) => ({ ...v, center: viewName }));
@@ -527,7 +553,7 @@ export const useForge = create<ForgeState>((set, get) => {
         patch(id, (v) => ({ ...v, activeFilePath: filePath, center: 'editor' }));
         return;
       }
-      const content = await forge.fs.readFile(filePath);
+      const content = await forge.fs.readFile(id, filePath);
       patch(id, (v) => ({
         ...v,
         openFiles: [...v.openFiles, { path: filePath, name, content, isDirty: false }],
@@ -633,7 +659,16 @@ export const useForge = create<ForgeState>((set, get) => {
       // The main process rejects any approval it's holding as part of stopping,
       // but that resolves a promise mid-tool-call — it never tells the renderer
       // to take the card down, so clear it here rather than leave it stranded.
-      patch(id, (v) => ({ ...v, pendingApproval: null }));
+      // Only this session's own subagent approvals are affected server-side
+      // (another session's subagent keeps running), so only clear those.
+      patch(id, (v) => {
+        const stoppedSessionId = v.summary.activeSessionId;
+        const nextSubagent = { ...v.pendingSubagentApprovals };
+        for (const [reqId, req] of Object.entries(nextSubagent)) {
+          if (req.parentSessionId === stoppedSessionId) delete nextSubagent[reqId];
+        }
+        return { ...v, pendingApproval: null, pendingSubagentApprovals: nextSubagent };
+      });
       await forge.agent.stop(id);
     },
 
@@ -690,7 +725,7 @@ export const useForge = create<ForgeState>((set, get) => {
       if (!id) return;
       await forge.checkpoints.undo(id, filePath);
       const checkpoints = await forge.checkpoints.list(id);
-      const content = await forge.fs.readFile(filePath);
+      const content = await forge.fs.readFile(id, filePath);
       patch(id, (v) => ({
         ...v,
         checkpoints,

@@ -5,7 +5,7 @@ import { fileURLToPath } from 'node:url';
 
 import { loadEnv, setEnvValue } from './env';
 import { transcribe } from './transcribe';
-import { IPC, SETTINGS_KEYS, MAX_TOOL_CALLS_LIMIT } from './ipc-channels';
+import { IPC, SETTINGS_KEYS, SECRET_SETTINGS_KEYS, SECRET_SENTINEL, MAX_TOOL_CALLS_LIMIT } from './ipc-channels';
 import type {
   WorkspaceHydration,
   ChatImage,
@@ -77,6 +77,7 @@ const manager = new WorkspaceManager({
   },
   commandApproval: (workspaceId, sessionId, requestId, command) =>
     send(IPC.cmdApprovalRequest, workspaceId, { requestId, command, sessionId }),
+  subagentCommandApproval: (workspaceId, req) => send(IPC.subagentCmdApprovalRequest, workspaceId, req),
   roadmapUpdated: (workspaceId, sessionId, items) => send(IPC.roadmapUpdated, workspaceId, sessionId, items),
 });
 
@@ -196,6 +197,11 @@ app.whenReady().then(() => {
     return true;
   });
 
+  ipcMain.handle(IPC.subagentCmdApprovalDecide, async (_e, workspaceId: string, requestId: string, approved: boolean) => {
+    manager.get(workspaceId)?.resolveSubagentApproval(requestId, approved);
+    return true;
+  });
+
   ipcMain.handle(IPC.wsSetRoot, async (_e, workspaceId: string) => {
     const ws = manager.get(workspaceId);
     if (!ws || !win) return null;
@@ -252,7 +258,11 @@ app.whenReady().then(() => {
     };
   });
 
-  ipcMain.handle(IPC.fsListDir, async (_e, dirPath: string) => fsService.listDir(dirPath));
+  ipcMain.handle(IPC.fsListDir, async (_e, workspaceId: string, dirPath: string) => {
+    const ws = manager.get(workspaceId);
+    if (!ws?.rootPath) return [];
+    return fsService.listDirDetailed(ws.rootPath, dirPath);
+  });
 
   ipcMain.handle(IPC.fsListTree, async (_e, workspaceId: string) => {
     const ws = manager.get(workspaceId);
@@ -260,7 +270,11 @@ app.whenReady().then(() => {
     return fsService.listDir(ws.rootPath);
   });
 
-  ipcMain.handle(IPC.fsReadFile, async (_e, filePath: string) => fsService.readFile(filePath));
+  ipcMain.handle(IPC.fsReadFile, async (_e, workspaceId: string, filePath: string) => {
+    const ws = manager.get(workspaceId);
+    if (!ws?.rootPath) return '';
+    return fsService.readFileSafe(ws.rootPath, filePath);
+  });
 
   ipcMain.handle(IPC.fsWriteFile, async (_e, workspaceId: string, filePath: string, content: string) => {
     const ws = manager.get(workspaceId);
@@ -464,16 +478,28 @@ app.whenReady().then(() => {
     return { provider, model };
   });
 
+  // settingsGet never returns a real credential value — only whether one is
+  // configured — so a compromised renderer can't exfiltrate every provider
+  // key in one silent IPC call. Non-secret fields (base URL, model, max tool
+  // calls) aren't credentials and are still returned as-is.
   ipcMain.handle(IPC.settingsGet, async (): Promise<ProviderSettings> => {
     const out = {} as ProviderSettings;
-    for (const key of SETTINGS_KEYS) out[key] = process.env[key] || '';
+    const secretKeys = new Set<string>(SECRET_SETTINGS_KEYS);
+    for (const key of SETTINGS_KEYS) {
+      const real = process.env[key] || '';
+      out[key] = secretKeys.has(key) ? (real ? SECRET_SENTINEL : '') : real;
+    }
     return out;
   });
 
   ipcMain.handle(IPC.settingsSet, async (_e, values: Partial<ProviderSettings>) => {
+    const secretKeys = new Set<string>(SECRET_SETTINGS_KEYS);
     for (const key of SETTINGS_KEYS) {
       if (!(key in values)) continue;
       let value = (values[key] ?? '').trim();
+      // The sentinel is only ever something settingsGet handed back for an
+      // untouched field — never persist it as if it were a real new key.
+      if (secretKeys.has(key) && value === SECRET_SENTINEL) continue;
       if (key === 'MAX_TOOL_CALLS' && value) {
         const n = Number.parseInt(value, 10);
         value = Number.isFinite(n) ? String(Math.min(Math.max(n, 1), MAX_TOOL_CALLS_LIMIT)) : '';

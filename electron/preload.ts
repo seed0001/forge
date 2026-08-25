@@ -31,9 +31,9 @@ contextBridge.exposeInMainWorld('forge', {
     onUpdated: (cb: (workspaceId: string, sessions: unknown) => void) => on(IPC.sessUpdated, cb),
   },
   fs: {
-    listDir: (dirPath: string) => ipcRenderer.invoke(IPC.fsListDir, dirPath),
+    listDir: (workspaceId: string, dirPath: string) => ipcRenderer.invoke(IPC.fsListDir, workspaceId, dirPath),
     listTree: (id: string) => ipcRenderer.invoke(IPC.fsListTree, id),
-    readFile: (filePath: string) => ipcRenderer.invoke(IPC.fsReadFile, filePath),
+    readFile: (workspaceId: string, filePath: string) => ipcRenderer.invoke(IPC.fsReadFile, workspaceId, filePath),
     writeFile: (id: string, filePath: string, content: string) =>
       ipcRenderer.invoke(IPC.fsWriteFile, id, filePath, content),
     openInBrowser: (filePath: string) => ipcRenderer.invoke(IPC.fsOpenInBrowser, filePath),
@@ -51,6 +51,10 @@ contextBridge.exposeInMainWorld('forge', {
     decideApproval: (id: string, requestId: string, approved: boolean) =>
       ipcRenderer.invoke(IPC.cmdApprovalDecide, id, requestId, approved),
     onApprovalRequest: (cb: (workspaceId: string, req: unknown) => void) => on(IPC.cmdApprovalRequest, cb),
+    decideSubagentApproval: (id: string, requestId: string, approved: boolean) =>
+      ipcRenderer.invoke(IPC.subagentCmdApprovalDecide, id, requestId, approved),
+    onSubagentApprovalRequest: (cb: (workspaceId: string, req: unknown) => void) =>
+      on(IPC.subagentCmdApprovalRequest, cb),
   },
   diff: {
     decide: (id: string, diffId: string, hunkIndex: number | 'all', decision: 'accepted' | 'rejected') =>

@@ -3,6 +3,7 @@ import { TerminalSession } from './terminal-session';
 import { DiffStore, nextId } from './diff-store';
 import { AgentSession } from './agent-service';
 import { writeFile } from './fs-service';
+import { isAuditLogPath } from './audit-service';
 import { slugify, type ExtractedPage } from './page-extract';
 import { oneOffCompletion } from './chat-provider';
 import {
@@ -25,6 +26,7 @@ import type {
   Autonomy,
   RoadmapItem,
   RoadmapItemStatus,
+  SubagentCommandApproval,
 } from './ipc-channels';
 
 export interface WorkspaceEmit {
@@ -39,9 +41,19 @@ export interface WorkspaceEmit {
   sessions: (workspaceId: string) => void;
   /** A run_command call is waiting on the Operator at Manual autonomy. */
   commandApproval: (workspaceId: string, sessionId: string, requestId: string, command: string) => void;
+  /** A subagent's run_command call is waiting on the Operator — see requestSubagentApproval. */
+  subagentCommandApproval: (workspaceId: string, req: SubagentCommandApproval) => void;
   /** A session's whole roadmap, sent fresh on every change (propose/decide/edit/push-back/status). */
   roadmapUpdated: (workspaceId: string, sessionId: string, items: RoadmapItem[]) => void;
 }
+
+/**
+ * How long a subagent's command approval waits for the Operator before
+ * failing closed (denied, never approved) — bounds the "no one watching"
+ * risk the hardcoded 'auto' autonomy used to sidestep entirely, without
+ * reintroducing an unbounded hang if the Operator has stepped away.
+ */
+const SUBAGENT_APPROVAL_TIMEOUT_MS = 3 * 60 * 1000;
 
 /**
  * Everything about "is this session's agent working right now" — one copy
@@ -91,6 +103,13 @@ export class Workspace {
   private activeSessionId: string | null = null;
   private sessionSeq = 0;
   private runtimes = new Map<string, SessionRuntime>();
+  /**
+   * Workspace-scoped (not per-session) because subagents aren't sessions —
+   * there is no SessionRuntime to hang a subagent's approval off of. Tagged
+   * with parentSessionId purely so stopping/deleting that session can flush
+   * its subagents' outstanding approvals too, same as pendingApprovals.
+   */
+  private pendingSubagentApprovals = new Map<string, { resolve: (approved: boolean) => void; parentSessionId: string }>();
 
   /** Set when the agent finishes while the user is looking at another workspace. */
   unseenCompletion = false;
@@ -215,6 +234,7 @@ export class Workspace {
     const rt = this.runtimes.get(sessionId);
     rt?.agent?.stop();
     for (const [, resolve] of rt?.pendingApprovals ?? []) resolve(false);
+    this.flushSubagentApprovalsFor(sessionId);
     this.runtimes.delete(sessionId);
 
     this.sessions = this.sessions.filter((s) => s.id !== sessionId);
@@ -357,9 +377,59 @@ export class Workspace {
     }
   }
 
-  /** Auto autonomy: accept every hunk immediately and write it, bypassing the review queue. */
+  /**
+   * Same shape as requestApproval, for a subagent's run_command instead of a
+   * session's own. Fails closed: if the Operator never answers within
+   * SUBAGENT_APPROVAL_TIMEOUT_MS, this resolves false (denied), never true —
+   * a stalled/incomplete subagent task is the acceptable worst case, an
+   * unreviewed command execution is not.
+   */
+  requestSubagentApproval(parentSessionId: string, command: string, label: string): Promise<boolean> {
+    const requestId = nextId('subappr');
+    this.emit.subagentCommandApproval(this.id, { requestId, command, label, parentSessionId });
+    return new Promise((resolve) => {
+      this.pendingSubagentApprovals.set(requestId, { resolve, parentSessionId });
+      setTimeout(() => {
+        const entry = this.pendingSubagentApprovals.get(requestId);
+        if (!entry) return; // Already answered or already flushed by a stop/delete.
+        this.pendingSubagentApprovals.delete(requestId);
+        entry.resolve(false);
+      }, SUBAGENT_APPROVAL_TIMEOUT_MS);
+    });
+  }
+
+  resolveSubagentApproval(requestId: string, approved: boolean) {
+    const entry = this.pendingSubagentApprovals.get(requestId);
+    if (!entry) return;
+    this.pendingSubagentApprovals.delete(requestId);
+    entry.resolve(approved);
+  }
+
+  /** Resolves every subagent approval tied to this session as denied — called wherever a session's own pendingApprovals are flushed. */
+  private flushSubagentApprovalsFor(sessionId: string) {
+    for (const [requestId, entry] of this.pendingSubagentApprovals) {
+      if (entry.parentSessionId !== sessionId) continue;
+      this.pendingSubagentApprovals.delete(requestId);
+      entry.resolve(false);
+    }
+  }
+
+  /**
+   * Auto autonomy: accept every hunk immediately and write it, bypassing the
+   * review queue — EXCEPT for the workspace's own AUDIT.md, which always goes
+   * through the normal pending-review queue instead, regardless of autonomy.
+   * Otherwise an agent (potentially steered by injected content) could
+   * silently rewrite or truncate its own mutation history with nobody ever
+   * looking.
+   */
   async applyEditAuto(diff: PendingDiff) {
     if (!this.rootPath) return;
+    if (isAuditLogPath(this.rootPath, diff.path)) {
+      this.diffs.add(diff);
+      this.emit.diffProposed(this.id, diff);
+      this.emit.status(this.id);
+      return;
+    }
     this.diffs.add(diff);
     const settled = await this.diffs.decide(this.rootPath, diff.id, 'all', 'accepted');
     if (settled) this.emit.diffUpdated(this.id, settled);
@@ -662,6 +732,7 @@ export class Workspace {
           rt.terminal.run(requestId, 'agent', command, (evt) => this.recordTerminal(evt)),
         getAutonomy: () => this.autonomy,
         requestCommandApproval: (command) => this.requestApproval(sessionId, command),
+        requestSubagentCommandApproval: (command, label) => this.requestSubagentApproval(sessionId, command, label),
         applyEditAuto: (diff) => this.applyEditAuto(diff),
       }, rulesDir);
       const session = findSession();
@@ -712,6 +783,7 @@ export class Workspace {
       for (const [, resolve] of rt.pendingApprovals) resolve(false);
       rt.pendingApprovals.clear();
     }
+    this.flushSubagentApprovalsFor(sessionId);
   }
 
   markSeen() {

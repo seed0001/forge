@@ -11,6 +11,7 @@ import type {
   SessionSummary,
   Autonomy,
   CommandApproval,
+  SubagentCommandApproval,
   CatalogModel,
   ChatProvider,
   UpdateStatus,
@@ -52,9 +53,9 @@ export interface ForgeApi {
     onUpdated: (cb: (workspaceId: string, sessions: SessionSummary[]) => void) => Unsubscribe;
   };
   fs: {
-    listDir: (dirPath: string) => Promise<FileNode[]>;
+    listDir: (workspaceId: string, dirPath: string) => Promise<FileNode[]>;
     listTree: (id: string) => Promise<FileNode[]>;
-    readFile: (filePath: string) => Promise<string>;
+    readFile: (workspaceId: string, filePath: string) => Promise<string>;
     writeFile: (id: string, filePath: string, content: string) => Promise<boolean>;
     openInBrowser: (filePath: string) => Promise<boolean>;
   };
@@ -70,6 +71,8 @@ export interface ForgeApi {
     onMessage: (cb: (workspaceId: string, sessionId: string, msg: ChatMessage) => void) => Unsubscribe;
     decideApproval: (id: string, requestId: string, approved: boolean) => Promise<boolean>;
     onApprovalRequest: (cb: (workspaceId: string, req: CommandApproval) => void) => Unsubscribe;
+    decideSubagentApproval: (id: string, requestId: string, approved: boolean) => Promise<boolean>;
+    onSubagentApprovalRequest: (cb: (workspaceId: string, req: SubagentCommandApproval) => void) => Unsubscribe;
   };
   diff: {
     decide: (

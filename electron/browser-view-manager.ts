@@ -5,6 +5,17 @@ import { buildExtractionScript, type ExtractedPage } from './page-extract';
 
 export type BrowserViewEmit = (workspaceId: string, state: BrowserNavState) => void;
 
+/**
+ * Electron's default User-Agent identifies itself with an "Electron/x.y.z"
+ * (and the app name) token — plenty of sites, Google search included, treat
+ * that as automated/suspicious traffic and throw a CAPTCHA at it. This is a
+ * normal desktop Chrome UA instead — built from the REAL Chromium version
+ * this Electron build actually ships (process.versions.chrome), so it never
+ * goes stale across Electron upgrades, just presenting as what this
+ * genuinely is under the hood: a Chromium browser being used by a person.
+ */
+const DESKTOP_CHROME_UA = `Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${process.versions.chrome} Safari/537.36`;
+
 /** A bare domain/host ("example.com", "localhost:3000") gets https:// prepended; anything else that isn't already a URL is treated as a search query. */
 function normalizeUrlOrSearch(input: string): string {
   const trimmed = input.trim();
@@ -48,6 +59,7 @@ export class BrowserViewManager {
       },
     });
     const wc = view.webContents;
+    wc.setUserAgent(DESKTOP_CHROME_UA);
     const pushState = () => {
       const workspaceId = this.currentWorkspaceId;
       if (!workspaceId) return;

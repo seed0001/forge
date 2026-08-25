@@ -119,8 +119,17 @@ if (releases.length === 0) fail(`electron-builder reported success but no releas
 
 if (releases.length > 1) {
   console.log(`Found ${releases.length} draft releases tagged ${tag} — merging into one.`);
+  // `gh release upload <tag>` resolves by tag alone — with two releases still
+  // sharing this tag, it silently picks whichever the API happens to return
+  // first, which can be the one about to get deleted. Delete every duplicate
+  // FIRST so the tag is unambiguous, THEN upload whatever's missing.
   releases.sort((a, b) => b.assets.length - a.assets.length);
   const [primary, ...dupes] = releases;
+
+  for (const dupe of dupes) {
+    run(`gh api -X DELETE repos/${owner}/${repo}/releases/${dupe.id}`);
+    console.log(`Deleted duplicate draft release ${dupe.id}.`);
+  }
 
   const expected = {
     [`${productName}-Setup-${version}.exe`]: path.join(root, 'release', `${productName} Setup ${version}.exe`),
@@ -140,12 +149,7 @@ if (releases.length > 1) {
     const dashedCopy = path.join(root, 'release', remoteName);
     fs.copyFileSync(localPath, dashedCopy);
     run(`gh release upload ${tag} "${dashedCopy}" --repo ${owner}/${repo} --clobber`);
-    console.log(`Uploaded missing asset ${remoteName} to the primary release.`);
-  }
-
-  for (const dupe of dupes) {
-    run(`gh api -X DELETE repos/${owner}/${repo}/releases/${dupe.id}`);
-    console.log(`Deleted duplicate draft release ${dupe.id}.`);
+    console.log(`Uploaded missing asset ${remoteName}.`);
   }
 } else {
   const names = releases[0].assets.map((a) => a.name).sort();

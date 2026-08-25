@@ -13,6 +13,7 @@ import type {
   CommandApproval,
   OpenRouterModel,
   UpdateStatus,
+  ProviderSettings,
 } from '../../electron/ipc-channels';
 
 type Unsubscribe = () => void;
@@ -91,6 +92,10 @@ export interface ForgeApi {
     download: () => Promise<boolean>;
     install: () => Promise<boolean>;
     onStatus: (cb: (status: UpdateStatus) => void) => Unsubscribe;
+  };
+  settings: {
+    get: () => Promise<ProviderSettings>;
+    set: (values: Partial<ProviderSettings>) => Promise<boolean>;
   };
 }
 

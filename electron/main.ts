@@ -5,8 +5,8 @@ import { fileURLToPath } from 'node:url';
 
 import { loadEnv, setEnvValue } from './env';
 import { transcribe } from './transcribe';
-import { IPC } from './ipc-channels';
-import type { WorkspaceHydration, ChatImage } from './ipc-channels';
+import { IPC, SETTINGS_KEYS } from './ipc-channels';
+import type { WorkspaceHydration, ChatImage, ProviderSettings } from './ipc-channels';
 import * as fsService from './fs-service';
 import { WorkspaceManager } from './workspace-manager';
 import { saveAttachment, attachmentDirFor, readImageAsDataUrl } from './attachment-store';
@@ -331,11 +331,30 @@ app.whenReady().then(() => {
     }
   });
 
-  ipcMain.handle(IPC.modelsGetCurrent, async () => process.env.OPENROUTER_MODEL || 'anthropic/claude-3.5-sonnet');
+  // Empty string, not a hardcoded slug, when nothing's configured yet — the
+  // Model Selector renders that as "Select model" rather than silently
+  // implying some particular vendor's model is already chosen.
+  ipcMain.handle(IPC.modelsGetCurrent, async () => process.env.OPENROUTER_MODEL || '');
 
   ipcMain.handle(IPC.modelsSetCurrent, async (_e, modelId: string) => {
     process.env.OPENROUTER_MODEL = modelId;
     setEnvValue(envFile, 'OPENROUTER_MODEL', modelId);
+    return true;
+  });
+
+  ipcMain.handle(IPC.settingsGet, async (): Promise<ProviderSettings> => {
+    const out = {} as ProviderSettings;
+    for (const key of SETTINGS_KEYS) out[key] = process.env[key] || '';
+    return out;
+  });
+
+  ipcMain.handle(IPC.settingsSet, async (_e, values: Partial<ProviderSettings>) => {
+    for (const key of SETTINGS_KEYS) {
+      if (!(key in values)) continue;
+      const value = (values[key] ?? '').trim();
+      process.env[key] = value;
+      setEnvValue(envFile, key, value);
+    }
     return true;
   });
 

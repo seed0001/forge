@@ -1,5 +1,6 @@
 import { contextBridge, ipcRenderer } from 'electron';
 import { IPC } from './ipc-channels';
+import type { ProviderSettings } from './ipc-channels';
 
 /** Subscribe helper: events are broadcast for every workspace, tagged with its id. */
 function on<T extends unknown[]>(channel: string, cb: (...args: T) => void) {
@@ -80,5 +81,9 @@ contextBridge.exposeInMainWorld('forge', {
     download: () => ipcRenderer.invoke(IPC.updateDownload),
     install: () => ipcRenderer.invoke(IPC.updateInstall),
     onStatus: (cb: (status: unknown) => void) => on(IPC.updateStatus, cb),
+  },
+  settings: {
+    get: () => ipcRenderer.invoke(IPC.settingsGet),
+    set: (values: Partial<ProviderSettings>) => ipcRenderer.invoke(IPC.settingsSet, values),
   },
 });

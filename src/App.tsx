@@ -11,6 +11,8 @@ import { FontPicker } from './components/FontPicker';
 import { AutonomySlider } from './components/AutonomySlider';
 import { ModelSelector } from './components/ModelSelector';
 import { UpdateControl } from './components/UpdateControl';
+import { SettingsOverlay } from './components/SettingsOverlay';
+import { IconGear } from './components/icons';
 
 const VIEWS = [
   { key: 'chat', label: 'Chat' },
@@ -21,6 +23,7 @@ const VIEWS = [
 export default function App() {
   const init = useForge((s) => s.init);
   const setCenter = useForge((s) => s.setCenter);
+  const openSettings = useForge((s) => s.openSettings);
   const view = useActiveWorkspace();
 
   useEffect(() => {
@@ -53,6 +56,9 @@ export default function App() {
             <ModelSelector />
             <AutonomySlider />
             <FontPicker />
+            <button className="seg-icon" onClick={openSettings} title="Settings">
+              <IconGear className="icon-sm" />
+            </button>
           </div>
 
           <div className="center-body">
@@ -64,6 +70,7 @@ export default function App() {
       </div>
       {view?.reviewing && <ReviewOverlay />}
       {view?.paintTarget && <PaintEditorOverlay />}
+      <SettingsOverlay />
     </div>
   );
 }

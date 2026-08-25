@@ -52,6 +52,9 @@ export const IPC = {
   updateDownload: 'update:download',
   updateInstall: 'update:install',
   updateStatus: 'update:status',
+
+  settingsGet: 'settings:get',
+  settingsSet: 'settings:set',
 } as const;
 
 export type WorkspaceStatus = 'idle' | 'running' | 'review';
@@ -197,6 +200,28 @@ export type UpdateStatus =
   | { state: 'downloading'; version: string; percent: number }
   | { state: 'downloaded'; version: string }
   | { state: 'error'; message: string };
+
+/**
+ * Every credential the Settings page can read and write, keyed by the exact
+ * .env variable name — see setEnvValue in electron/env.ts, which is what
+ * actually persists a change. Empty string means "not configured" rather
+ * than absent, so the renderer never has to distinguish undefined from "".
+ */
+export interface ProviderSettings {
+  OPENROUTER_API_KEY: string;
+  SEARCH_API: string;
+  TRANSCRIBE_API_KEY: string;
+  TRANSCRIBE_BASE_URL: string;
+  TRANSCRIBE_MODEL: string;
+}
+
+export const SETTINGS_KEYS = [
+  'OPENROUTER_API_KEY',
+  'SEARCH_API',
+  'TRANSCRIBE_API_KEY',
+  'TRANSCRIBE_BASE_URL',
+  'TRANSCRIBE_MODEL',
+] as const satisfies readonly (keyof ProviderSettings)[];
 
 /** Everything the renderer needs to display a workspace it has switched to. */
 export interface WorkspaceHydration {

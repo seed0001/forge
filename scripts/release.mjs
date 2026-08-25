@@ -83,30 +83,61 @@ header('Smoke-testing the packaged build');
 const exe = path.join(root, 'release', 'win-unpacked', `${productName}.exe`);
 if (!fs.existsSync(exe)) fail(`Packaged exe not found at ${exe}`);
 
+// Rendering is checked by literally sampling pixels off the screen rather
+// than querying Chromium's accessibility tree: that tree only populates once
+// something (a screen reader, a UIA client) has requested it, on no fixed
+// timeline, so a text-content search can report "blank" on a build that
+// actually rendered fine a moment later. A grid of pixel samples across the
+// real window has no such lag — a genuinely blank window is one uniform
+// color; any rendered UI (tab strip, text, borders) is not.
 const smokeTestScript = `
 $ErrorActionPreference = 'SilentlyContinue'
-$p = Start-Process -FilePath '${exe.replace(/'/g, "''")}' -PassThru
-Start-Sleep -Seconds 6
+Add-Type -AssemblyName System.Drawing
 Add-Type -AssemblyName UIAutomationClient
-$rootEl = [System.Windows.Automation.AutomationElement]::RootElement
+Add-Type -Namespace Win32 -Name Native -MemberDefinition '
+  [DllImport("user32.dll")] public static extern bool GetClientRect(IntPtr hWnd, out RECT lpRect);
+  [DllImport("user32.dll")] public static extern bool ClientToScreen(IntPtr hWnd, ref POINT lpPoint);
+  public struct RECT { public int Left; public int Top; public int Right; public int Bottom; }
+  public struct POINT { public int X; public int Y; }
+'
 
+$p = Start-Process -FilePath '${exe.replace(/'/g, "''")}' -PassThru
+Start-Sleep -Seconds 8
+
+$rootEl = [System.Windows.Automation.AutomationElement]::RootElement
 $errCond = New-Object System.Windows.Automation.PropertyCondition([System.Windows.Automation.AutomationElement]::NameProperty, 'Error')
 $errWin = $rootEl.FindFirst([System.Windows.Automation.TreeScope]::Children, $errCond)
 $crashed = $errWin -ne $null
 
 $stillRunning = -not (Get-Process -Id $p.Id -ErrorAction SilentlyContinue).HasExited
 
-# The renderer having actually painted is checked by looking for the "Chat"
-# tab label every real window shows (from App.tsx's view switcher) — a blank
-# unrendered window has no text content at all, crash dialog or not.
 $rendered = $false
 if ($stillRunning -and -not $crashed) {
-  $appWin = Get-Process -Id $p.Id | ForEach-Object { $_.MainWindowHandle } | Where-Object { $_ -ne 0 }
-  if ($appWin) {
-    $winEl = [System.Windows.Automation.AutomationElement]::FromHandle($appWin)
-    $textCond = New-Object System.Windows.Automation.PropertyCondition([System.Windows.Automation.AutomationElement]::NameProperty, 'Chat')
-    $chatEl = $winEl.FindFirst([System.Windows.Automation.TreeScope]::Descendants, $textCond)
-    $rendered = $chatEl -ne $null
+  $hwnd = (Get-Process -Id $p.Id).MainWindowHandle
+  if ($hwnd -ne 0) {
+    $rect = New-Object Win32.Native+RECT
+    [Win32.Native]::GetClientRect($hwnd, [ref]$rect) | Out-Null
+    $pt = New-Object Win32.Native+POINT
+    [Win32.Native]::ClientToScreen($hwnd, [ref]$pt) | Out-Null
+    $w = $rect.Right - $rect.Left
+    $h = $rect.Bottom - $rect.Top
+    if ($w -gt 20 -and $h -gt 20) {
+      $bmp = New-Object System.Drawing.Bitmap $w, $h
+      $g = [System.Drawing.Graphics]::FromImage($bmp)
+      $g.CopyFromScreen($pt.X, $pt.Y, 0, 0, (New-Object System.Drawing.Size $w, $h))
+      $distinctColors = New-Object System.Collections.Generic.HashSet[int]
+      for ($gy = 0; $gy -lt 20; $gy++) {
+        for ($gx = 0; $gx -lt 20; $gx++) {
+          $x = [int]($w * ($gx + 0.5) / 20)
+          $y = [int]($h * ($gy + 0.5) / 20)
+          $c = $bmp.GetPixel($x, $y)
+          [void]$distinctColors.Add($c.ToArgb())
+        }
+      }
+      # A genuinely blank window (unpainted, or painted only its solid
+      # backgroundColor) samples as exactly one color across the whole grid.
+      $rendered = $distinctColors.Count -gt 1
+    }
   }
 }
 
@@ -126,7 +157,7 @@ if (!smokeResult.includes('SMOKE_TEST_OK')) {
     : smokeResult.includes('SMOKE_TEST_EXITED')
       ? 'the process exited on its own'
       : smokeResult.includes('SMOKE_TEST_BLANK')
-        ? 'the window opened but never rendered the app (blank window — no "Chat" tab found)'
+        ? 'the window opened but the screen sampled as one solid color (blank/unrendered)'
         : `unexpected smoke-test output: ${smokeResult || '(none)'}`;
   fail(`The packaged build failed its smoke test: ${reason}.\nNothing was published. Run "release\\win-unpacked\\${productName}.exe" by hand to see it.`);
 }

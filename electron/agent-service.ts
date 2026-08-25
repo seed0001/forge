@@ -6,6 +6,7 @@ import { audit } from './audit-service';
 import { computeHunks, countChanges } from './diff-service';
 import { nextId } from './diff-store';
 import { extFromMediaType, IMAGE_MIME_BY_EXT } from './media-types';
+import { listOpenRouterModels } from './models-service';
 import type { ActivityEvent, TermDataEvent, PendingDiff, FileNode, Autonomy, ChatImage } from './ipc-channels';
 
 type Role = 'system' | 'user' | 'assistant' | 'tool';
@@ -82,31 +83,40 @@ const DEFAULT_MUSIC_MODEL = 'google/lyria-3-pro-preview'; // full song w/ vocals
 const DEFAULT_MUSIC_CLIP_MODEL = 'google/lyria-3-clip-preview'; // 30s instrumental clip/loop
 
 /**
- * OpenRouter's completion response does not report the model's context window,
- * only tokens actually used — so the size half of the usage bar is a lookup by
- * model slug, not something the API hands us. Matched loosely by family;
- * conservative default for anything unrecognized.
+ * A model-family regex guess, used ONLY if the real catalog lookup below
+ * can't be reached (e.g. no network yet). Deliberately not the primary path
+ * — a hand-maintained pattern table goes stale the moment a vendor ships a
+ * bigger context window, which is exactly what made the old version of this
+ * function wrong.
  */
-const CONTEXT_WINDOWS: Array<[RegExp, number]> = [
-  [/claude-(3|3\.5|3-5)/i, 200_000],
+const ESTIMATED_CONTEXT_WINDOWS: Array<[RegExp, number]> = [
+  [/gemini/i, 1_000_000],
   [/claude/i, 200_000],
-  [/gpt-4o|gpt-4\.1/i, 128_000],
-  [/gpt-4-turbo/i, 128_000],
-  [/gpt-4\b/i, 8_192],
-  [/gpt-3\.5/i, 16_385],
-  [/gemini-(1\.5|2)/i, 1_000_000],
-  [/gemini/i, 32_000],
-  [/llama-3\.1|llama-3-1|llama-4/i, 128_000],
-  [/llama/i, 8_192],
-  [/mixtral|mistral/i, 32_000],
+  [/gpt-4o|gpt-4\.1|gpt-5/i, 128_000],
   [/grok/i, 128_000],
+  [/llama-3\.1|llama-3-1|llama-4/i, 128_000],
   [/deepseek/i, 64_000],
-  [/qwen/i, 32_000],
 ];
 
-function contextWindowForModel(model: string): number {
-  for (const [pattern, size] of CONTEXT_WINDOWS) if (pattern.test(model)) return size;
-  return 32_000;
+/**
+ * OpenRouter's completion response does not report the model's context
+ * window, only tokens actually used. Rather than guess from the model's
+ * name, this looks up the REAL context length OpenRouter reports for the
+ * exact model id — the same catalog models-service.ts already fetches and
+ * caches for the model selector, so this is a cache hit after the first call
+ * and never a fresh network request on the hot path.
+ */
+async function contextWindowForModel(model: string): Promise<number> {
+  try {
+    const models = await listOpenRouterModels();
+    const match = models.find((m) => m.id === model);
+    if (match?.contextLength) return match.contextLength;
+  } catch {
+    // Catalog unreachable — fall through to the estimate below rather than
+    // let a usage-tracking failure interrupt the actual conversation.
+  }
+  for (const [pattern, size] of ESTIMATED_CONTEXT_WINDOWS) if (pattern.test(model)) return size;
+  return 128_000;
 }
 
 /**
@@ -1060,8 +1070,8 @@ export class AgentSession {
    */
   async generateTitle(): Promise<string | null> {
     const apiKey = process.env.OPENROUTER_API_KEY;
-    if (!apiKey) return null;
-    const model = process.env.OPENROUTER_MODEL || 'anthropic/claude-3.5-sonnet';
+    const model = process.env.OPENROUTER_MODEL;
+    if (!apiKey || !model) return null;
 
     const firstUser = this.messages.find((m) => m.role === 'user');
     const firstReply = this.messages.find((m) => m.role === 'assistant' && typeof m.content === 'string' && m.content);
@@ -1236,12 +1246,17 @@ export class AgentSession {
     }
 
     const apiKey = process.env.OPENROUTER_API_KEY;
-    const model = process.env.OPENROUTER_MODEL || 'anthropic/claude-3.5-sonnet';
+    const model = process.env.OPENROUTER_MODEL;
 
     if (!apiKey) {
       this.flushMessage(
         'No OPENROUTER_API_KEY is set. Add one to forge/.env (see .env.example) and restart the app to talk to a real model.'
       );
+      this.cb.onStatus(false);
+      return;
+    }
+    if (!model) {
+      this.flushMessage('No model selected. Pick one from the model selector at the top of the chat pane.');
       this.cb.onStatus(false);
       return;
     }
@@ -1323,7 +1338,7 @@ export class AgentSession {
         status: 'done',
       });
       if (typeof data.usage?.prompt_tokens === 'number') {
-        this.cb.onUsage({ promptTokens: data.usage.prompt_tokens, contextWindow: contextWindowForModel(model) });
+        this.cb.onUsage({ promptTokens: data.usage.prompt_tokens, contextWindow: await contextWindowForModel(model) });
       }
       if (typeof data.usage?.cost === 'number') {
         this.cb.onCost(data.usage.cost);
@@ -1333,7 +1348,7 @@ export class AgentSession {
       this.messages.push(message);
 
       if (typeof data.usage?.prompt_tokens === 'number') {
-        await this.compactIfNeeded(data.usage.prompt_tokens, contextWindowForModel(model), apiKey, model);
+        await this.compactIfNeeded(data.usage.prompt_tokens, await contextWindowForModel(model), apiKey, model);
       }
 
       if (message.tool_calls && message.tool_calls.length > 0) {

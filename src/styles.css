@@ -735,6 +735,32 @@ input, textarea { font: inherit; color: inherit; }
 .rev-foot { height: 52px; flex: none; display: flex; align-items: center; gap: var(--s3); padding: 0 var(--s5); border-top: 1px solid var(--line); }
 .progress { font-size: var(--t-sm); color: var(--fg-2); font-family: var(--font-mono); }
 
+/* ── Settings overlay ──────────────────────────────────────────────────── */
+.settings-body { flex: 1; min-height: 0; overflow-y: auto; padding: var(--s6) var(--s5); }
+.settings-section { max-width: 520px; margin: 0 auto var(--s8); }
+.settings-section-head { display: flex; align-items: baseline; justify-content: space-between; gap: var(--s3); }
+.settings-dot { width: 6px; height: 6px; border-radius: 50%; flex: none; }
+.settings-section-name { font-size: var(--t-md); font-weight: 600; }
+.settings-link { font-size: var(--t-xs); color: var(--fg-3); }
+.settings-link:hover { color: var(--fg-2); }
+.settings-section-blurb { font-size: var(--t-sm); color: var(--fg-3); margin: var(--s1) 0 var(--s4); line-height: 1.5; }
+.settings-field { display: block; margin-bottom: var(--s3); }
+.settings-field-label { display: block; font-size: var(--t-xs); font-weight: 600; color: var(--fg-2); margin-bottom: var(--s1); }
+.settings-input-wrap { position: relative; }
+.settings-input {
+  width: 100%; height: 34px; padding: 0 var(--s8) 0 var(--s3);
+  background: var(--bg-raised); border: 1px solid var(--line-strong); border-radius: var(--r-md);
+  font-size: var(--t-sm); color: var(--fg);
+}
+.settings-input:focus { outline: none; border-color: var(--fg-3); }
+.settings-input::placeholder { color: var(--fg-3); }
+.settings-eye {
+  position: absolute; right: 3px; top: 3px; width: 28px; height: 28px;
+  display: flex; align-items: center; justify-content: center;
+  border-radius: var(--r-sm); color: var(--fg-3);
+}
+.settings-eye:hover { background: var(--bg-hover); color: var(--fg); }
+
 /* ── Paint editor overlay ─────────────────────────────────────────────── */
 .paint-toolbar {
   flex: none; display: flex; align-items: center; gap: var(--s4);

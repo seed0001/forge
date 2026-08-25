@@ -131,3 +131,16 @@ export const IconSearch = (p: P) => (
 export const IconDownload = (p: P) => (
   <svg {...stroke(p)}><path d="M12 3.5v11" /><path d="M7 10l5 5 5-5" /><path d="M5 19.5h14" /></svg>
 );
+export const IconGear = (p: P) => (
+  <svg {...stroke(p)}>
+    <circle cx="12" cy="12" r="3" />
+    <path d="M12 3.5v2.3M12 18.2v2.3M20.5 12h-2.3M5.8 12H3.5M17.66 6.34l-1.63 1.63M7.97 16.03l-1.63 1.63M17.66 17.66l-1.63-1.63M7.97 7.97L6.34 6.34" />
+  </svg>
+);
+export const IconEyeOff = (p: P) => (
+  <svg {...stroke(p)}>
+    <path d="M3.5 3.5l17 17" />
+    <path d="M10.6 6.7A9.9 9.9 0 0 1 12 6.5c6 0 9.5 5.5 9.5 5.5a13.6 13.6 0 0 1-2.9 3.4M6.9 7.9C4.4 9.4 2.5 12 2.5 12s3.5 5.5 9.5 5.5a9.5 9.5 0 0 0 3.2-.55" />
+    <path d="M9.6 9.9a2.75 2.75 0 0 0 3.9 3.9" />
+  </svg>
+);

@@ -14,6 +14,7 @@ import type {
   CommandApproval,
   OpenRouterModel,
   UpdateStatus,
+  ProviderSettings,
 } from '../../electron/ipc-channels';
 
 export interface OpenFile {
@@ -88,6 +89,11 @@ interface ForgeState {
   /** Manual-only, app-wide — see electron/updater.ts for why nothing here runs on its own. */
   updateStatus: UpdateStatus;
 
+  /** Provider API keys, app-wide (one .env, not per-workspace). Loaded lazily when the Settings overlay first opens. */
+  settingsOpen: boolean;
+  providerSettings: ProviderSettings | null;
+  settingsSaving: boolean;
+
   init: () => Promise<void>;
   newWorkspace: () => Promise<void>;
   closeWorkspace: (id: string) => Promise<void>;
@@ -128,6 +134,10 @@ interface ForgeState {
   closeReview: () => void;
   decideHunk: (diffId: string, hunkIndex: number | 'all', decision: 'accepted' | 'rejected') => Promise<void>;
   undoPath: (path: string) => Promise<void>;
+
+  openSettings: () => void;
+  closeSettings: () => void;
+  saveSettings: (values: Partial<ProviderSettings>) => Promise<boolean>;
 }
 
 function emptyView(summary: WorkspaceSummary): WorkspaceView {
@@ -197,6 +207,10 @@ export const useForge = create<ForgeState>((set, get) => {
     modelsLoadedOnce: false,
 
     updateStatus: { state: 'idle' },
+
+    settingsOpen: false,
+    providerSettings: null,
+    settingsSaving: false,
 
     init: async () => {
       void forge.models.getCurrent().then((modelId) => set({ currentModel: modelId }));
@@ -600,6 +614,25 @@ export const useForge = create<ForgeState>((set, get) => {
         checkpoints,
         openFiles: v.openFiles.map((f) => (f.path === filePath ? { ...f, content, isDirty: false } : f)),
       }));
+    },
+
+    openSettings: () => {
+      set({ settingsOpen: true });
+      // Loaded fresh on every open rather than cached at init — the .env file
+      // is also editable by hand, so a stale renderer copy could clobber it.
+      void forge.settings.get().then((providerSettings) => set({ providerSettings }));
+    },
+
+    closeSettings: () => set({ settingsOpen: false }),
+
+    saveSettings: async (values) => {
+      set({ settingsSaving: true });
+      const ok = await forge.settings.set(values);
+      set((s) => ({
+        settingsSaving: false,
+        providerSettings: s.providerSettings ? { ...s.providerSettings, ...values } : s.providerSettings,
+      }));
+      return ok;
     },
   };
 });

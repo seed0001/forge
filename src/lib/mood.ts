@@ -64,10 +64,14 @@ function phaseFromKind(kind: ActivityEvent['kind']): Phase {
 export function deriveMood(opts: {
   running: boolean;
   activity: ActivityEvent[];
+  /** Whatever the trail is currently displaying (see usePacedActivity) — kept
+   *  in lockstep with it so the ambient color/label never contradicts the
+   *  one line the Operator is actually reading. */
+  current: ActivityEvent | null;
   elapsedMs: number;
   hasPendingDiffs: boolean;
 }): Mood {
-  const { running, activity, elapsedMs, hasPendingDiffs } = opts;
+  const { running, activity, current, elapsedMs, hasPendingDiffs } = opts;
 
   // Depth ramps over the first three minutes of a task, then holds.
   const depth = Math.min(elapsedMs / 180_000, 1);
@@ -83,15 +87,17 @@ export function deriveMood(opts: {
     // Only surface red when the run actually ENDED badly. An error earlier in a
     // run that then recovered is history, not the current state — and a missing
     // file ('skipped') is never an error at all.
-    const last = activity[activity.length - 1];
+    const last = current ?? activity[activity.length - 1];
     if (last?.status === 'error') {
       return { phase: 'error', colors: PALETTES.error, intensity: 0.5, speed: 1, label: LABELS.error };
     }
     return { phase: 'idle', colors: PALETTES.thinking, intensity: 0, speed: 0.6, label: '' };
   }
 
-  const live = [...activity].reverse().find((a) => a.status === 'active');
-  let phase: Phase = live ? phaseFromKind(live.kind) : 'thinking';
+  // Not just "currently active" — a step that flashed into existence already
+  // done (read_file, list_files) is still the thing being reported right now,
+  // as long as it's what the paced trail is showing.
+  let phase: Phase = current && current.kind !== 'thinking' ? phaseFromKind(current.kind) : 'thinking';
 
   // Sustained reasoning with no tool in flight shifts the palette deeper.
   if (phase === 'thinking' && effort > 0.45) phase = 'deep';

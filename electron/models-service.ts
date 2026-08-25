@@ -10,6 +10,21 @@ interface RawModel {
   description?: string;
   context_length?: number;
   pricing?: { prompt?: string; completion?: string };
+  /** Which request params this model's endpoint(s) actually accept. */
+  supported_parameters?: string[];
+}
+
+/**
+ * The agent sends `tools`/`tool_choice` on every single completion — that's
+ * how it reads files, runs commands, edits code. A model whose endpoint
+ * doesn't list 'tools' support 404s ("no endpoints found that support tool
+ * use") the moment it's actually used, even though it shows up fine in the
+ * catalog — so it must never reach the selector in the first place. Only
+ * excludes when the field is present and says no; a listing that omits the
+ * field entirely is assumed compatible rather than guessed against.
+ */
+function supportsTools(raw: RawModel): boolean {
+  return raw.supported_parameters === undefined || raw.supported_parameters.includes('tools');
 }
 
 /** Refetching on every dropdown open would hit either provider far more than its list ever changes. */
@@ -45,7 +60,7 @@ async function fetchOpenRouterModels(): Promise<CatalogModel[]> {
     throw new Error(`OpenRouter models request failed (${res.status})`);
   }
   const data = (await res.json()) as { data?: RawModel[] };
-  return (data.data ?? []).map((m) => toModel(m, 'openrouter'));
+  return (data.data ?? []).filter(supportsTools).map((m) => toModel(m, 'openrouter'));
 }
 
 /** Unlike OpenRouter's public catalog, FairRouter's /v1/models requires a key — skip the call rather than fail loudly if none is set yet. */
@@ -59,7 +74,7 @@ async function fetchFairRouterModels(): Promise<CatalogModel[]> {
     throw new Error(`FairRouter models request failed (${res.status})`);
   }
   const data = (await res.json()) as { data?: RawModel[] };
-  return (data.data ?? []).map((m) => toModel(m, 'fairrouter'));
+  return (data.data ?? []).filter(supportsTools).map((m) => toModel(m, 'fairrouter'));
 }
 
 const FETCHERS: Record<ChatProvider, () => Promise<CatalogModel[]>> = {

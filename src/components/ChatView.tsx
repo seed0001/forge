@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { useForge, useActiveWorkspace } from '../state/store';
 import { deriveMood } from '../lib/mood';
 import { useVoice } from '../lib/use-voice';
+import { usePacedActivity } from '../lib/use-paced-activity';
 import { Aurora } from './Aurora';
 import { Markdown } from './Markdown';
 import { ChatImageThumb } from './ChatImageThumb';
@@ -71,9 +72,11 @@ export function ChatView() {
   ).length;
   // One line, not a stacking transcript: whatever the agent last reported —
   // an in-progress step, or (per ActivityEvent.summary) the run's single
-  // consolidated closing line — replaces whatever was shown before it.
+  // consolidated closing line — replaces whatever was shown before it. Paced
+  // so a step that arrives already-done (read_file, list_files) still gets
+  // a beat on screen instead of being overwritten before it ever paints.
   const activityList = view?.activity ?? [];
-  const currentActivity = activityList.length > 0 ? activityList[activityList.length - 1] : null;
+  const currentActivity = usePacedActivity(activityList);
 
   // Re-tick while a task is live so the field deepens as the work goes on.
   const [now, setNow] = useState(() => Date.now());
@@ -85,7 +88,8 @@ export function ChatView() {
 
   const mood = deriveMood({
     running,
-    activity: view?.activity ?? [],
+    activity: activityList,
+    current: currentActivity,
     elapsedMs: view?.runStartedAt ? now - view.runStartedAt : 0,
     hasPendingDiffs: diffs.length > 0,
   });

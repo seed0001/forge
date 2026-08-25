@@ -74,9 +74,11 @@ run('npm run build');
 header('Packaging (no publish yet)');
 run('npx electron-builder --win --publish never');
 
-// ── 3. Smoke-test: launch the packaged exe and watch for a startup crash
-// dialog via UI Automation. This is the exact check that would have caught
-// the electron-updater ESM/CJS import bug that shipped in the last release.
+// ── 3. Smoke-test: launch the packaged exe and check for (a) a main-process
+// crash dialog and (b) the renderer having actually painted real UI — not
+// just "didn't crash". A silent blank-window failure (e.g. index.html's
+// asset paths not resolving under file://) shows neither a dialog nor a
+// process exit, so absence of a crash dialog alone is not enough.
 header('Smoke-testing the packaged build');
 const exe = path.join(root, 'release', 'win-unpacked', `${productName}.exe`);
 if (!fs.existsSync(exe)) fail(`Packaged exe not found at ${exe}`);
@@ -87,22 +89,48 @@ $p = Start-Process -FilePath '${exe.replace(/'/g, "''")}' -PassThru
 Start-Sleep -Seconds 6
 Add-Type -AssemblyName UIAutomationClient
 $rootEl = [System.Windows.Automation.AutomationElement]::RootElement
-$cond = New-Object System.Windows.Automation.PropertyCondition([System.Windows.Automation.AutomationElement]::NameProperty, 'Error')
-$errWin = $rootEl.FindFirst([System.Windows.Automation.TreeScope]::Children, $cond)
+
+$errCond = New-Object System.Windows.Automation.PropertyCondition([System.Windows.Automation.AutomationElement]::NameProperty, 'Error')
+$errWin = $rootEl.FindFirst([System.Windows.Automation.TreeScope]::Children, $errCond)
 $crashed = $errWin -ne $null
+
 $stillRunning = -not (Get-Process -Id $p.Id -ErrorAction SilentlyContinue).HasExited
+
+# The renderer having actually painted is checked by looking for the "Chat"
+# tab label every real window shows (from App.tsx's view switcher) — a blank
+# unrendered window has no text content at all, crash dialog or not.
+$rendered = $false
+if ($stillRunning -and -not $crashed) {
+  $appWin = Get-Process -Id $p.Id | ForEach-Object { $_.MainWindowHandle } | Where-Object { $_ -ne 0 }
+  if ($appWin) {
+    $winEl = [System.Windows.Automation.AutomationElement]::FromHandle($appWin)
+    $textCond = New-Object System.Windows.Automation.PropertyCondition([System.Windows.Automation.AutomationElement]::NameProperty, 'Chat')
+    $chatEl = $winEl.FindFirst([System.Windows.Automation.TreeScope]::Descendants, $textCond)
+    $rendered = $chatEl -ne $null
+  }
+}
+
 Stop-Process -Id $p.Id -Force
 Get-Process ${productName} -ErrorAction SilentlyContinue | Stop-Process -Force
-if ($crashed -or -not $stillRunning) { Write-Output 'SMOKE_TEST_FAILED' } else { Write-Output 'SMOKE_TEST_OK' }
+
+if ($crashed) { Write-Output 'SMOKE_TEST_CRASHED' }
+elseif (-not $stillRunning) { Write-Output 'SMOKE_TEST_EXITED' }
+elseif (-not $rendered) { Write-Output 'SMOKE_TEST_BLANK' }
+else { Write-Output 'SMOKE_TEST_OK' }
 `;
 const smoke = spawnSync('powershell', ['-NoProfile', '-Command', smokeTestScript], { encoding: 'utf8' });
-if (!(smoke.stdout || '').includes('SMOKE_TEST_OK')) {
-  fail(
-    `The packaged build did not start cleanly (crash dialog or early exit detected).\n` +
-      `Nothing was published. Run "release\\win-unpacked\\${productName}.exe" by hand to see the error.`
-  );
+const smokeResult = (smoke.stdout || '').trim();
+if (!smokeResult.includes('SMOKE_TEST_OK')) {
+  const reason = smokeResult.includes('SMOKE_TEST_CRASHED')
+    ? 'a main-process crash dialog appeared'
+    : smokeResult.includes('SMOKE_TEST_EXITED')
+      ? 'the process exited on its own'
+      : smokeResult.includes('SMOKE_TEST_BLANK')
+        ? 'the window opened but never rendered the app (blank window — no "Chat" tab found)'
+        : `unexpected smoke-test output: ${smokeResult || '(none)'}`;
+  fail(`The packaged build failed its smoke test: ${reason}.\nNothing was published. Run "release\\win-unpacked\\${productName}.exe" by hand to see it.`);
 }
-console.log('Packaged build launched cleanly — no crash dialog.');
+console.log('Packaged build launched cleanly and rendered real UI.');
 
 // ── 4. Publish ────────────────────────────────────────────────────────────
 header(`Publishing ${tag} to github.com/${owner}/${repo}`);

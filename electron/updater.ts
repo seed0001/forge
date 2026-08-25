@@ -1,5 +1,13 @@
 import { app, dialog } from 'electron';
-import { autoUpdater } from 'electron-updater';
+// electron-updater is CommonJS; this process builds as ESM ("type": "module").
+// A named import (`import { autoUpdater } from 'electron-updater'`) requires
+// Node to statically detect that export via cjs-module-lexer, which fails for
+// this package — it throws a SyntaxError at module-LINK time, before any code
+// runs, killing the app on every launch before a window can even open. The
+// default-import + destructure form below reads the property at runtime
+// instead, which always works.
+import electronUpdater from 'electron-updater';
+const { autoUpdater } = electronUpdater;
 
 /** How often to poll GitHub Releases for a newer build, beyond the one check on launch. */
 const CHECK_INTERVAL_MS = 4 * 60 * 60_000;

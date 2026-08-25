@@ -1,0 +1,190 @@
+export const IPC = {
+  wsList: 'workspace:list',
+  wsCreate: 'workspace:create',
+  wsClose: 'workspace:close',
+  wsSetRoot: 'workspace:set-root',
+  wsHydrate: 'workspace:hydrate',
+  wsMarkSeen: 'workspace:mark-seen',
+  wsSetAutonomy: 'workspace:set-autonomy',
+  wsUpdated: 'workspace:updated',
+
+  sessList: 'session:list',
+  sessNew: 'session:new',
+  sessSelect: 'session:select',
+  sessDelete: 'session:delete',
+  sessUpdated: 'session:updated',
+
+  fsListDir: 'fs:list-dir',
+  fsListTree: 'fs:list-tree',
+  fsReadFile: 'fs:read-file',
+  fsWriteFile: 'fs:write-file',
+  fsOpenInBrowser: 'fs:open-in-browser',
+
+  termRun: 'terminal:run',
+  termKill: 'terminal:kill',
+  termData: 'terminal:data',
+
+  agentSend: 'agent:send',
+  agentStop: 'agent:stop',
+  agentActivity: 'agent:activity',
+  agentMessage: 'agent:message',
+
+  diffProposed: 'diff:proposed',
+  diffDecide: 'diff:decide',
+  diffUpdated: 'diff:updated',
+
+  checkpointUndo: 'checkpoint:undo',
+  checkpointList: 'checkpoint:list',
+
+  cmdApprovalRequest: 'command:approval-request',
+  cmdApprovalDecide: 'command:approval-decide',
+
+  voiceTranscribe: 'voice:transcribe',
+
+  attachmentSave: 'attachment:save',
+  imageRead: 'image:read',
+
+  modelsList: 'models:list',
+  modelsGetCurrent: 'models:get-current',
+  modelsSetCurrent: 'models:set-current',
+} as const;
+
+export type WorkspaceStatus = 'idle' | 'running' | 'review';
+
+/**
+ * How much the agent may do without stopping to ask first. Manual gates every
+ * shell command behind an explicit approval; Balanced (the historical default)
+ * runs commands freely but still routes every file edit through the reviewable
+ * diff queue; Auto additionally writes edits straight to disk (still logged to
+ * AUDIT.md and still undoable via a checkpoint — just not held for review).
+ */
+export type Autonomy = 'manual' | 'balanced' | 'auto';
+
+export interface WorkspaceSummary {
+  id: string;
+  name: string;
+  rootPath: string | null;
+  status: WorkspaceStatus;
+  pendingDiffCount: number;
+  /** True when the agent finished while the user was on another workspace. */
+  unseenCompletion: boolean;
+  activeSessionId: string | null;
+  autonomy: Autonomy;
+}
+
+/** A run_command call waiting on the Operator's yes/no at Manual autonomy. */
+export interface CommandApproval {
+  requestId: string;
+  command: string;
+}
+
+export interface SessionSummary {
+  id: string;
+  title: string;
+  preview: string;
+  createdAt: number;
+  updatedAt: number;
+  messageCount: number;
+  contextUsed?: number;
+  contextWindow?: number;
+  /** Total real dollar cost of every completion this session has caused (main thread, subagents, title, compaction). */
+  costUsd?: number;
+  /** Total wall-clock milliseconds the agent has spent actively running on this session. */
+  elapsedMs?: number;
+  /** How many times this session's conversation has been auto-compacted to free up context. */
+  compactionCount?: number;
+}
+
+/** An image attached to a chat message — either a user paste/drop or something the agent generated. */
+export interface ChatImage {
+  /** Absolute path on disk — either under the attachment store or (for generated images) the project root. */
+  path: string;
+  name: string;
+}
+
+export interface ChatMessage {
+  role: 'user' | 'assistant';
+  text: string;
+  images?: ChatImage[];
+}
+
+export interface FileNode {
+  name: string;
+  path: string;
+  type: 'file' | 'dir';
+  children?: FileNode[];
+}
+
+export interface TermDataEvent {
+  requestId: string;
+  source: 'you' | 'agent';
+  kind: 'cmd' | 'stdout' | 'stderr' | 'exit' | 'info';
+  text: string;
+}
+
+export interface ActivityEvent {
+  id: string;
+  kind: 'read' | 'list' | 'run' | 'propose' | 'search' | 'generate' | 'analyze' | 'thinking' | 'done' | 'stopped' | 'compact';
+  detail: string;
+  /**
+   * 'skipped' is a benign non-result — a file that simply does not exist.
+   * It is deliberately distinct from 'error', which means something actually
+   * went wrong, so a normal look-around never reads as a failure.
+   */
+  status: 'active' | 'done' | 'skipped' | 'error';
+  /** Optional diff stats, shown inline on edit rows. */
+  added?: number;
+  removed?: number;
+}
+
+export interface Hunk {
+  index: number;
+  oldStart: number;
+  oldLines: number;
+  newStart: number;
+  newLines: number;
+  lines: string[];
+}
+
+export type HunkDecision = 'pending' | 'accepted' | 'rejected';
+
+export interface PendingDiff {
+  id: string;
+  path: string;
+  baseContent: string;
+  hunks: Hunk[];
+  decisions: Record<number, HunkDecision>;
+  added: number;
+  removed: number;
+}
+
+export interface Checkpoint {
+  path: string;
+  previousContent: string;
+  timestamp: number;
+}
+
+/** One entry from OpenRouter's public model catalog. */
+export interface OpenRouterModel {
+  id: string;
+  name: string;
+  description?: string;
+  contextLength: number;
+  /** USD per token (not per million) — straight from OpenRouter's pricing block. */
+  promptPrice: number;
+  completionPrice: number;
+  /** Both prompt and completion pricing are zero — OpenRouter's own definition of a free model. */
+  isFree: boolean;
+}
+
+/** Everything the renderer needs to display a workspace it has switched to. */
+export interface WorkspaceHydration {
+  summary: WorkspaceSummary;
+  sessions: SessionSummary[];
+  tree: FileNode[];
+  chat: ChatMessage[];
+  activity: ActivityEvent[];
+  terminalLines: (TermDataEvent & { id: string })[];
+  pendingDiffs: PendingDiff[];
+  checkpoints: Checkpoint[];
+}

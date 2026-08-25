@@ -1,5 +1,6 @@
 import esbuild from 'esbuild';
 import path from 'node:path';
+import fs from 'node:fs';
 import { fileURLToPath } from 'node:url';
 
 const root = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
@@ -22,6 +23,21 @@ await esbuild.build({
   entryPoints: [path.join(root, 'electron', 'main.ts')],
   outfile: path.join(root, 'dist-electron', 'main.js'),
 });
+
+// page-extract.ts injects these two small libraries into the live browsed
+// page and runs extraction there (a real DOM, no jsdom needed) — copied
+// alongside the bundle so they ship in the packaged app the same way
+// dist-electron's other output does, with no node_modules dependency at
+// runtime.
+fs.mkdirSync(path.join(root, 'dist-electron', 'vendor'), { recursive: true });
+fs.copyFileSync(
+  path.join(root, 'node_modules', '@mozilla', 'readability', 'Readability.js'),
+  path.join(root, 'dist-electron', 'vendor', 'Readability.js')
+);
+fs.copyFileSync(
+  path.join(root, 'node_modules', 'turndown', 'lib', 'turndown.browser.umd.js'),
+  path.join(root, 'dist-electron', 'vendor', 'turndown.umd.js')
+);
 
 await esbuild.build({
   ...shared,

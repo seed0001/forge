@@ -7,7 +7,8 @@ import { computeHunks, countChanges } from './diff-service';
 import { nextId } from './diff-store';
 import { extFromMediaType, IMAGE_MIME_BY_EXT } from './media-types';
 import { listCatalogModels } from './models-service';
-import { CHAT_PROVIDERS } from './ipc-channels';
+import { OPENROUTER_URL, FAIRROUTER_URL, PROVIDER_LABEL, chatHeaders, resolveChatProvider } from './chat-provider';
+import type { ChatProviderConfig } from './chat-provider';
 import type {
   ActivityEvent,
   TermDataEvent,
@@ -92,46 +93,7 @@ export interface AgentCallbacks {
   applyEditAuto: (diff: PendingDiff) => Promise<void>;
 }
 
-const OPENROUTER_URL = 'https://openrouter.ai/api/v1/chat/completions';
 const OPENROUTER_IMAGES_URL = 'https://openrouter.ai/api/v1/images';
-const FAIRROUTER_URL = 'https://fairrouter.ai/v1/chat/completions';
-
-/**
- * The main chat loop (send/generateTitle/summarizeForCompaction) can run on
- * either provider — media tools (image/vision/music) stay OpenRouter-only,
- * see the DEFAULT_*_MODEL comment below. Which one is active is chosen via
- * the model selector, which sets both PROVIDER and that provider's own
- * *_MODEL var so each provider remembers its own last-picked model.
- */
-interface ChatProviderConfig {
-  provider: ChatProvider;
-  url: string;
-  apiKey: string;
-  model: string;
-}
-
-const PROVIDER_LABEL: Record<ChatProvider, string> = Object.fromEntries(
-  CHAT_PROVIDERS.map((p) => [p.id, p.label])
-) as Record<ChatProvider, string>;
-
-/** Extra attribution headers OpenRouter reads; meaningless (and skipped) elsewhere. */
-function chatHeaders(provider: ChatProvider): Record<string, string> {
-  const base: Record<string, string> = { 'Content-Type': 'application/json' };
-  if (provider === 'openrouter') {
-    base['HTTP-Referer'] = 'https://forge.local';
-    base['X-Title'] = 'Forge';
-  }
-  return base;
-}
-
-/** Null when the active provider is missing its API key or has no model selected. */
-function resolveChatProvider(): ChatProviderConfig | null {
-  const provider: ChatProvider = process.env.PROVIDER === 'fairrouter' ? 'fairrouter' : 'openrouter';
-  const apiKey = provider === 'fairrouter' ? process.env.FAIRROUTER_API_KEY : process.env.OPENROUTER_API_KEY;
-  const model = provider === 'fairrouter' ? process.env.FAIRROUTER_MODEL : process.env.OPENROUTER_MODEL;
-  if (!apiKey || !model) return null;
-  return { provider, url: provider === 'fairrouter' ? FAIRROUTER_URL : OPENROUTER_URL, apiKey, model };
-}
 
 /** Per-capability model assignments — every media call goes through OpenRouter, never a direct provider API. */
 const DEFAULT_IMAGE_MODEL = 'google/gemini-3.1-flash-image'; // "Nano Banana 2"

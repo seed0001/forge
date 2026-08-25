@@ -1,6 +1,6 @@
 import { contextBridge, ipcRenderer } from 'electron';
 import { IPC } from './ipc-channels';
-import type { ProviderSettings, ChatProvider } from './ipc-channels';
+import type { ProviderSettings, ChatProvider, WorkspaceKind } from './ipc-channels';
 
 /** Subscribe helper: events are broadcast for every workspace, tagged with its id. */
 function on<T extends unknown[]>(channel: string, cb: (...args: T) => void) {
@@ -19,6 +19,8 @@ contextBridge.exposeInMainWorld('forge', {
     markSeen: (id: string) => ipcRenderer.invoke(IPC.wsMarkSeen, id),
     setAutonomy: (id: string, level: 'manual' | 'balanced' | 'auto') =>
       ipcRenderer.invoke(IPC.wsSetAutonomy, id, level),
+    setKind: (id: string, kind: WorkspaceKind) => ipcRenderer.invoke(IPC.wsSetKind, id, kind),
+    setClipsFolder: (id: string) => ipcRenderer.invoke(IPC.wsSetClipsFolder, id),
     onUpdated: (cb: (summary: unknown) => void) => on(IPC.wsUpdated, cb),
   },
   sessions: {
@@ -71,6 +73,18 @@ contextBridge.exposeInMainWorld('forge', {
   checkpoints: {
     list: (id: string) => ipcRenderer.invoke(IPC.checkpointList, id),
     undo: (id: string, filePath: string) => ipcRenderer.invoke(IPC.checkpointUndo, id, filePath),
+  },
+  browser: {
+    setBounds: (id: string, bounds: { x: number; y: number; width: number; height: number }) =>
+      ipcRenderer.invoke(IPC.browserSetBounds, id, bounds),
+    detach: () => ipcRenderer.invoke(IPC.browserDetach),
+    navigate: (id: string, url: string) => ipcRenderer.invoke(IPC.browserNavigate, id, url),
+    back: (id: string) => ipcRenderer.invoke(IPC.browserBack, id),
+    forward: (id: string) => ipcRenderer.invoke(IPC.browserForward, id),
+    reload: (id: string) => ipcRenderer.invoke(IPC.browserReload, id),
+    summarize: (id: string) => ipcRenderer.invoke(IPC.browserSummarize, id),
+    saveClip: (id: string) => ipcRenderer.invoke(IPC.browserSaveClip, id),
+    onNavState: (cb: (workspaceId: string, state: unknown) => void) => on(IPC.browserNavState, cb),
   },
   voice: {
     transcribe: (buffer: ArrayBuffer, mimeType: string) =>

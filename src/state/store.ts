@@ -18,6 +18,8 @@ import type {
   ProviderSettings,
   RoadmapItem,
   RoadmapItemStatus,
+  WorkspaceKind,
+  BrowserNavState,
 } from '../../electron/ipc-channels';
 
 export interface OpenFile {
@@ -41,7 +43,7 @@ export interface PendingImage {
  * currently looking at, so switching tabs is instant and nothing is missed.
  */
 /** Which surface the centre column is showing. Chat is the primary one. */
-export type CenterView = 'chat' | 'editor' | 'terminal' | 'roadmap';
+export type CenterView = 'chat' | 'editor' | 'terminal' | 'roadmap' | 'browser';
 
 /** Which list the sidebar is showing. Sessions is the primary one. */
 export type SidebarView = 'sessions' | 'files';
@@ -72,6 +74,8 @@ export interface WorkspaceView {
   composerImages: PendingImage[];
   /** The chat image currently open in the paint editor overlay, if any. */
   paintTarget: { src: string; name: string } | null;
+  /** A Browsing workspace's live nav state — null for a coding workspace, or before any page has loaded. */
+  browserNav: BrowserNavState | null;
 }
 
 interface ForgeState {
@@ -105,6 +109,7 @@ interface ForgeState {
   selectWorkspace: (id: string) => Promise<void>;
   pickFolder: (id: string) => Promise<void>;
   setAutonomy: (level: Autonomy) => Promise<void>;
+  setWorkspaceKind: (kind: WorkspaceKind) => Promise<void>;
   decideApproval: (approved: boolean) => Promise<void>;
 
   setCenter: (view: CenterView) => void;
@@ -149,6 +154,16 @@ interface ForgeState {
   openSettings: () => void;
   closeSettings: () => void;
   saveSettings: (values: Partial<ProviderSettings>) => Promise<boolean>;
+
+  browserSetBounds: (bounds: { x: number; y: number; width: number; height: number }) => Promise<void>;
+  browserDetach: () => Promise<void>;
+  browserNavigate: (url: string) => Promise<void>;
+  browserBack: () => Promise<void>;
+  browserForward: () => Promise<void>;
+  browserReload: () => Promise<void>;
+  browserSummarize: () => Promise<void>;
+  browserSaveClip: () => Promise<{ ok: true; path: string } | { ok: false; error: string }>;
+  setClipsFolder: () => Promise<boolean>;
 }
 
 function emptyView(summary: WorkspaceSummary): WorkspaceView {
@@ -173,6 +188,7 @@ function emptyView(summary: WorkspaceSummary): WorkspaceView {
     runStartedAt: null,
     composerImages: [],
     paintTarget: null,
+    browserNav: null,
   };
 }
 
@@ -305,6 +321,10 @@ export const useForge = create<ForgeState>((set, get) => {
         patch(workspaceId, (v) => ({ ...v, sessions }));
       });
 
+      forge.browser.onNavState((workspaceId, state) => {
+        patch(workspaceId, (v) => ({ ...v, browserNav: state }));
+      });
+
       forge.roadmap.onUpdated((workspaceId, sessionId, items) => {
         // A push for a session the user has since navigated away from must not
         // clobber whatever's currently on screen.
@@ -424,6 +444,14 @@ export const useForge = create<ForgeState>((set, get) => {
       // Optimistic: the confirming wsUpdated broadcast lands a moment later.
       patch(id, (v) => ({ ...v, summary: { ...v.summary, autonomy: level } }));
       await forge.workspaces.setAutonomy(id, level);
+    },
+
+    setWorkspaceKind: async (kind) => {
+      const id = get().activeId;
+      if (!id) return;
+      // Optimistic: leaving the chooser screen should feel instant.
+      patch(id, (v) => ({ ...v, summary: { ...v.summary, kind }, center: kind === 'browsing' ? 'browser' : 'chat' }));
+      await forge.workspaces.setKind(id, kind);
     },
 
     decideApproval: async (approved) => {
@@ -713,6 +741,55 @@ export const useForge = create<ForgeState>((set, get) => {
         providerSettings: s.providerSettings ? { ...s.providerSettings, ...values } : s.providerSettings,
       }));
       return ok;
+    },
+
+    browserSetBounds: async (bounds) => {
+      const id = get().activeId;
+      if (id) await forge.browser.setBounds(id, bounds);
+    },
+
+    browserDetach: async () => {
+      await forge.browser.detach();
+    },
+
+    browserNavigate: async (url) => {
+      const id = get().activeId;
+      if (id) await forge.browser.navigate(id, url);
+    },
+
+    browserBack: async () => {
+      const id = get().activeId;
+      if (id) await forge.browser.back(id);
+    },
+
+    browserForward: async () => {
+      const id = get().activeId;
+      if (id) await forge.browser.forward(id);
+    },
+
+    browserReload: async () => {
+      const id = get().activeId;
+      if (id) await forge.browser.reload(id);
+    },
+
+    browserSummarize: async () => {
+      const id = get().activeId;
+      if (id) await forge.browser.summarize(id);
+    },
+
+    browserSaveClip: async () => {
+      const id = get().activeId;
+      if (!id) return { ok: false as const, error: 'No active workspace.' };
+      return forge.browser.saveClip(id);
+    },
+
+    setClipsFolder: async () => {
+      const id = get().activeId;
+      if (!id) return false;
+      const summary = await forge.workspaces.setClipsFolder(id);
+      if (!summary) return false;
+      patch(id, (v) => ({ ...v, summary }));
+      return true;
     },
   };
 });

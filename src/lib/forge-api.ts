@@ -17,6 +17,8 @@ import type {
   ProviderSettings,
   RoadmapItem,
   RoadmapItemStatus,
+  WorkspaceKind,
+  BrowserNavState,
 } from '../../electron/ipc-channels';
 
 type Unsubscribe = () => void;
@@ -30,6 +32,8 @@ export interface ForgeApi {
     hydrate: (id: string) => Promise<WorkspaceHydration | null>;
     markSeen: (id: string) => Promise<WorkspaceSummary | null>;
     setAutonomy: (id: string, level: Autonomy) => Promise<WorkspaceSummary | null>;
+    setKind: (id: string, kind: WorkspaceKind) => Promise<WorkspaceSummary | null>;
+    setClipsFolder: (id: string) => Promise<WorkspaceSummary | null>;
     onUpdated: (cb: (summary: WorkspaceSummary) => void) => Unsubscribe;
   };
   sessions: {
@@ -87,6 +91,17 @@ export interface ForgeApi {
   checkpoints: {
     list: (id: string) => Promise<Checkpoint[]>;
     undo: (id: string, filePath: string) => Promise<boolean>;
+  };
+  browser: {
+    setBounds: (id: string, bounds: { x: number; y: number; width: number; height: number }) => Promise<boolean>;
+    detach: () => Promise<boolean>;
+    navigate: (id: string, url: string) => Promise<boolean>;
+    back: (id: string) => Promise<boolean>;
+    forward: (id: string) => Promise<boolean>;
+    reload: (id: string) => Promise<boolean>;
+    summarize: (id: string) => Promise<boolean>;
+    saveClip: (id: string) => Promise<{ ok: true; path: string } | { ok: false; error: string }>;
+    onNavState: (cb: (workspaceId: string, state: BrowserNavState) => void) => Unsubscribe;
   };
   voice: {
     transcribe: (buffer: ArrayBuffer, mimeType: string) => Promise<{ text: string; error?: string }>;

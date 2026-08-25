@@ -39,6 +39,19 @@ export const IPC = {
   roadmapPushBack: 'roadmap:push-back',
   roadmapSetStatus: 'roadmap:set-status',
 
+  wsSetKind: 'workspace:set-kind',
+  wsSetClipsFolder: 'workspace:set-clips-folder',
+
+  browserNavigate: 'browser:navigate',
+  browserBack: 'browser:back',
+  browserForward: 'browser:forward',
+  browserReload: 'browser:reload',
+  browserSetBounds: 'browser:set-bounds',
+  browserSummarize: 'browser:summarize',
+  browserSaveClip: 'browser:save-clip',
+  browserDetach: 'browser:detach',
+  browserNavState: 'browser:nav-state',
+
   checkpointUndo: 'checkpoint:undo',
   checkpointList: 'checkpoint:list',
 
@@ -66,6 +79,18 @@ export const IPC = {
 
 export type WorkspaceStatus = 'idle' | 'running' | 'review';
 
+/** null means "not chosen yet" — drives the Coding/Browsing chooser screen. */
+export type WorkspaceKind = 'coding' | 'browsing';
+
+/** Live navigation state of a Browsing workspace's embedded browser. */
+export interface BrowserNavState {
+  url: string;
+  title: string;
+  canGoBack: boolean;
+  canGoForward: boolean;
+  loading: boolean;
+}
+
 /**
  * How much the agent may do without stopping to ask first. Manual gates every
  * shell command behind an explicit approval; Balanced (the historical default)
@@ -87,6 +112,10 @@ export interface WorkspaceSummary {
   autonomy: Autonomy;
   /** Every session in this workspace whose agent is currently working — each session runs independently, so more than one can be live at once. */
   runningSessionIds: string[];
+  /** null until the Operator picks Coding or Browsing from the chooser screen. */
+  kind: WorkspaceKind | null;
+  /** Where a Browsing workspace saves markdown clips — separate from rootPath, set the first time "Save as Markdown" is used, never touches sessions/chat. */
+  clipsFolder: string | null;
 }
 
 /** A run_command call waiting on the Operator's yes/no at Manual autonomy. */

@@ -2,6 +2,7 @@ import { createServer } from 'vite';
 import esbuild from 'esbuild';
 import { spawn } from 'node:child_process';
 import path from 'node:path';
+import fs from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import electronPath from 'electron';
 
@@ -24,6 +25,18 @@ async function buildMainProcess() {
     entryPoints: [path.join(root, 'electron', 'main.ts')],
     outfile: path.join(root, 'dist-electron', 'main.js'),
   });
+
+  // page-extract.ts injects these into the live browsed page and runs
+  // extraction there (a real DOM, no jsdom/Node bundling needed).
+  fs.mkdirSync(path.join(root, 'dist-electron', 'vendor'), { recursive: true });
+  fs.copyFileSync(
+    path.join(root, 'node_modules', '@mozilla', 'readability', 'Readability.js'),
+    path.join(root, 'dist-electron', 'vendor', 'Readability.js')
+  );
+  fs.copyFileSync(
+    path.join(root, 'node_modules', 'turndown', 'lib', 'turndown.browser.umd.js'),
+    path.join(root, 'dist-electron', 'vendor', 'turndown.umd.js')
+  );
   await esbuild.build({
     ...shared,
     format: 'cjs',

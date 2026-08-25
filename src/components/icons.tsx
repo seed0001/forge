@@ -152,3 +152,15 @@ export const IconRoadmap = (p: P) => (
     <path d="M11 6.5h8M11 12h8M11 17.5h8" />
   </svg>
 );
+export const IconArrowLeft = (p: P) => (
+  <svg {...stroke(p)}><path d="M19 12H5" /><path d="M11 6l-6 6 6 6" /></svg>
+);
+export const IconArrowRight = (p: P) => (
+  <svg {...stroke(p)}><path d="M5 12h14" /><path d="M13 6l6 6-6 6" /></svg>
+);
+export const IconCode = (p: P) => (
+  <svg {...stroke(p)}><path d="M9 7L4 12l5 5" /><path d="M15 7l5 5-5 5" /></svg>
+);
+export const IconBookmark = (p: P) => (
+  <svg {...stroke(p)}><path d="M6 3.5h12v17l-6-4-6 4v-17z" /></svg>
+);

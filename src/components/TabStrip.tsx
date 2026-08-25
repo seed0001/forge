@@ -1,5 +1,5 @@
 import { useForge } from '../state/store';
-import { IconPlus, IconX } from './icons';
+import { IconPlus, IconX, IconCode, IconGlobe } from './icons';
 
 export function TabStrip() {
   const order = useForge((s) => s.order);
@@ -44,6 +44,11 @@ export function TabStrip() {
             title={title}
           >
             {dot && <div className={`wdot ${dot}`} />}
+            {summary.kind === 'browsing' ? (
+              <IconGlobe className="icon-xs wkind" />
+            ) : summary.kind === 'coding' ? (
+              <IconCode className="icon-xs wkind" />
+            ) : null}
             <span className="wname">{summary.name}</span>
             <button
               className="wclose"

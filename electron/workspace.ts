@@ -2,6 +2,9 @@ import path from 'node:path';
 import { TerminalSession } from './terminal-session';
 import { DiffStore, nextId } from './diff-store';
 import { AgentSession } from './agent-service';
+import { writeFile } from './fs-service';
+import { slugify, type ExtractedPage } from './page-extract';
+import { oneOffCompletion } from './chat-provider';
 import {
   loadSessions,
   saveSessions,
@@ -18,6 +21,7 @@ import type {
   ChatImage,
   WorkspaceSummary,
   WorkspaceStatus,
+  WorkspaceKind,
   Autonomy,
   RoadmapItem,
   RoadmapItemStatus,
@@ -92,6 +96,10 @@ export class Workspace {
   unseenCompletion = false;
   /** How much this workspace's agents may do before they must stop and ask — shared across every session, since they all act on the same project on disk. */
   autonomy: Autonomy = 'balanced';
+  /** null until the Operator picks Coding or Browsing from the chooser screen. */
+  kind: WorkspaceKind | null = null;
+  /** Where a Browsing workspace saves markdown clips — deliberately separate from rootPath (which reloads sessions when changed); picking this never touches chat/sessions. */
+  clipsFolder: string | null = null;
 
   private emit: WorkspaceEmit;
   private lineSeq = 0;
@@ -253,12 +261,79 @@ export class Workspace {
       activeSessionId: this.activeSessionId,
       autonomy: this.autonomy,
       runningSessionIds: this.runningSessionIds,
+      kind: this.kind,
+      clipsFolder: this.clipsFolder,
     };
   }
 
   setAutonomy(level: Autonomy) {
     this.autonomy = level;
     this.emit.status(this.id);
+  }
+
+  setKind(kind: WorkspaceKind) {
+    this.kind = kind;
+    this.emit.status(this.id);
+  }
+
+  setClipsFolder(folder: string) {
+    this.clipsFolder = folder;
+    this.emit.status(this.id);
+  }
+
+  /**
+   * Summarizes a browsed page and posts it straight into the active
+   * session's chat — not a real agent turn (no tools, no model conversation
+   * involved), just a one-off completion whose result becomes a normal chat
+   * message so the Operator can keep discussing the page from there.
+   */
+  async summarizePage(extracted: ExtractedPage, url: string): Promise<void> {
+    const sessionId = this.activeSessionId;
+    const session = sessionId ? this.sessions.find((s) => s.id === sessionId) : null;
+    if (!session) return;
+
+    const { title, markdown, excerpt } = extracted;
+    const prompt =
+      'Summarize this web page in 3-6 sentences, capturing the key points a reader would want to ' +
+      'know before deciding whether to read the whole thing. Do not just repeat the title.\n\n' +
+      `Title: ${title}\nURL: ${url}\n\n${markdown.slice(0, 12_000)}`;
+
+    const { text, costUsd } = await oneOffCompletion(prompt, { maxTokens: 400, temperature: 0.3 });
+    if (costUsd) {
+      session.costUsd = (session.costUsd ?? 0) + costUsd;
+    }
+
+    const summary = text || excerpt || 'Could not generate a summary — no AI provider is configured (check Settings).';
+    const clipped =
+      markdown.length > 4000
+        ? `${markdown.slice(0, 4000)}\n\n…(clipped for chat — use "Save as Markdown" for the full page)`
+        : markdown;
+    const body = `📄 **${title}**\n${url}\n\n${summary}\n\n---\n\n**Full clipped content:**\n\n${clipped}`;
+
+    const msg: ChatMessage = { role: 'assistant', text: body };
+    session.chat.push(msg);
+    session.updatedAt = Date.now();
+    this.emit.message(this.id, session.id, msg);
+    void this.persist();
+    this.emit.sessions(this.id);
+  }
+
+  /** Saves a browsed page as a markdown clip under this workspace's clips folder — the Operator picks one the first time (never touches rootPath/sessions/chat). */
+  async saveClip(extracted: ExtractedPage, url: string): Promise<{ ok: true; path: string } | { ok: false; error: string }> {
+    const folder = this.clipsFolder;
+    if (!folder) return { ok: false, error: 'No folder set for this workspace yet.' };
+    try {
+      const { title, markdown } = extracted;
+      const rel = path.join('clips', `${slugify(title)}.md`);
+      const abs = path.resolve(folder, rel);
+      const frontmatter =
+        `---\ntitle: ${JSON.stringify(title)}\nsource: ${JSON.stringify(url)}\n` +
+        `saved: ${JSON.stringify(new Date().toISOString())}\n---\n\n`;
+      await writeFile(folder, abs, frontmatter + markdown + '\n');
+      return { ok: true, path: rel };
+    } catch (err) {
+      return { ok: false, error: err instanceof Error ? err.message : String(err) };
+    }
   }
 
   /** Blocks until the Operator decides, or resolves false if that session's run is stopped first. */

@@ -98,6 +98,7 @@ input, textarea { font: inherit; color: inherit; }
 }
 .wtab:hover .wclose, .wtab.active .wclose { opacity: 1; }
 .wclose:hover { background: var(--bg-active); color: var(--fg); }
+.wkind { flex: none; color: var(--fg-3); }
 .wdot { width: 6px; height: 6px; border-radius: 50%; flex: none; }
 .wdot.running { background: var(--amber); animation: breathe 1.6s ease-in-out infinite; }
 .wdot.review { background: var(--green); }
@@ -824,3 +825,42 @@ input, textarea { font: inherit; color: inherit; }
   outline: none; font-weight: 600; font-family: var(--font-ui); padding: 2px 4px;
   min-width: 40px;
 }
+
+/* ── Workspace chooser ────────────────────────────────────────────────── */
+.chooser { flex: 1; min-width: 0; display: flex; align-items: center; justify-content: center; }
+.chooser-inner { max-width: 620px; padding: var(--s6); text-align: center; }
+.chooser-inner h1 { font-size: var(--t-lg); font-weight: 600; margin-bottom: var(--s2); }
+.chooser-inner p { color: var(--fg-3); font-size: var(--t-sm); margin-bottom: var(--s6); }
+.chooser-cards { display: flex; gap: var(--s4); }
+.chooser-card {
+  flex: 1; display: flex; flex-direction: column; align-items: flex-start; gap: var(--s2);
+  padding: var(--s5); text-align: left; cursor: default;
+}
+.chooser-card:hover { border-color: var(--line-strong); background: var(--bg-hover); }
+.chooser-card .icon { color: var(--fg-3); }
+.chooser-card-blurb { font-size: var(--t-sm); color: var(--fg-3); line-height: 1.5; }
+
+/* ── Browser panel ─────────────────────────────────────────────────────── */
+.browser { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+.browser-bar {
+  flex: none; display: flex; align-items: center; gap: var(--s2);
+  padding: var(--s3) var(--s4); border-bottom: 1px solid var(--line);
+}
+.browser-address {
+  flex: 1; height: 32px; display: flex; align-items: center; padding: 0 var(--s3);
+  border: 1px solid var(--line-strong); border-radius: var(--r-md);
+  background: rgba(14, 14, 14, 0.88);
+}
+.browser-address:focus-within { border-color: #3c3c3c; }
+.browser-address input {
+  flex: 1; background: none; border: none; outline: none; font-size: var(--t-sm); color: var(--fg);
+}
+.browser-toast {
+  flex: none; display: flex; align-items: center; gap: var(--s2);
+  padding: var(--s2) var(--s4); font-size: var(--t-sm); color: var(--green);
+  background: var(--green-bg); border-bottom: 1px solid var(--line);
+}
+.browser-toast.err { color: var(--red); background: var(--red-bg); }
+/* The real browser is a native view the main process overlays exactly on top
+   of this element — it renders nothing itself, just occupies the space. */
+.browser-surface { flex: 1; min-height: 0; background: var(--bg-raised); }

@@ -6,12 +6,20 @@ import { fileURLToPath } from 'node:url';
 import { loadEnv, setEnvValue } from './env';
 import { transcribe } from './transcribe';
 import { IPC, SETTINGS_KEYS, MAX_TOOL_CALLS_LIMIT } from './ipc-channels';
-import type { WorkspaceHydration, ChatImage, ProviderSettings, ChatProvider, RoadmapItemStatus } from './ipc-channels';
+import type {
+  WorkspaceHydration,
+  ChatImage,
+  ProviderSettings,
+  ChatProvider,
+  RoadmapItemStatus,
+  WorkspaceKind,
+} from './ipc-channels';
 import * as fsService from './fs-service';
 import { WorkspaceManager } from './workspace-manager';
 import { saveAttachment, attachmentDirFor, readImageAsDataUrl } from './attachment-store';
 import { listCatalogModels } from './models-service';
 import { initUpdater, checkForUpdates, downloadUpdate, installUpdate } from './updater';
+import { BrowserViewManager } from './browser-view-manager';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -71,6 +79,8 @@ const manager = new WorkspaceManager({
     send(IPC.cmdApprovalRequest, workspaceId, { requestId, command, sessionId }),
   roadmapUpdated: (workspaceId, sessionId, items) => send(IPC.roadmapUpdated, workspaceId, sessionId, items),
 });
+
+const browserViewManager = new BrowserViewManager((workspaceId, state) => send(IPC.browserNavState, workspaceId, state));
 
 function loadContent(w: BrowserWindow) {
   if (process.env.VITE_DEV_SERVER_URL) {
@@ -146,6 +156,7 @@ app.whenReady().then(() => {
   });
 
   ipcMain.handle(IPC.wsClose, async (_e, workspaceId: string) => {
+    browserViewManager.forgetWorkspace(workspaceId);
     manager.close(workspaceId);
     return manager.list().map((w) => w.summary());
   });
@@ -161,6 +172,22 @@ app.whenReady().then(() => {
     const ws = manager.get(workspaceId);
     if (!ws) return null;
     ws.setAutonomy(level);
+    return ws.summary();
+  });
+
+  ipcMain.handle(IPC.wsSetKind, async (_e, workspaceId: string, kind: WorkspaceKind) => {
+    const ws = manager.get(workspaceId);
+    if (!ws) return null;
+    ws.setKind(kind);
+    return ws.summary();
+  });
+
+  ipcMain.handle(IPC.wsSetClipsFolder, async (_e, workspaceId: string) => {
+    const ws = manager.get(workspaceId);
+    if (!ws || !win) return null;
+    const result = await dialog.showOpenDialog(win, { properties: ['openDirectory'] });
+    if (result.canceled || result.filePaths.length === 0) return null;
+    ws.setClipsFolder(result.filePaths[0]);
     return ws.summary();
   });
 
@@ -318,6 +345,59 @@ app.whenReady().then(() => {
   ipcMain.handle(IPC.roadmapSetStatus, async (_e, workspaceId: string, itemId: string, status: RoadmapItemStatus) => {
     manager.get(workspaceId)?.setRoadmapItemStatus(itemId, status);
     return true;
+  });
+
+  ipcMain.handle(
+    IPC.browserSetBounds,
+    async (_e, workspaceId: string, bounds: { x: number; y: number; width: number; height: number }) => {
+      if (!win) return false;
+      browserViewManager.attach(win, workspaceId, bounds);
+      return true;
+    }
+  );
+
+  ipcMain.handle(IPC.browserDetach, async () => {
+    browserViewManager.detach();
+    return true;
+  });
+
+  ipcMain.handle(IPC.browserNavigate, async (_e, _workspaceId: string, url: string) => {
+    browserViewManager.navigate(url);
+    return true;
+  });
+
+  ipcMain.handle(IPC.browserBack, async () => {
+    browserViewManager.back();
+    return true;
+  });
+
+  ipcMain.handle(IPC.browserForward, async () => {
+    browserViewManager.forward();
+    return true;
+  });
+
+  ipcMain.handle(IPC.browserReload, async () => {
+    browserViewManager.reload();
+    return true;
+  });
+
+  ipcMain.handle(IPC.browserSummarize, async (_e, workspaceId: string) => {
+    const ws = manager.get(workspaceId);
+    if (!ws) return false;
+    const url = browserViewManager.getCurrentUrl();
+    const extracted = await browserViewManager.extractPage();
+    if (!extracted || !url) return false;
+    await ws.summarizePage(extracted, url);
+    return true;
+  });
+
+  ipcMain.handle(IPC.browserSaveClip, async (_e, workspaceId: string) => {
+    const ws = manager.get(workspaceId);
+    if (!ws) return { ok: false as const, error: 'Workspace not found.' };
+    const url = browserViewManager.getCurrentUrl();
+    const extracted = await browserViewManager.extractPage();
+    if (!extracted || !url) return { ok: false as const, error: 'Could not read this page — try reloading it.' };
+    return ws.saveClip(extracted, url);
   });
 
   ipcMain.handle(IPC.checkpointList, async (_e, workspaceId: string) => {

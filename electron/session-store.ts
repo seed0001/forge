@@ -2,7 +2,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { app } from 'electron';
-import type { ChatMessage, ActivityEvent } from './ipc-channels';
+import type { ChatMessage, ActivityEvent, RoadmapItem } from './ipc-channels';
 
 /** A provider message, stored verbatim so a session can resume with full context. */
 export type StoredMessage = Record<string, unknown>;
@@ -18,6 +18,8 @@ export interface Session {
   activity: ActivityEvent[];
   /** The agent's raw conversation, minus the system prompt (rebuilt on load). */
   messages: StoredMessage[];
+  /** This session's project roadmap, if the agent has proposed one — see RoadmapItem. */
+  roadmap: RoadmapItem[];
   /** Tokens the last completion sent as context, and the model's window size. */
   contextUsed?: number;
   contextWindow?: number;
@@ -89,7 +91,9 @@ export async function loadSessions(rootPath: string | null): Promise<Session[]> 
   try {
     const raw = await fs.readFile(fileForRoot(rootPath), 'utf8');
     const parsed = JSON.parse(raw) as { sessions?: Session[] };
-    return Array.isArray(parsed.sessions) ? parsed.sessions : [];
+    const sessions = Array.isArray(parsed.sessions) ? parsed.sessions : [];
+    // Backward compat: sessions saved before this field existed have no roadmap.
+    return sessions.map((s) => ({ ...s, roadmap: s.roadmap ?? [] }));
   } catch {
     return [];
   }

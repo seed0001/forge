@@ -17,6 +17,7 @@ import {
   IconBolt,
   IconCheck,
   IconX,
+  IconRoadmap,
 } from './icons';
 
 /** Pulls image Files out of a clipboard paste or a file drop — everything else passes through untouched. */
@@ -41,6 +42,7 @@ export function ChatView() {
   const sendChat = useForge((s) => s.sendChat);
   const stopAgent = useForge((s) => s.stopAgent);
   const openReview = useForge((s) => s.openReview);
+  const setCenter = useForge((s) => s.setCenter);
   const decideApproval = useForge((s) => s.decideApproval);
   const addComposerImage = useForge((s) => s.addComposerImage);
   const removeComposerImage = useForge((s) => s.removeComposerImage);
@@ -60,6 +62,9 @@ export function ChatView() {
   const diffs = Object.values(view?.pendingDiffs ?? {});
   const added = diffs.reduce((n, d) => n + d.added, 0);
   const removed = diffs.reduce((n, d) => n + d.removed, 0);
+  const roadmapNeedsReview = (view?.roadmap ?? []).filter(
+    (it) => it.status === 'pending' || it.status === 'needs_revision'
+  ).length;
 
   // Re-tick while a task is live so the field deepens as the work goes on.
   const [now, setNow] = useState(() => Date.now());
@@ -202,6 +207,22 @@ export function ChatView() {
                 </div>
                 <button className="btn btn-primary" onClick={openReview}>
                   Review changes
+                </button>
+              </div>
+            </div>
+          )}
+
+          {roadmapNeedsReview > 0 && (
+            <div className="turn agent">
+              <div className="card">
+                <div className="card-top">
+                  <IconRoadmap className="icon-sm" />
+                  <span className="card-title">
+                    {roadmapNeedsReview} roadmap item{roadmapNeedsReview === 1 ? '' : 's'} waiting for review
+                  </span>
+                </div>
+                <button className="btn btn-primary" onClick={() => setCenter('roadmap')}>
+                  Review roadmap
                 </button>
               </div>
             </div>

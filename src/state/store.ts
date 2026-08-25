@@ -16,6 +16,8 @@ import type {
   ChatProvider,
   UpdateStatus,
   ProviderSettings,
+  RoadmapItem,
+  RoadmapItemStatus,
 } from '../../electron/ipc-channels';
 
 export interface OpenFile {
@@ -39,7 +41,7 @@ export interface PendingImage {
  * currently looking at, so switching tabs is instant and nothing is missed.
  */
 /** Which surface the centre column is showing. Chat is the primary one. */
-export type CenterView = 'chat' | 'editor' | 'terminal';
+export type CenterView = 'chat' | 'editor' | 'terminal' | 'roadmap';
 
 /** Which list the sidebar is showing. Sessions is the primary one. */
 export type SidebarView = 'sessions' | 'files';
@@ -59,6 +61,7 @@ export interface WorkspaceView {
   activity: ActivityEvent[];
   pendingDiffs: Record<string, PendingDiff>;
   checkpoints: Checkpoint[];
+  roadmap: RoadmapItem[];
   reviewing: boolean;
   hydrated: boolean;
   /** A run_command call waiting on a yes/no at Manual autonomy, if any. */
@@ -138,6 +141,11 @@ interface ForgeState {
   decideHunk: (diffId: string, hunkIndex: number | 'all', decision: 'accepted' | 'rejected') => Promise<void>;
   undoPath: (path: string) => Promise<void>;
 
+  decideRoadmapItem: (itemId: string, decision: 'approve' | 'reject') => Promise<void>;
+  editRoadmapItem: (itemId: string, patch: { title?: string; summary?: string; detail?: string }) => Promise<void>;
+  pushBackRoadmapItem: (itemId: string, newDetail: string) => Promise<void>;
+  setRoadmapItemStatus: (itemId: string, status: RoadmapItemStatus) => Promise<void>;
+
   openSettings: () => void;
   closeSettings: () => void;
   saveSettings: (values: Partial<ProviderSettings>) => Promise<boolean>;
@@ -158,6 +166,7 @@ function emptyView(summary: WorkspaceSummary): WorkspaceView {
     activity: [],
     pendingDiffs: {},
     checkpoints: [],
+    roadmap: [],
     reviewing: false,
     hydrated: false,
     pendingApproval: null,
@@ -289,6 +298,14 @@ export const useForge = create<ForgeState>((set, get) => {
         patch(workspaceId, (v) => ({ ...v, sessions }));
       });
 
+      forge.roadmap.onUpdated((workspaceId, sessionId, items) => {
+        // A push for a session the user has since navigated away from must not
+        // clobber whatever's currently on screen.
+        const view = get().workspaces[workspaceId];
+        if (view?.summary.activeSessionId !== sessionId) return;
+        patch(workspaceId, (v) => ({ ...v, roadmap: items }));
+      });
+
       forge.diff.onProposed((workspaceId, diff) => {
         patch(workspaceId, (v) => ({ ...v, pendingDiffs: { ...v.pendingDiffs, [diff.id]: diff } }));
       });
@@ -371,6 +388,7 @@ export const useForge = create<ForgeState>((set, get) => {
         terminalLines: data.terminalLines,
         pendingDiffs: Object.fromEntries(data.pendingDiffs.map((d) => [d.id, d])),
         checkpoints: data.checkpoints,
+        roadmap: data.roadmap,
         hydrated: true,
       }));
     },
@@ -389,6 +407,7 @@ export const useForge = create<ForgeState>((set, get) => {
         activeFilePath: null,
         chat: [],
         activity: [],
+        roadmap: [],
       }));
     },
 
@@ -422,15 +441,20 @@ export const useForge = create<ForgeState>((set, get) => {
     newSession: async () => {
       const id = get().activeId;
       if (!id) return;
-      await forge.sessions.create(id);
+      // Refused (null) while the agent is still running the current session —
+      // rebuilding it against a new, empty conversation would orphan the
+      // in-flight turn's callbacks. Leave the UI exactly as it is.
+      const created = await forge.sessions.create(id);
+      if (!created) return;
       forgetComposerImages(id);
       // A new session starts empty; clear the visible thread immediately.
-      patch(id, (v) => ({ ...v, chat: [], activity: [], center: 'chat', composerImages: [] }));
+      patch(id, (v) => ({ ...v, chat: [], activity: [], roadmap: [], center: 'chat', composerImages: [] }));
     },
 
     selectSession: async (sessionId) => {
       const id = get().activeId;
       if (!id) return;
+      // Same refusal as newSession — null while a turn is in flight.
       const result = await forge.sessions.select(id, sessionId);
       if (!result) return;
       forgetComposerImages(id);
@@ -439,6 +463,7 @@ export const useForge = create<ForgeState>((set, get) => {
         summary: result.summary,
         chat: result.chat,
         activity: result.activity,
+        roadmap: result.roadmap,
         center: 'chat',
         composerImages: [],
       }));
@@ -448,10 +473,14 @@ export const useForge = create<ForgeState>((set, get) => {
       const id = get().activeId;
       if (!id) return;
       const wasActive = get().workspaces[id]?.summary.activeSessionId === sessionId;
-      await forge.sessions.remove(id, sessionId);
-      if (wasActive) {
+      const list = await forge.sessions.remove(id, sessionId);
+      // The delete is refused if this was the active session and the agent is
+      // still running it — in that case sessionId still appears in the
+      // returned list, so don't clear a thread that's actually still there.
+      const stillExists = list.some((s) => s.id === sessionId);
+      if (wasActive && !stillExists) {
         forgetComposerImages(id);
-        patch(id, (v) => ({ ...v, chat: [], activity: [], composerImages: [] }));
+        patch(id, (v) => ({ ...v, chat: [], activity: [], roadmap: [], composerImages: [] }));
       }
     },
 
@@ -632,6 +661,32 @@ export const useForge = create<ForgeState>((set, get) => {
         checkpoints,
         openFiles: v.openFiles.map((f) => (f.path === filePath ? { ...f, content, isDirty: false } : f)),
       }));
+    },
+
+    decideRoadmapItem: async (itemId, decision) => {
+      const id = get().activeId;
+      if (!id) return;
+      // No optimistic patch — the authoritative roadmap:updated broadcast
+      // does the real update, same convention as decideHunk.
+      await forge.roadmap.decide(id, itemId, decision);
+    },
+
+    editRoadmapItem: async (itemId, fields) => {
+      const id = get().activeId;
+      if (!id) return;
+      await forge.roadmap.edit(id, itemId, fields);
+    },
+
+    pushBackRoadmapItem: async (itemId, newDetail) => {
+      const id = get().activeId;
+      if (!id) return;
+      await forge.roadmap.pushBack(id, itemId, newDetail);
+    },
+
+    setRoadmapItemStatus: async (itemId, status) => {
+      const id = get().activeId;
+      if (!id) return;
+      await forge.roadmap.setStatus(id, itemId, status);
     },
 
     openSettings: () => {

@@ -15,6 +15,8 @@ import type {
   ChatProvider,
   UpdateStatus,
   ProviderSettings,
+  RoadmapItem,
+  RoadmapItemStatus,
 } from '../../electron/ipc-channels';
 
 type Unsubscribe = () => void;
@@ -36,7 +38,12 @@ export interface ForgeApi {
     select: (
       id: string,
       sessionId: string
-    ) => Promise<{ chat: ChatMessage[]; activity: ActivityEvent[]; summary: WorkspaceSummary } | null>;
+    ) => Promise<{
+      chat: ChatMessage[];
+      activity: ActivityEvent[];
+      summary: WorkspaceSummary;
+      roadmap: RoadmapItem[];
+    } | null>;
     remove: (id: string, sessionId: string) => Promise<SessionSummary[]>;
     onUpdated: (cb: (workspaceId: string, sessions: SessionSummary[]) => void) => Unsubscribe;
   };
@@ -69,6 +76,13 @@ export interface ForgeApi {
     ) => Promise<PendingDiff | null>;
     onProposed: (cb: (workspaceId: string, diff: PendingDiff) => void) => Unsubscribe;
     onUpdated: (cb: (workspaceId: string, diff: PendingDiff) => void) => Unsubscribe;
+  };
+  roadmap: {
+    decide: (id: string, itemId: string, decision: 'approve' | 'reject') => Promise<boolean>;
+    edit: (id: string, itemId: string, patch: { title?: string; summary?: string; detail?: string }) => Promise<boolean>;
+    pushBack: (id: string, itemId: string, newDetail: string) => Promise<boolean>;
+    setStatus: (id: string, itemId: string, status: RoadmapItemStatus) => Promise<boolean>;
+    onUpdated: (cb: (workspaceId: string, sessionId: string, items: RoadmapItem[]) => void) => Unsubscribe;
   };
   checkpoints: {
     list: (id: string) => Promise<Checkpoint[]>;

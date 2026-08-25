@@ -734,6 +734,24 @@ input, textarea { font: inherit; color: inherit; }
 .dline.ctx .ds { color: var(--fg-3); }
 .rev-foot { height: 52px; flex: none; display: flex; align-items: center; gap: var(--s3); padding: 0 var(--s5); border-top: 1px solid var(--line); }
 .progress { font-size: var(--t-sm); color: var(--fg-2); font-family: var(--font-mono); }
+.mini:disabled { opacity: 0.4; cursor: default; }
+.mini:disabled:hover { background: none; }
+
+/* ── Roadmap ───────────────────────────────────────────────────────────── */
+.rm-wrap { flex: 1; min-height: 0; display: flex; }
+.rm-list { width: 280px; flex: none; overflow: auto; border-right: 1px solid var(--line); padding: var(--s2); }
+.rm-item { display: flex; align-items: flex-start; gap: var(--s2); padding: var(--s2); border-radius: var(--r-md); margin-bottom: 1px; cursor: default; }
+.rm-item:hover { background: var(--bg-hover); }
+.rm-item.sel { background: var(--bg-active); }
+.rm-title { font-size: var(--t-sm); font-weight: 500; }
+.rm-summary { font-size: var(--t-xs); color: var(--fg-3); margin-top: 2px; }
+.rm-detail { flex: 1; min-width: 0; overflow: auto; display: flex; flex-direction: column; }
+.rm-dhead { position: sticky; top: 0; z-index: 1; background: var(--bg-panel); display: flex; align-items: center; gap: var(--s2); padding: var(--s3) var(--s5); border-bottom: 1px solid var(--line); }
+.rm-dtitle { font-size: var(--t-sm); font-weight: 600; }
+.rm-dstatus { font-size: var(--t-xs); color: var(--fg-3); margin-top: 2px; }
+.rm-body { padding: var(--s5); flex: 1; display: flex; flex-direction: column; }
+.rm-editor { flex: 1; min-height: 320px; border: 1px solid var(--line); border-radius: var(--r-md); overflow: hidden; }
+.rm-notes { margin-top: var(--s4); padding: var(--s3); border: 1px solid var(--line); border-radius: var(--r-md); background: var(--bg-raised); font-size: var(--t-sm); color: var(--fg-2); white-space: pre-wrap; }
 
 /* ── Settings overlay ──────────────────────────────────────────────────── */
 .settings-body { flex: 1; min-height: 0; overflow-y: auto; padding: var(--s6) var(--s5); }

@@ -8,7 +8,16 @@ import { nextId } from './diff-store';
 import { extFromMediaType, IMAGE_MIME_BY_EXT } from './media-types';
 import { listCatalogModels } from './models-service';
 import { CHAT_PROVIDERS } from './ipc-channels';
-import type { ActivityEvent, TermDataEvent, PendingDiff, FileNode, Autonomy, ChatImage, ChatProvider } from './ipc-channels';
+import type {
+  ActivityEvent,
+  TermDataEvent,
+  PendingDiff,
+  FileNode,
+  Autonomy,
+  ChatImage,
+  ChatProvider,
+  RoadmapItem,
+} from './ipc-channels';
 import { MAX_TOOL_CALLS_DEFAULT, MAX_TOOL_CALLS_LIMIT } from './ipc-channels';
 
 type Role = 'system' | 'user' | 'assistant' | 'tool';
@@ -51,6 +60,14 @@ export interface AgentCallbacks {
   onMessage: (text: string, images?: ChatImage[]) => void;
   onStatus: (running: boolean) => void;
   onDiffProposed: (diff: PendingDiff) => void;
+  /** propose_roadmap fires this — a whole new checklist for the Operator to review, fire-and-forget like onDiffProposed. */
+  onRoadmapProposed: (items: RoadmapItem[]) => void;
+  /**
+   * complete_roadmap_item fires this — unlike onDiffProposed, the caller needs
+   * to know right away whether it actually took (item existed and was
+   * in_progress), so the model doesn't believe a stale/wrong id succeeded.
+   */
+  onRoadmapItemDone: (itemId: string, summary: string) => { ok: boolean; error?: string };
   /** Fires after every completion so the UI can show real context usage. */
   onUsage: (info: { promptTokens: number; contextWindow: number }) => void;
   /**
@@ -346,7 +363,63 @@ const SPAWN_TOOL = {
   },
 } as const;
 
-const TOOLS = [...BASE_TOOLS, SPAWN_TOOL];
+const PROPOSE_ROADMAP_TOOL = {
+  type: 'function',
+  function: {
+    name: 'propose_roadmap',
+    description:
+      'Propose a project roadmap: an ordered checklist of milestones, each with its own detailed markdown ' +
+      'plan. Use this ONLY for genuinely multi-step projects with distinct milestones — never for small or ' +
+      'single-step requests, which you should just do directly. This does NOT start any work. It replaces any ' +
+      'existing roadmap for this session. The Operator will review, edit, and approve or reject each item ' +
+      'themselves; you will be given one item at a time to work on once they approve it, in the order listed.',
+    parameters: {
+      type: 'object',
+      properties: {
+        items: {
+          type: 'array',
+          description: 'The checklist, in the order it should be worked through.',
+          items: {
+            type: 'object',
+            properties: {
+              title: { type: 'string', description: 'Short milestone name.' },
+              summary: { type: 'string', description: 'One sentence describing this item, shown in the checklist.' },
+              detail: {
+                type: 'string',
+                description:
+                  'The full plan for this item, in markdown: what you will do and how, specific enough that ' +
+                  'the Operator can judge it and you can execute it later without re-deriving the approach.',
+              },
+            },
+            required: ['title', 'summary', 'detail'],
+          },
+        },
+      },
+      required: ['items'],
+    },
+  },
+} as const;
+
+const COMPLETE_ROADMAP_ITEM_TOOL = {
+  type: 'function',
+  function: {
+    name: 'complete_roadmap_item',
+    description:
+      "Mark the roadmap item you are currently working on as done. Only call this when the item's work is " +
+      'genuinely finished. If you get stuck or need the Operator\'s input before you can finish, do NOT call ' +
+      'this — just explain the situation in your reply instead, and the item will be flagged for their review.',
+    parameters: {
+      type: 'object',
+      properties: {
+        item_id: { type: 'string', description: 'The id of the roadmap item you were told you are working on.' },
+        summary: { type: 'string', description: 'A short report of what you actually did for this item.' },
+      },
+      required: ['item_id', 'summary'],
+    },
+  },
+} as const;
+
+const TOOLS = [...BASE_TOOLS, SPAWN_TOOL, PROPOSE_ROADMAP_TOOL, COMPLETE_ROADMAP_ITEM_TOOL];
 const SUBAGENT_TOOLS = BASE_TOOLS;
 
 interface WebResult {
@@ -455,6 +528,16 @@ function buildSystemPrompt(rootPath: string, hasRules: boolean, isSubagent = fal
           '  everything it needs in the task text. Subagents run at full autonomy — they write edits and',
           '  run commands without waiting on anyone — so do not delegate anything you would not be',
           '  comfortable seeing land unsupervised.',
+          '- propose_roadmap proposes an ordered checklist of milestones, each with its own detailed plan,',
+          '  for a genuinely multi-step project. Use your own judgment: only for real multi-milestone work,',
+          "  never for a small or single-step ask — just do those directly. It does not start any work; the",
+          '  Operator reviews, edits, and approves each item themselves. Do not ask the Operator whether',
+          "  they'd like a roadmap first — if a request calls for one, propose it directly.",
+          '- complete_roadmap_item marks the roadmap item you are currently working on as done. You will be',
+          "  told explicitly when you are working on one, with its id and full plan. Only call this when that",
+          "  item's work is genuinely finished. If you get stuck or need the Operator's input, say so in your",
+          '  reply instead — do not call it, so the item gets flagged for their review instead of silently',
+          '  looking finished.',
         ]),
     '',
     isSubagent
@@ -728,6 +811,25 @@ export class AgentSession {
     // Subagents run their own independent loop and API calls — aborting only
     // this session's controller left them running unsupervised forever.
     for (const sub of this.activeSubagents) sub.stop();
+
+    // A tool-call batch aborted mid-flight can leave the trailing assistant
+    // message's tool_calls without matching 'tool' result messages — every
+    // OpenAI-compatible provider rejects the next request outright when that
+    // happens. Synthesize placeholders so the conversation stays valid and a
+    // follow-up message (including a roadmap push-back's immediate resend)
+    // doesn't fail with a 400.
+    const last = this.messages[this.messages.length - 1];
+    if (last?.role === 'assistant' && last.tool_calls?.length) {
+      for (const call of last.tool_calls) {
+        this.messages.push({
+          role: 'tool',
+          tool_call_id: call.id,
+          name: call.function.name,
+          content: 'Stopped by the Operator before this call finished.',
+        });
+      }
+    }
+
     this.trackActivity({ id: nextId('act'), kind: 'stopped', detail: 'Stopped by you', status: 'error' });
     const summary = this.buildActivitySummary();
     if (summary) {
@@ -765,6 +867,10 @@ export class AgentSession {
         },
         onStatus: () => {}, // This whole run already happens inside the parent's own onStatus bracket.
         onDiffProposed: this.cb.onDiffProposed, // Dead path at forced 'auto' — edits apply immediately instead.
+        // A subagent never has propose_roadmap/complete_roadmap_item in its
+        // tool list (SUBAGENT_TOOLS), so these are never actually called.
+        onRoadmapProposed: () => {},
+        onRoadmapItemDone: () => ({ ok: false, error: 'Subagents cannot work on roadmap items.' }),
         onUsage: () => {}, // A subagent's token usage belongs to its own conversation, not this one's.
         onCost: this.cb.onCost, // Real money spent on the Operator's behalf — always bubbles up.
         onCompaction: () => {}, // A subagent compacting its own scratch conversation isn't the visible thread's business.
@@ -891,6 +997,38 @@ export class AgentSession {
       if (!task) return 'ERROR: spawn_subagent requires a "task" describing what the subagent should do.';
       if (this.isSubagent) return 'ERROR: subagents cannot spawn further subagents.';
       return this.runSubagent(task);
+    }
+
+    if (name === 'propose_roadmap') {
+      const rawItems = Array.isArray(args.items) ? args.items : [];
+      const items: RoadmapItem[] = rawItems
+        .map((it, index) => ({
+          id: nextId('rm'),
+          order: index,
+          title: String((it as Record<string, unknown>)?.title ?? '').trim(),
+          summary: String((it as Record<string, unknown>)?.summary ?? '').trim(),
+          detail: String((it as Record<string, unknown>)?.detail ?? '').trim(),
+          status: 'pending' as const,
+        }))
+        .filter((it) => it.title && it.detail);
+      if (!items.length) return 'ERROR: propose_roadmap requires at least one item with a title and detail.';
+      this.cb.onRoadmapProposed(items);
+      this.trackActivity({
+        id: nextId('act'),
+        kind: 'roadmap',
+        detail: `Proposed a roadmap: ${items.length} item${items.length === 1 ? '' : 's'}`,
+        status: 'done',
+      });
+      return `Proposed a ${items.length}-item roadmap. Waiting on the Operator to review and approve items — do not start any of this work yet.`;
+    }
+
+    if (name === 'complete_roadmap_item') {
+      const itemId = String(args.item_id ?? '').trim();
+      const summary = String(args.summary ?? '').trim();
+      if (!itemId) return 'ERROR: complete_roadmap_item requires an "item_id".';
+      const result = this.cb.onRoadmapItemDone(itemId, summary || '(no summary given)');
+      if (!result.ok) return `ERROR: ${result.error ?? 'could not complete that roadmap item.'}`;
+      return `Roadmap item ${itemId} marked done.`;
     }
 
     if (name === 'web_search') {
@@ -1301,6 +1439,7 @@ export class AgentSession {
     if (t.generate) parts.push(`generated ${AgentSession.pluralize(t.generate, 'item')}`);
     if (t.analyze) parts.push(`analyzed ${AgentSession.pluralize(t.analyze, 'image')}`);
     if (t.compact) parts.push(`compacted context ${AgentSession.pluralize(t.compact, 'time')}`);
+    if (t.roadmap) parts.push(`updated the roadmap`);
     if (this.activityErrors) parts.push(`${this.activityErrors} failed`);
     if (t.stopped) parts.push('stopped by you');
 

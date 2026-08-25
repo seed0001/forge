@@ -56,6 +56,18 @@ contextBridge.exposeInMainWorld('forge', {
     onProposed: (cb: (workspaceId: string, diff: unknown) => void) => on(IPC.diffProposed, cb),
     onUpdated: (cb: (workspaceId: string, diff: unknown) => void) => on(IPC.diffUpdated, cb),
   },
+  roadmap: {
+    decide: (id: string, itemId: string, decision: 'approve' | 'reject') =>
+      ipcRenderer.invoke(IPC.roadmapDecide, id, itemId, decision),
+    edit: (id: string, itemId: string, patch: { title?: string; summary?: string; detail?: string }) =>
+      ipcRenderer.invoke(IPC.roadmapEdit, id, itemId, patch),
+    pushBack: (id: string, itemId: string, newDetail: string) =>
+      ipcRenderer.invoke(IPC.roadmapPushBack, id, itemId, newDetail),
+    setStatus: (id: string, itemId: string, status: string) =>
+      ipcRenderer.invoke(IPC.roadmapSetStatus, id, itemId, status),
+    onUpdated: (cb: (workspaceId: string, sessionId: string, items: unknown) => void) =>
+      on(IPC.roadmapUpdated, cb),
+  },
   checkpoints: {
     list: (id: string) => ipcRenderer.invoke(IPC.checkpointList, id),
     undo: (id: string, filePath: string) => ipcRenderer.invoke(IPC.checkpointUndo, id, filePath),

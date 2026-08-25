@@ -6,7 +6,7 @@ import { fileURLToPath } from 'node:url';
 import { loadEnv, setEnvValue } from './env';
 import { transcribe } from './transcribe';
 import { IPC, SETTINGS_KEYS, MAX_TOOL_CALLS_LIMIT } from './ipc-channels';
-import type { WorkspaceHydration, ChatImage, ProviderSettings, ChatProvider } from './ipc-channels';
+import type { WorkspaceHydration, ChatImage, ProviderSettings, ChatProvider, RoadmapItemStatus } from './ipc-channels';
 import * as fsService from './fs-service';
 import { WorkspaceManager } from './workspace-manager';
 import { saveAttachment, attachmentDirFor, readImageAsDataUrl } from './attachment-store';
@@ -69,6 +69,7 @@ const manager = new WorkspaceManager({
   },
   commandApproval: (workspaceId, requestId, command) =>
     send(IPC.cmdApprovalRequest, workspaceId, { requestId, command }),
+  roadmapUpdated: (workspaceId, sessionId, items) => send(IPC.roadmapUpdated, workspaceId, sessionId, items),
 });
 
 function loadContent(w: BrowserWindow) {
@@ -196,7 +197,7 @@ app.whenReady().then(() => {
     const ws = manager.get(workspaceId);
     if (!ws || !ws.selectSession(sessionId)) return null;
     send(IPC.wsUpdated, ws.summary());
-    return { chat: ws.chat, activity: ws.activity, summary: ws.summary() };
+    return { chat: ws.chat, activity: ws.activity, summary: ws.summary(), roadmap: ws.roadmap };
   });
 
   ipcMain.handle(IPC.sessDelete, async (_e, workspaceId: string, sessionId: string) => {
@@ -220,6 +221,7 @@ app.whenReady().then(() => {
       terminalLines: ws.terminalLines,
       pendingDiffs: ws.diffs.list(),
       checkpoints: ws.diffs.listCheckpoints(),
+      roadmap: ws.roadmap,
     };
   });
 
@@ -294,6 +296,29 @@ app.whenReady().then(() => {
       return diff ?? null;
     }
   );
+
+  ipcMain.handle(IPC.roadmapDecide, async (_e, workspaceId: string, itemId: string, decision: 'approve' | 'reject') => {
+    manager.get(workspaceId)?.decideRoadmapItem(itemId, decision);
+    return true;
+  });
+
+  ipcMain.handle(
+    IPC.roadmapEdit,
+    async (_e, workspaceId: string, itemId: string, patch: { title?: string; summary?: string; detail?: string }) => {
+      manager.get(workspaceId)?.editRoadmapItem(itemId, patch);
+      return true;
+    }
+  );
+
+  ipcMain.handle(IPC.roadmapPushBack, async (_e, workspaceId: string, itemId: string, newDetail: string) => {
+    manager.get(workspaceId)?.pushBackRoadmapItem(itemId, newDetail);
+    return true;
+  });
+
+  ipcMain.handle(IPC.roadmapSetStatus, async (_e, workspaceId: string, itemId: string, status: RoadmapItemStatus) => {
+    manager.get(workspaceId)?.setRoadmapItemStatus(itemId, status);
+    return true;
+  });
 
   ipcMain.handle(IPC.checkpointList, async (_e, workspaceId: string) => {
     return manager.get(workspaceId)?.diffs.listCheckpoints() ?? [];

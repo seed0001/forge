@@ -19,6 +19,8 @@ import type {
   WorkspaceSummary,
   WorkspaceStatus,
   Autonomy,
+  RoadmapItem,
+  RoadmapItemStatus,
 } from './ipc-channels';
 
 export interface WorkspaceEmit {
@@ -33,6 +35,8 @@ export interface WorkspaceEmit {
   sessions: (workspaceId: string) => void;
   /** A run_command call is waiting on the Operator at Manual autonomy. */
   commandApproval: (workspaceId: string, requestId: string, command: string) => void;
+  /** The active session's whole roadmap, sent fresh on every change (propose/decide/edit/push-back/status). */
+  roadmapUpdated: (workspaceId: string, sessionId: string, items: RoadmapItem[]) => void;
 }
 
 /**
@@ -71,6 +75,17 @@ export class Workspace {
   private pendingApprovals = new Map<string, (approved: boolean) => void>();
   /** When the current agent run began, so its wall-clock duration can be folded into the session's total on completion. */
   private runStartedAt: number | null = null;
+  /** Id of the roadmap item currently being worked on, if any — at most one at a time. */
+  private activeRoadmapItemId: string | null = null;
+  /**
+   * Bumped every time a roadmap-item turn (re)starts. A push-back bumps this
+   * BEFORE aborting the old turn, so the old turn's now-stale `.then()`
+   * continuation (which can only run later, since abort() rejects the fetch
+   * asynchronously) recognizes it's been superseded and does nothing.
+   */
+  private roadmapTurnSeq = 0;
+  /** Set by pushBackRoadmapItem while waiting for the old turn to actually finish unwinding before restarting it. */
+  private pendingRoadmapRestart: RoadmapItem | null = null;
 
   constructor(id: string, name: string, rootPath: string | null, emit: WorkspaceEmit) {
     this.id = id;
@@ -110,7 +125,21 @@ export class Workspace {
     return this.activeSession?.activity ?? [];
   }
 
-  newSession(): SessionSummary {
+  get roadmap(): RoadmapItem[] {
+    return this.activeSession?.roadmap ?? [];
+  }
+
+  /**
+   * Switching sessions rebuilds `this.agent` from scratch (see selectSession/
+   * newSession below) — doing that while a turn is still in flight would
+   * orphan the running AgentSession's callbacks: they close over
+   * `this.activeSession`, a live getter, so they'd keep firing and write
+   * into whatever session is now active instead of the one they belong to.
+   * Background roadmap execution makes this a routine scenario, not a rare
+   * one, so every session mutator refuses while `agentRunning` is true.
+   */
+  newSession(): SessionSummary | null {
+    if (this.agentRunning) return null;
     this.sessionSeq += 1;
     const now = Date.now();
     const session: Session = {
@@ -122,6 +151,7 @@ export class Workspace {
       chat: [],
       activity: [],
       messages: [],
+      roadmap: [],
     };
     this.sessions.unshift(session);
     this.activeSessionId = session.id;
@@ -131,6 +161,7 @@ export class Workspace {
   }
 
   selectSession(sessionId: string): boolean {
+    if (this.agentRunning) return false;
     const session = this.sessions.find((s) => s.id === sessionId);
     if (!session) return false;
     this.activeSessionId = sessionId;
@@ -141,6 +172,7 @@ export class Workspace {
   }
 
   deleteSession(sessionId: string) {
+    if (this.agentRunning && sessionId === this.activeSessionId) return;
     this.sessions = this.sessions.filter((s) => s.id !== sessionId);
     if (this.activeSessionId === sessionId) {
       this.activeSessionId = this.sessions[0]?.id ?? null;
@@ -234,6 +266,181 @@ export class Workspace {
     );
   }
 
+  // ── Roadmap ──────────────────────────────────────────────────────────────
+
+  private findRoadmapItem(itemId: string): RoadmapItem | undefined {
+    return this.activeSession?.roadmap.find((it) => it.id === itemId);
+  }
+
+  private emitRoadmap() {
+    if (!this.activeSession) return;
+    this.emit.roadmapUpdated(this.id, this.activeSession.id, this.activeSession.roadmap);
+  }
+
+  /** propose_roadmap replaces the active session's whole roadmap. */
+  proposeRoadmap(items: RoadmapItem[]) {
+    const session = this.activeSession;
+    if (!session) return;
+    session.roadmap = items;
+    void this.persist();
+    this.emitRoadmap();
+  }
+
+  decideRoadmapItem(itemId: string, decision: 'approve' | 'reject') {
+    const item = this.findRoadmapItem(itemId);
+    if (!item) return;
+    item.status = decision === 'approve' ? 'approved' : 'rejected';
+    void this.persist();
+    this.emitRoadmap();
+    this.maybeAdvanceRoadmap();
+  }
+
+  /** Text-only edit — never touches status or interrupts a running turn. */
+  editRoadmapItem(itemId: string, patch: { title?: string; summary?: string; detail?: string }) {
+    const item = this.findRoadmapItem(itemId);
+    if (!item) return;
+    if (patch.title !== undefined) item.title = patch.title;
+    if (patch.summary !== undefined) item.summary = patch.summary;
+    if (patch.detail !== undefined) item.detail = patch.detail;
+    void this.persist();
+    this.emitRoadmap();
+  }
+
+  /** Allowed manual status transitions the UI offers (revert/reopen/restore) — always back to 'pending'. */
+  setRoadmapItemStatus(itemId: string, status: RoadmapItemStatus) {
+    const item = this.findRoadmapItem(itemId);
+    if (!item || item.status === 'in_progress') return; // never touch a running item this way — use pushBack
+    item.status = status;
+    void this.persist();
+    this.emitRoadmap();
+    if (status === 'approved') this.maybeAdvanceRoadmap();
+  }
+
+  /**
+   * Edit + interrupt-and-redo. If the item isn't currently running, this is
+   * just a text edit. If it IS running: `AgentSession.send()` is NOT safe to
+   * call again on the same instance until the CURRENT call has actually
+   * returned — abort() only rejects the in-flight fetch asynchronously, so
+   * calling ensureAgent().send(...) again right after stop() would run two
+   * send() invocations concurrently on the same object, racing on the same
+   * shared this.messages array. So this does not restart the turn directly:
+   * it records the restart, bumps roadmapTurnSeq (so the old turn's `.then()`
+   * knows it's been superseded), and stop()s it — the OLD turn's `.then()`
+   * (see startRoadmapTurn) is what actually starts the new one, because that
+   * `.then()` firing IS the proof send() has really returned. Deliberately
+   * leaves activeRoadmapItemId set the whole time, so maybeAdvanceRoadmap
+   * can't sneak a DIFFERENT item's turn onto this same busy AgentSession
+   * while we're waiting for it to be safe.
+   */
+  pushBackRoadmapItem(itemId: string, newDetail: string) {
+    const item = this.findRoadmapItem(itemId);
+    if (!item) return;
+    item.detail = newDetail;
+    if (item.status !== 'in_progress') {
+      void this.persist();
+      this.emitRoadmap();
+      return;
+    }
+    this.roadmapTurnSeq++;
+    this.pendingRoadmapRestart = item;
+    item.status = 'approved'; // reflect "queued to restart", not stuck in_progress
+    void this.persist();
+    this.emitRoadmap();
+    this.agent?.stop();
+  }
+
+  /** No-op if a turn is already active, or nothing is approved and waiting. */
+  private maybeAdvanceRoadmap() {
+    if (this.activeRoadmapItemId) return;
+    const roadmap = this.activeSession?.roadmap;
+    if (!roadmap?.length) return;
+    const next = roadmap.filter((it) => it.status === 'approved').sort((a, b) => a.order - b.order)[0];
+    if (next) this.startRoadmapTurn(next);
+  }
+
+  private startRoadmapTurn(item: RoadmapItem) {
+    item.status = 'in_progress';
+    item.notes = undefined; // clear any stale needs_revision/done note from a prior attempt
+    void this.persist();
+    this.emitRoadmap();
+    this.trackRoadmapActivity(`Started roadmap item: "${item.title}"`);
+
+    this.activeRoadmapItemId = item.id;
+    const seq = ++this.roadmapTurnSeq;
+    void this.ensureAgent()
+      .send(this.buildRoadmapItemPrompt(item))
+      .then(() => {
+        if (seq !== this.roadmapTurnSeq) {
+          // Superseded by a push-back. This firing is the actual proof that
+          // send() has returned on this AgentSession — only now is it safe
+          // to call it again, so this is what starts the restart, not
+          // pushBackRoadmapItem itself.
+          const restart = this.pendingRoadmapRestart;
+          this.pendingRoadmapRestart = null;
+          this.activeRoadmapItemId = null;
+          // Only restart if it's still queued for it — the Operator may have
+          // rejected it (or otherwise changed its status) while we waited for
+          // this old turn to actually finish unwinding.
+          if (restart && restart.status === 'approved') this.startRoadmapTurn(restart);
+          else this.maybeAdvanceRoadmap();
+          return;
+        }
+        this.activeRoadmapItemId = null;
+        this.onRoadmapTurnEndedFor(item.id);
+      });
+  }
+
+  /** The AgentCallbacks hook for complete_roadmap_item — must answer synchronously so the model learns right away if it failed. */
+  onRoadmapItemDone(itemId: string, summary: string): { ok: boolean; error?: string } {
+    const item = this.findRoadmapItem(itemId);
+    if (!item) return { ok: false, error: `No roadmap item with id "${itemId}".` };
+    if (item.status !== 'in_progress') {
+      return { ok: false, error: `Roadmap item "${itemId}" is not in progress (status: ${item.status}).` };
+    }
+    item.status = 'done';
+    item.notes = summary;
+    void this.persist();
+    this.emitRoadmap();
+    // Do NOT advance here — the turn (send()) is still running; startRoadmapTurn's
+    // .then() calls onRoadmapTurnEndedFor once it actually finishes, which advances.
+    return { ok: true };
+  }
+
+  private onRoadmapTurnEndedFor(itemId: string) {
+    const item = this.findRoadmapItem(itemId);
+    if (!item) return;
+    if (item.status === 'in_progress') {
+      // The turn ended (naturally, or hit the turn limit) without the agent
+      // ever calling complete_roadmap_item — flag it rather than silently
+      // advancing past unfinished work.
+      item.status = 'needs_revision';
+      item.notes = "The agent's turn ended without marking this item done — review needed.";
+      void this.persist();
+      this.emitRoadmap();
+      return;
+    }
+    // status is 'done' (via complete_roadmap_item) — keep the queue moving.
+    this.maybeAdvanceRoadmap();
+  }
+
+  private buildRoadmapItemPrompt(item: RoadmapItem): string {
+    return (
+      `You are working on roadmap item ${item.id}: "${item.title}".\n\n` +
+      `Plan:\n${item.detail}\n\n` +
+      `When this item's work is genuinely complete, call complete_roadmap_item with item_id "${item.id}" ` +
+      'and a short summary. If you get stuck or need the Operator\'s input, explain that in your reply ' +
+      'instead of calling it.'
+    );
+  }
+
+  private trackRoadmapActivity(detail: string) {
+    const session = this.activeSession;
+    if (!session) return;
+    const evt: ActivityEvent = { id: nextId('act'), kind: 'roadmap', detail, status: 'done' };
+    session.activity.push(evt);
+    this.emit.activity(this.id, evt);
+  }
+
   private ensureAgent(): AgentSession {
     if (!this.agent) {
       const rulesDir = process.env.RULES_DIR?.trim() || null;
@@ -291,6 +498,8 @@ export class Workspace {
           this.emit.diffProposed(this.id, diff);
           this.emit.status(this.id);
         },
+        onRoadmapProposed: (items) => this.proposeRoadmap(items),
+        onRoadmapItemDone: (itemId, summary) => this.onRoadmapItemDone(itemId, summary),
         onUsage: ({ promptTokens, contextWindow }) => {
           const session = this.activeSession;
           if (!session) return;

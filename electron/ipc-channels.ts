@@ -33,6 +33,12 @@ export const IPC = {
   diffDecide: 'diff:decide',
   diffUpdated: 'diff:updated',
 
+  roadmapUpdated: 'roadmap:updated',
+  roadmapDecide: 'roadmap:decide',
+  roadmapEdit: 'roadmap:edit',
+  roadmapPushBack: 'roadmap:push-back',
+  roadmapSetStatus: 'roadmap:set-status',
+
   checkpointUndo: 'checkpoint:undo',
   checkpointList: 'checkpoint:list',
 
@@ -133,7 +139,7 @@ export interface TermDataEvent {
 
 export interface ActivityEvent {
   id: string;
-  kind: 'read' | 'list' | 'run' | 'propose' | 'search' | 'generate' | 'analyze' | 'thinking' | 'done' | 'stopped' | 'compact';
+  kind: 'read' | 'list' | 'run' | 'propose' | 'search' | 'generate' | 'analyze' | 'thinking' | 'done' | 'stopped' | 'compact' | 'roadmap';
   detail: string;
   /**
    * 'skipped' is a benign non-result — a file that simply does not exist.
@@ -179,6 +185,29 @@ export interface Checkpoint {
   path: string;
   previousContent: string;
   timestamp: number;
+}
+
+/**
+ * A project roadmap is an ordered checklist of milestones, each with its own
+ * markdown "detail doc" describing the plan. The agent proposes one via the
+ * propose_roadmap tool (electron/agent-service.ts); the Operator reviews,
+ * edits, and approves/rejects each item, and the agent works through
+ * approved items in order, one at a time, pausing whenever the next item
+ * isn't yet approved.
+ */
+export type RoadmapItemStatus = 'pending' | 'approved' | 'in_progress' | 'done' | 'needs_revision' | 'rejected';
+
+export interface RoadmapItem {
+  id: string;
+  order: number;
+  title: string;
+  /** One-line summary shown in the checklist row. */
+  summary: string;
+  /** Full markdown plan — the Operator-editable "detail doc". */
+  detail: string;
+  status: RoadmapItemStatus;
+  /** Agent-written completion report, or a reason the item needs review. */
+  notes?: string;
 }
 
 /** Which chat-completion backend a model/request belongs to. */
@@ -265,4 +294,5 @@ export interface WorkspaceHydration {
   terminalLines: (TermDataEvent & { id: string })[];
   pendingDiffs: PendingDiff[];
   checkpoints: Checkpoint[];
+  roadmap: RoadmapItem[];
 }

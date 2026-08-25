@@ -5,6 +5,7 @@ import { Sidebar } from './components/Sidebar';
 import { ChatView } from './components/ChatView';
 import { EditorPanel } from './components/EditorPanel';
 import { TerminalPanel } from './components/TerminalPanel';
+import { RoadmapPanel } from './components/RoadmapPanel';
 import { ReviewOverlay } from './components/ReviewOverlay';
 import { PaintEditorOverlay } from './components/PaintEditorOverlay';
 import { FontPicker } from './components/FontPicker';
@@ -19,6 +20,7 @@ const VIEWS = [
   { key: 'chat', label: 'Chat' },
   { key: 'editor', label: 'Editor' },
   { key: 'terminal', label: 'Terminal' },
+  { key: 'roadmap', label: 'Roadmap' },
 ] as const;
 
 export default function App() {
@@ -67,6 +69,7 @@ export default function App() {
             {center === 'chat' && <ChatView />}
             {center === 'editor' && <EditorPanel />}
             {center === 'terminal' && <TerminalPanel />}
+            {center === 'roadmap' && <RoadmapPanel />}
           </div>
         </div>
       </div>

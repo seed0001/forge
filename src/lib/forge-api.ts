@@ -11,7 +11,8 @@ import type {
   SessionSummary,
   Autonomy,
   CommandApproval,
-  OpenRouterModel,
+  CatalogModel,
+  ChatProvider,
   UpdateStatus,
   ProviderSettings,
 } from '../../electron/ipc-channels';
@@ -83,9 +84,10 @@ export interface ForgeApi {
     read: (workspaceId: string, filePath: string) => Promise<string | null>;
   };
   models: {
-    list: (forceRefresh?: boolean) => Promise<{ ok: true; models: OpenRouterModel[] } | { ok: false; error: string }>;
-    getCurrent: () => Promise<string>;
-    setCurrent: (modelId: string) => Promise<boolean>;
+    list: (forceRefresh?: boolean) => Promise<{ ok: true; models: CatalogModel[] } | { ok: false; error: string }>;
+    getCurrent: () => Promise<{ provider: ChatProvider; model: string }>;
+    setCurrent: (modelId: string, provider: ChatProvider) => Promise<boolean>;
+    setProvider: (provider: ChatProvider) => Promise<{ provider: ChatProvider; model: string }>;
   };
   updates: {
     check: () => Promise<boolean>;

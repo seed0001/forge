@@ -1,8 +1,9 @@
-import type { OpenRouterModel } from './ipc-channels';
+import type { CatalogModel, ChatProvider } from './ipc-channels';
 
-const MODELS_URL = 'https://openrouter.ai/api/v1/models';
+const OPENROUTER_MODELS_URL = 'https://openrouter.ai/api/v1/models';
+const FAIRROUTER_MODELS_URL = 'https://fairrouter.ai/v1/models';
 
-/** OpenRouter's own model listing shape (only the fields we use). */
+/** Both providers' own model listings are OpenAI-shaped (only the fields we use). */
 interface RawModel {
   id: string;
   name?: string;
@@ -11,12 +12,16 @@ interface RawModel {
   pricing?: { prompt?: string; completion?: string };
 }
 
-/** Refetching on every dropdown open would hit OpenRouter far more than the list ever changes. */
+/** Refetching on every dropdown open would hit either provider far more than its list ever changes. */
 const CACHE_MS = 5 * 60_000;
-let cache: { at: number; models: OpenRouterModel[] } | null = null;
-let inflight: Promise<OpenRouterModel[]> | null = null;
+interface Cache {
+  at: number;
+  models: CatalogModel[];
+}
+const cache = new Map<ChatProvider, Cache>();
+const inflight = new Map<ChatProvider, Promise<CatalogModel[]>>();
 
-function toModel(raw: RawModel): OpenRouterModel {
+function toModel(raw: RawModel, provider: ChatProvider): CatalogModel {
   const promptPrice = Number(raw.pricing?.prompt ?? 0) || 0;
   const completionPrice = Number(raw.pricing?.completion ?? 0) || 0;
   return {
@@ -27,40 +32,78 @@ function toModel(raw: RawModel): OpenRouterModel {
     promptPrice,
     completionPrice,
     isFree: promptPrice === 0 && completionPrice === 0,
+    provider,
   };
 }
 
-async function fetchModels(): Promise<OpenRouterModel[]> {
+async function fetchOpenRouterModels(): Promise<CatalogModel[]> {
   const apiKey = process.env.OPENROUTER_API_KEY;
-  const res = await fetch(MODELS_URL, {
+  const res = await fetch(OPENROUTER_MODELS_URL, {
     headers: apiKey ? { Authorization: `Bearer ${apiKey}` } : {},
   });
   if (!res.ok) {
     throw new Error(`OpenRouter models request failed (${res.status})`);
   }
   const data = (await res.json()) as { data?: RawModel[] };
-  return (data.data ?? [])
-    .map(toModel)
-    .sort((a, b) => a.name.localeCompare(b.name));
+  return (data.data ?? []).map((m) => toModel(m, 'openrouter'));
 }
 
-/**
- * Cached list of every model OpenRouter currently serves, free and paid alike.
- * `forceRefresh` bypasses the cache — used by the selector's manual refresh.
- */
-export async function listOpenRouterModels(forceRefresh = false): Promise<OpenRouterModel[]> {
-  if (!forceRefresh && cache && Date.now() - cache.at < CACHE_MS) return cache.models;
+/** Unlike OpenRouter's public catalog, FairRouter's /v1/models requires a key — skip the call rather than fail loudly if none is set yet. */
+async function fetchFairRouterModels(): Promise<CatalogModel[]> {
+  const apiKey = process.env.FAIRROUTER_API_KEY;
+  if (!apiKey) return [];
+  const res = await fetch(FAIRROUTER_MODELS_URL, {
+    headers: { Authorization: `Bearer ${apiKey}` },
+  });
+  if (!res.ok) {
+    throw new Error(`FairRouter models request failed (${res.status})`);
+  }
+  const data = (await res.json()) as { data?: RawModel[] };
+  return (data.data ?? []).map((m) => toModel(m, 'fairrouter'));
+}
+
+const FETCHERS: Record<ChatProvider, () => Promise<CatalogModel[]>> = {
+  openrouter: fetchOpenRouterModels,
+  fairrouter: fetchFairRouterModels,
+};
+
+async function listProviderModels(provider: ChatProvider, forceRefresh: boolean): Promise<CatalogModel[]> {
+  const cached = cache.get(provider);
+  if (!forceRefresh && cached && Date.now() - cached.at < CACHE_MS) return cached.models;
   // Two dropdown opens in quick succession share one in-flight request rather
   // than firing a second identical fetch.
-  if (!inflight) {
-    inflight = fetchModels()
+  let pending = inflight.get(provider);
+  if (!pending) {
+    pending = FETCHERS[provider]()
       .then((models) => {
-        cache = { at: Date.now(), models };
+        cache.set(provider, { at: Date.now(), models });
         return models;
       })
       .finally(() => {
-        inflight = null;
+        inflight.delete(provider);
       });
+    inflight.set(provider, pending);
   }
-  return inflight;
+  return pending;
+}
+
+/**
+ * Cached list of every model both configured providers currently serve,
+ * merged into one catalog and sorted by name. A provider whose fetch fails
+ * (e.g. FairRouter unreachable) does not block the other's models from
+ * showing — its error is only surfaced if BOTH providers come back empty.
+ * `forceRefresh` bypasses the cache — used by the selector's manual refresh.
+ */
+export async function listCatalogModels(forceRefresh = false): Promise<CatalogModel[]> {
+  const results = await Promise.allSettled([
+    listProviderModels('openrouter', forceRefresh),
+    listProviderModels('fairrouter', forceRefresh),
+  ]);
+
+  const models = results.flatMap((r) => (r.status === 'fulfilled' ? r.value : []));
+  if (!models.length) {
+    const firstError = results.find((r) => r.status === 'rejected') as PromiseRejectedResult | undefined;
+    if (firstError) throw firstError.reason;
+  }
+  return models.sort((a, b) => a.name.localeCompare(b.name));
 }

@@ -1,6 +1,6 @@
 import { contextBridge, ipcRenderer } from 'electron';
 import { IPC } from './ipc-channels';
-import type { ProviderSettings } from './ipc-channels';
+import type { ProviderSettings, ChatProvider } from './ipc-channels';
 
 /** Subscribe helper: events are broadcast for every workspace, tagged with its id. */
 function on<T extends unknown[]>(channel: string, cb: (...args: T) => void) {
@@ -74,7 +74,8 @@ contextBridge.exposeInMainWorld('forge', {
   models: {
     list: (forceRefresh?: boolean) => ipcRenderer.invoke(IPC.modelsList, forceRefresh),
     getCurrent: () => ipcRenderer.invoke(IPC.modelsGetCurrent),
-    setCurrent: (modelId: string) => ipcRenderer.invoke(IPC.modelsSetCurrent, modelId),
+    setCurrent: (modelId: string, provider: ChatProvider) => ipcRenderer.invoke(IPC.modelsSetCurrent, modelId, provider),
+    setProvider: (provider: ChatProvider) => ipcRenderer.invoke(IPC.providerSet, provider),
   },
   updates: {
     check: () => ipcRenderer.invoke(IPC.updateCheck),

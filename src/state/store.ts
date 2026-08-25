@@ -12,7 +12,8 @@ import type {
   SessionSummary,
   Autonomy,
   CommandApproval,
-  OpenRouterModel,
+  CatalogModel,
+  ChatProvider,
   UpdateStatus,
   ProviderSettings,
 } from '../../electron/ipc-channels';
@@ -77,10 +78,11 @@ interface ForgeState {
 
   /**
    * Model selection is global, not per-workspace — every workspace's agent
-   * reads the same OPENROUTER_MODEL. Mirrors electron/agent-service.ts.
+   * reads the same active provider/model. Mirrors electron/agent-service.ts.
    */
   currentModel: string;
-  models: OpenRouterModel[];
+  currentProvider: ChatProvider;
+  models: CatalogModel[];
   modelsLoading: boolean;
   modelsError: string | null;
   /** True once a list fetch has completed (success or failure) — lets the picker tell "never loaded" from "loaded, empty". */
@@ -116,7 +118,8 @@ interface ForgeState {
   runCommand: (command: string) => Promise<void>;
 
   loadModels: (forceRefresh?: boolean) => Promise<void>;
-  setModel: (modelId: string) => Promise<void>;
+  setModel: (modelId: string, provider: ChatProvider) => Promise<void>;
+  selectProvider: (provider: ChatProvider) => Promise<void>;
 
   checkForUpdates: () => Promise<void>;
   downloadUpdate: () => Promise<void>;
@@ -201,6 +204,7 @@ export const useForge = create<ForgeState>((set, get) => {
     activeId: null,
 
     currentModel: '',
+    currentProvider: 'openrouter',
     models: [],
     modelsLoading: false,
     modelsError: null,
@@ -213,7 +217,9 @@ export const useForge = create<ForgeState>((set, get) => {
     settingsSaving: false,
 
     init: async () => {
-      void forge.models.getCurrent().then((modelId) => set({ currentModel: modelId }));
+      void forge.models
+        .getCurrent()
+        .then(({ provider, model }) => set({ currentModel: model, currentProvider: provider }));
       if (!subscribed) forge.updates.onStatus((status) => set({ updateStatus: status }));
 
       const list = await forge.workspaces.list();
@@ -521,10 +527,18 @@ export const useForge = create<ForgeState>((set, get) => {
       }
     },
 
-    setModel: async (modelId) => {
+    setModel: async (modelId, provider) => {
       // Optimistic: takes effect for the very next agent turn in every workspace.
-      set({ currentModel: modelId });
-      await forge.models.setCurrent(modelId);
+      set({ currentModel: modelId, currentProvider: provider });
+      await forge.models.setCurrent(modelId, provider);
+    },
+
+    selectProvider: async (provider) => {
+      // Clear the model immediately rather than leave the OTHER provider's
+      // model name on screen under the new provider's name, even briefly.
+      set({ currentProvider: provider, currentModel: '' });
+      const result = await forge.models.setProvider(provider);
+      set({ currentProvider: result.provider, currentModel: result.model });
     },
 
     checkForUpdates: async () => {

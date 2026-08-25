@@ -34,6 +34,16 @@ const PROVIDERS: ProviderDef[] = [
     fields: [{ key: 'OPENROUTER_API_KEY', label: 'API key', placeholder: 'sk-or-…', secret: true }],
   },
   {
+    id: 'fairrouter',
+    name: 'FairRouter',
+    blurb:
+      'An alternative chat model provider, selectable per-model from the model picker alongside OpenRouter. ' +
+      'Image generation, vision, and music tools always go through OpenRouter regardless of which one is active.',
+    linkLabel: 'fairrouter.ai',
+    linkHref: 'https://fairrouter.ai',
+    fields: [{ key: 'FAIRROUTER_API_KEY', label: 'API key', placeholder: 'Bearer token…', secret: true }],
+  },
+  {
     id: 'search',
     name: 'Web search',
     blurb: 'A Tavily key, used by the web_search tool.',
@@ -76,6 +86,7 @@ const PROVIDERS: ProviderDef[] = [
 
 const EMPTY: ProviderSettings = {
   OPENROUTER_API_KEY: '',
+  FAIRROUTER_API_KEY: '',
   SEARCH_API: '',
   TRANSCRIBE_API_KEY: '',
   TRANSCRIBE_BASE_URL: '',

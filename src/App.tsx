@@ -9,6 +9,7 @@ import { ReviewOverlay } from './components/ReviewOverlay';
 import { PaintEditorOverlay } from './components/PaintEditorOverlay';
 import { FontPicker } from './components/FontPicker';
 import { AutonomySlider } from './components/AutonomySlider';
+import { ProviderSelector } from './components/ProviderSelector';
 import { ModelSelector } from './components/ModelSelector';
 import { UpdateControl } from './components/UpdateControl';
 import { SettingsOverlay } from './components/SettingsOverlay';
@@ -53,6 +54,7 @@ export default function App() {
             <div className="spacer" />
             {view?.summary.rootPath && <div className="center-path">{view.summary.rootPath}</div>}
             <UpdateControl />
+            <ProviderSelector />
             <ModelSelector />
             <AutonomySlider />
             <FontPicker />

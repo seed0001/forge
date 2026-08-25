@@ -6,11 +6,11 @@ import { fileURLToPath } from 'node:url';
 import { loadEnv, setEnvValue } from './env';
 import { transcribe } from './transcribe';
 import { IPC, SETTINGS_KEYS, MAX_TOOL_CALLS_LIMIT } from './ipc-channels';
-import type { WorkspaceHydration, ChatImage, ProviderSettings } from './ipc-channels';
+import type { WorkspaceHydration, ChatImage, ProviderSettings, ChatProvider } from './ipc-channels';
 import * as fsService from './fs-service';
 import { WorkspaceManager } from './workspace-manager';
 import { saveAttachment, attachmentDirFor, readImageAsDataUrl } from './attachment-store';
-import { listOpenRouterModels } from './models-service';
+import { listCatalogModels } from './models-service';
 import { initUpdater, checkForUpdates, downloadUpdate, installUpdate } from './updater';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -325,21 +325,38 @@ app.whenReady().then(() => {
 
   ipcMain.handle(IPC.modelsList, async (_e, forceRefresh?: boolean) => {
     try {
-      return { ok: true as const, models: await listOpenRouterModels(!!forceRefresh) };
+      return { ok: true as const, models: await listCatalogModels(!!forceRefresh) };
     } catch (err) {
       return { ok: false as const, error: err instanceof Error ? err.message : String(err) };
     }
   });
 
-  // Empty string, not a hardcoded slug, when nothing's configured yet — the
+  // Empty model, not a hardcoded slug, when nothing's configured yet — the
   // Model Selector renders that as "Select model" rather than silently
   // implying some particular vendor's model is already chosen.
-  ipcMain.handle(IPC.modelsGetCurrent, async () => process.env.OPENROUTER_MODEL || '');
+  ipcMain.handle(IPC.modelsGetCurrent, async (): Promise<{ provider: ChatProvider; model: string }> => {
+    const provider: ChatProvider = process.env.PROVIDER === 'fairrouter' ? 'fairrouter' : 'openrouter';
+    const model = (provider === 'fairrouter' ? process.env.FAIRROUTER_MODEL : process.env.OPENROUTER_MODEL) || '';
+    return { provider, model };
+  });
 
-  ipcMain.handle(IPC.modelsSetCurrent, async (_e, modelId: string) => {
-    process.env.OPENROUTER_MODEL = modelId;
-    setEnvValue(envFile, 'OPENROUTER_MODEL', modelId);
+  ipcMain.handle(IPC.modelsSetCurrent, async (_e, modelId: string, provider: ChatProvider) => {
+    const modelKey = provider === 'fairrouter' ? 'FAIRROUTER_MODEL' : 'OPENROUTER_MODEL';
+    process.env.PROVIDER = provider;
+    process.env[modelKey] = modelId;
+    setEnvValue(envFile, 'PROVIDER', provider);
+    setEnvValue(envFile, modelKey, modelId);
     return true;
+  });
+
+  // Switches the active chat provider on its own, independent of picking a
+  // model — each provider remembers its own last-picked model (its own
+  // *_MODEL var), so switching back and forth restores it automatically.
+  ipcMain.handle(IPC.providerSet, async (_e, provider: ChatProvider): Promise<{ provider: ChatProvider; model: string }> => {
+    process.env.PROVIDER = provider;
+    setEnvValue(envFile, 'PROVIDER', provider);
+    const model = (provider === 'fairrouter' ? process.env.FAIRROUTER_MODEL : process.env.OPENROUTER_MODEL) || '';
+    return { provider, model };
   });
 
   ipcMain.handle(IPC.settingsGet, async (): Promise<ProviderSettings> => {

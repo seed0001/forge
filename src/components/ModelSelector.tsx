@@ -19,6 +19,7 @@ function priceLabel(perTokenUsd: number): string {
 
 export function ModelSelector() {
   const currentModel = useForge((s) => s.currentModel);
+  const currentProvider = useForge((s) => s.currentProvider);
   const models = useForge((s) => s.models);
   const modelsLoading = useForge((s) => s.modelsLoading);
   const modelsError = useForge((s) => s.modelsError);
@@ -59,19 +60,23 @@ export function ModelSelector() {
     }
   }, [open]);
 
-  const freeCount = useMemo(() => models.filter((m) => m.isFree).length, [models]);
+  // The provider button (top bar) owns which provider is active — this list
+  // only ever shows that provider's own catalog, never a mixed list.
+  const providerModels = useMemo(() => models.filter((m) => m.provider === currentProvider), [models, currentProvider]);
+
+  const freeCount = useMemo(() => providerModels.filter((m) => m.isFree).length, [providerModels]);
 
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase();
-    return models.filter((m) => {
+    return providerModels.filter((m) => {
       if (filter === 'free' && !m.isFree) return false;
       if (filter === 'paid' && m.isFree) return false;
       if (!q) return true;
       return m.id.toLowerCase().includes(q) || m.name.toLowerCase().includes(q);
     });
-  }, [models, filter, query]);
+  }, [providerModels, filter, query]);
 
-  const current = models.find((m) => m.id === currentModel);
+  const current = providerModels.find((m) => m.id === currentModel);
 
   return (
     <div className="modelpick" ref={ref}>
@@ -119,41 +124,45 @@ export function ModelSelector() {
           </div>
 
           <div className="modellist">
-            {modelsLoading && models.length === 0 && <div className="modelmenu-note">Loading models…</div>}
-            {modelsError && models.length === 0 && (
-              <div className="modelmenu-note modelmenu-error">
-                Could not reach OpenRouter — {modelsError}
-              </div>
+            {modelsLoading && providerModels.length === 0 && <div className="modelmenu-note">Loading models…</div>}
+            {modelsError && providerModels.length === 0 && (
+              <div className="modelmenu-note modelmenu-error">Could not reach a provider — {modelsError}</div>
             )}
-            {!modelsLoading && !modelsError && filtered.length === 0 && (
+            {!modelsLoading && !modelsError && providerModels.length === 0 && (
+              <div className="modelmenu-note">No models yet — add this provider's API key in Settings.</div>
+            )}
+            {!modelsLoading && !modelsError && providerModels.length > 0 && filtered.length === 0 && (
               <div className="modelmenu-note">No models match.</div>
             )}
-            {filtered.map((m) => (
-              <button
-                key={m.id}
-                className={`modelrow${m.id === currentModel ? ' on' : ''}`}
-                onClick={() => {
-                  setModel(m.id);
-                  setOpen(false);
-                }}
-                title={m.id}
-              >
-                <div className="modelrow-top">
-                  <span className="modelrow-name">{m.name}</span>
-                  {m.id === currentModel && <IconCheck className="icon-xs" />}
-                </div>
-                <div className="modelrow-meta">
-                  <span className="modelrow-id mono">{m.id}</span>
-                  {m.isFree ? (
-                    <span className="modelbadge free">Free</span>
-                  ) : (
-                    <span className="modelbadge">
-                      {priceLabel(m.promptPrice)}/{priceLabel(m.completionPrice)} · 1M tok
-                    </span>
-                  )}
-                </div>
-              </button>
-            ))}
+            {filtered.map((m) => {
+              const on = m.id === currentModel;
+              return (
+                <button
+                  key={m.id}
+                  className={`modelrow${on ? ' on' : ''}`}
+                  onClick={() => {
+                    setModel(m.id, m.provider);
+                    setOpen(false);
+                  }}
+                  title={m.id}
+                >
+                  <div className="modelrow-top">
+                    <span className="modelrow-name">{m.name}</span>
+                    {on && <IconCheck className="icon-xs" />}
+                  </div>
+                  <div className="modelrow-meta">
+                    <span className="modelrow-id mono">{m.id}</span>
+                    {m.isFree ? (
+                      <span className="modelbadge free">Free</span>
+                    ) : (
+                      <span className="modelbadge">
+                        {priceLabel(m.promptPrice)}/{priceLabel(m.completionPrice)} · 1M tok
+                      </span>
+                    )}
+                  </div>
+                </button>
+              );
+            })}
           </div>
         </div>
       )}

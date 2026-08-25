@@ -1,7 +1,7 @@
 {
   "name": "forge",
   "private": true,
-  "version": "0.1.5",
+  "version": "0.1.6",
   "description": "Desktop pair-programming agent with reviewable diffs and governed autonomy.",
   "author": "seed0001",
   "type": "module",

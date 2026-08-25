@@ -47,6 +47,7 @@ export const IPC = {
   modelsList: 'models:list',
   modelsGetCurrent: 'models:get-current',
   modelsSetCurrent: 'models:set-current',
+  providerSet: 'provider:set',
 
   updateCheck: 'update:check',
   updateDownload: 'update:download',
@@ -180,17 +181,32 @@ export interface Checkpoint {
   timestamp: number;
 }
 
-/** One entry from OpenRouter's public model catalog. */
-export interface OpenRouterModel {
+/** Which chat-completion backend a model/request belongs to. */
+export type ChatProvider = 'openrouter' | 'fairrouter';
+
+/**
+ * Chat providers available in the provider/model pickers, in display order.
+ * To add another (e.g. a local Ollama or llama.cpp runtime), extend this
+ * list, the ChatProvider union above, models-service.ts's per-provider
+ * fetcher, and agent-service.ts's resolveChatProvider.
+ */
+export const CHAT_PROVIDERS: { id: ChatProvider; label: string }[] = [
+  { id: 'openrouter', label: 'OpenRouter' },
+  { id: 'fairrouter', label: 'FairRouter' },
+];
+
+/** One entry from a provider's model catalog (OpenRouter or FairRouter — both OpenAI-shaped). */
+export interface CatalogModel {
   id: string;
   name: string;
   description?: string;
   contextLength: number;
-  /** USD per token (not per million) — straight from OpenRouter's pricing block. */
+  /** USD per token (not per million) — straight from the provider's pricing block, when it reports one. */
   promptPrice: number;
   completionPrice: number;
-  /** Both prompt and completion pricing are zero — OpenRouter's own definition of a free model. */
+  /** Both prompt and completion pricing are zero — the provider's own definition of a free model. */
   isFree: boolean;
+  provider: ChatProvider;
 }
 
 /**
@@ -217,6 +233,7 @@ export type UpdateStatus =
  */
 export interface ProviderSettings {
   OPENROUTER_API_KEY: string;
+  FAIRROUTER_API_KEY: string;
   SEARCH_API: string;
   TRANSCRIBE_API_KEY: string;
   TRANSCRIBE_BASE_URL: string;
@@ -226,6 +243,7 @@ export interface ProviderSettings {
 
 export const SETTINGS_KEYS = [
   'OPENROUTER_API_KEY',
+  'FAIRROUTER_API_KEY',
   'SEARCH_API',
   'TRANSCRIBE_API_KEY',
   'TRANSCRIBE_BASE_URL',

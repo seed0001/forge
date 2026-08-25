@@ -11,7 +11,7 @@ import * as fsService from './fs-service';
 import { WorkspaceManager } from './workspace-manager';
 import { saveAttachment, attachmentDirFor, readImageAsDataUrl } from './attachment-store';
 import { listOpenRouterModels } from './models-service';
-import { initAutoUpdater } from './updater';
+import { initUpdater, checkForUpdates, downloadUpdate, installUpdate } from './updater';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -134,7 +134,7 @@ app.whenReady().then(() => {
   void first.restoreSessions();
 
   createWindow();
-  initAutoUpdater();
+  initUpdater((status) => send(IPC.updateStatus, status));
 
   ipcMain.handle(IPC.wsList, async () => manager.list().map((w) => w.summary()));
 
@@ -336,6 +336,22 @@ app.whenReady().then(() => {
   ipcMain.handle(IPC.modelsSetCurrent, async (_e, modelId: string) => {
     process.env.OPENROUTER_MODEL = modelId;
     setEnvValue(envFile, 'OPENROUTER_MODEL', modelId);
+    return true;
+  });
+
+  // Every step below runs only in direct response to one of these three IPC
+  // calls — nothing in electron/updater.ts checks, downloads, or installs on
+  // its own. See its top comment for why.
+  ipcMain.handle(IPC.updateCheck, async () => {
+    void checkForUpdates();
+    return true;
+  });
+  ipcMain.handle(IPC.updateDownload, async () => {
+    void downloadUpdate();
+    return true;
+  });
+  ipcMain.handle(IPC.updateInstall, async () => {
+    installUpdate();
     return true;
   });
 

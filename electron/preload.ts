@@ -75,4 +75,10 @@ contextBridge.exposeInMainWorld('forge', {
     getCurrent: () => ipcRenderer.invoke(IPC.modelsGetCurrent),
     setCurrent: (modelId: string) => ipcRenderer.invoke(IPC.modelsSetCurrent, modelId),
   },
+  updates: {
+    check: () => ipcRenderer.invoke(IPC.updateCheck),
+    download: () => ipcRenderer.invoke(IPC.updateDownload),
+    install: () => ipcRenderer.invoke(IPC.updateInstall),
+    onStatus: (cb: (status: unknown) => void) => on(IPC.updateStatus, cb),
+  },
 });

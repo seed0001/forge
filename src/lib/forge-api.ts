@@ -12,6 +12,7 @@ import type {
   Autonomy,
   CommandApproval,
   OpenRouterModel,
+  UpdateStatus,
 } from '../../electron/ipc-channels';
 
 type Unsubscribe = () => void;
@@ -84,6 +85,12 @@ export interface ForgeApi {
     list: (forceRefresh?: boolean) => Promise<{ ok: true; models: OpenRouterModel[] } | { ok: false; error: string }>;
     getCurrent: () => Promise<string>;
     setCurrent: (modelId: string) => Promise<boolean>;
+  };
+  updates: {
+    check: () => Promise<boolean>;
+    download: () => Promise<boolean>;
+    install: () => Promise<boolean>;
+    onStatus: (cb: (status: UpdateStatus) => void) => Unsubscribe;
   };
 }
 

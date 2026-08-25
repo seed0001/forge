@@ -128,3 +128,6 @@ export const IconRefresh = (p: P) => (
 export const IconSearch = (p: P) => (
   <svg {...stroke(p)}><circle cx="10.5" cy="10.5" r="6.5" /><path d="M19.5 19.5l-4.3-4.3" /></svg>
 );
+export const IconDownload = (p: P) => (
+  <svg {...stroke(p)}><path d="M12 3.5v11" /><path d="M7 10l5 5 5-5" /><path d="M5 19.5h14" /></svg>
+);

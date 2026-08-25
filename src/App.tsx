@@ -10,6 +10,7 @@ import { PaintEditorOverlay } from './components/PaintEditorOverlay';
 import { FontPicker } from './components/FontPicker';
 import { AutonomySlider } from './components/AutonomySlider';
 import { ModelSelector } from './components/ModelSelector';
+import { UpdateControl } from './components/UpdateControl';
 
 const VIEWS = [
   { key: 'chat', label: 'Chat' },
@@ -48,6 +49,7 @@ export default function App() {
             </div>
             <div className="spacer" />
             {view?.summary.rootPath && <div className="center-path">{view.summary.rootPath}</div>}
+            <UpdateControl />
             <ModelSelector />
             <AutonomySlider />
             <FontPicker />

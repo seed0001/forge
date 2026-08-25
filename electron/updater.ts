@@ -1,4 +1,4 @@
-import { app, dialog } from 'electron';
+import { app } from 'electron';
 // electron-updater is CommonJS; this process builds as ESM ("type": "module").
 // A named import (`import { autoUpdater } from 'electron-updater'`) requires
 // Node to statically detect that export via cjs-module-lexer, which fails for
@@ -7,53 +7,71 @@ import { app, dialog } from 'electron';
 // default-import + destructure form below reads the property at runtime
 // instead, which always works.
 import electronUpdater from 'electron-updater';
+import type { UpdateStatus } from './ipc-channels';
 const { autoUpdater } = electronUpdater;
 
-/** How often to poll GitHub Releases for a newer build, beyond the one check on launch. */
-const CHECK_INTERVAL_MS = 4 * 60 * 60_000;
-
 /**
- * Wires electron-updater to this repo's GitHub Releases (configured in
- * package.json's "build.publish"). Every packaged install polls that feed,
- * downloads a newer build silently in the background, and — once it's fully
- * on disk — asks the Operator whether to restart into it now or later. Only
- * runs when packaged: an unpackaged dev run has no update feed and
- * electron-updater errors immediately if asked to check.
+ * Nothing here runs unless the Operator asks for it — no check on launch, no
+ * background polling, no auto-download. Three releases in a row went out
+ * broken (a startup crash, then a blank window); a fully automatic updater
+ * would have pushed each of those straight onto every running install with
+ * no way to stop it, and a build that can't even launch can't show a "check
+ * for updates" button to pull the fix either. Manual-only means a bad release
+ * only ever affects someone who clicks Check, sees it, and chooses to
+ * install it — never someone who just left the app running.
  */
-export function initAutoUpdater() {
-  if (!app.isPackaged) return;
+let wired = false;
+let onStatus: (status: UpdateStatus) => void = () => {};
+/** electron-updater's 'download-progress' event carries no version — remembered from the preceding 'available'. */
+let availableVersion = '';
 
-  autoUpdater.autoDownload = true;
-  autoUpdater.autoInstallOnAppQuit = true;
+export function initUpdater(cb: (status: UpdateStatus) => void) {
+  onStatus = cb;
+  if (wired) return;
+  wired = true;
 
-  autoUpdater.on('error', (err) => {
-    console.error('[forge] update check failed:', err.message);
-  });
+  autoUpdater.autoDownload = false;
+  autoUpdater.autoInstallOnAppQuit = false;
+
+  autoUpdater.on('error', (err) => onStatus({ state: 'error', message: err.message }));
   autoUpdater.on('update-available', (info) => {
-    console.log(`[forge] update available: ${info.version} — downloading in the background`);
+    availableVersion = info.version;
+    onStatus({ state: 'available', version: info.version });
   });
-  autoUpdater.on('update-not-available', () => {
-    console.log('[forge] already on the latest version');
+  autoUpdater.on('update-not-available', () => onStatus({ state: 'not-available' }));
+  autoUpdater.on('download-progress', (p) => {
+    onStatus({ state: 'downloading', version: availableVersion, percent: Math.round(p.percent) });
   });
-  autoUpdater.on('update-downloaded', (info) => {
-    console.log(`[forge] update ${info.version} downloaded — asking to restart`);
-    void dialog
-      .showMessageBox({
-        type: 'info',
-        buttons: ['Restart now', 'Later'],
-        defaultId: 0,
-        cancelId: 1,
-        title: 'Update ready',
-        message: `Forge ${info.version} has been downloaded.`,
-        detail: 'Restart to finish installing it, or keep working and it will install the next time you quit.',
-      })
-      .then(({ response }) => {
-        if (response === 0) autoUpdater.quitAndInstall();
-      });
-  });
+  autoUpdater.on('update-downloaded', (info) => onStatus({ state: 'downloaded', version: info.version }));
+}
 
-  autoUpdater.checkForUpdates().catch((err) => console.error('[forge] initial update check failed:', err.message));
-  setInterval(() => {
-    autoUpdater.checkForUpdates().catch((err) => console.error('[forge] update check failed:', err.message));
-  }, CHECK_INTERVAL_MS);
+/** Only meaningful when packaged — dev has no update feed and this would just error. */
+export function canCheckForUpdates() {
+  return app.isPackaged;
+}
+
+export async function checkForUpdates() {
+  if (!app.isPackaged) {
+    onStatus({ state: 'error', message: 'Update checks are not available in a dev build.' });
+    return;
+  }
+  onStatus({ state: 'checking' });
+  try {
+    await autoUpdater.checkForUpdates();
+  } catch (err) {
+    onStatus({ state: 'error', message: err instanceof Error ? err.message : String(err) });
+  }
+}
+
+export async function downloadUpdate() {
+  try {
+    await autoUpdater.downloadUpdate();
+  } catch (err) {
+    onStatus({ state: 'error', message: err instanceof Error ? err.message : String(err) });
+  }
+}
+
+/** Quits and installs — only ever called from the Operator clicking "Restart & Install". */
+export function installUpdate() {
+  autoUpdater.quitAndInstall();
 }

@@ -13,6 +13,7 @@ import type {
   Autonomy,
   CommandApproval,
   OpenRouterModel,
+  UpdateStatus,
 } from '../../electron/ipc-channels';
 
 export interface OpenFile {
@@ -84,6 +85,9 @@ interface ForgeState {
   /** True once a list fetch has completed (success or failure) — lets the picker tell "never loaded" from "loaded, empty". */
   modelsLoadedOnce: boolean;
 
+  /** Manual-only, app-wide — see electron/updater.ts for why nothing here runs on its own. */
+  updateStatus: UpdateStatus;
+
   init: () => Promise<void>;
   newWorkspace: () => Promise<void>;
   closeWorkspace: (id: string) => Promise<void>;
@@ -107,6 +111,10 @@ interface ForgeState {
 
   loadModels: (forceRefresh?: boolean) => Promise<void>;
   setModel: (modelId: string) => Promise<void>;
+
+  checkForUpdates: () => Promise<void>;
+  downloadUpdate: () => Promise<void>;
+  installUpdate: () => Promise<void>;
 
   sendChat: (text: string) => Promise<void>;
   stopAgent: () => Promise<void>;
@@ -188,8 +196,11 @@ export const useForge = create<ForgeState>((set, get) => {
     modelsError: null,
     modelsLoadedOnce: false,
 
+    updateStatus: { state: 'idle' },
+
     init: async () => {
       void forge.models.getCurrent().then((modelId) => set({ currentModel: modelId }));
+      if (!subscribed) forge.updates.onStatus((status) => set({ updateStatus: status }));
 
       const list = await forge.workspaces.list();
       set((s) => {
@@ -496,6 +507,18 @@ export const useForge = create<ForgeState>((set, get) => {
       // Optimistic: takes effect for the very next agent turn in every workspace.
       set({ currentModel: modelId });
       await forge.models.setCurrent(modelId);
+    },
+
+    checkForUpdates: async () => {
+      await forge.updates.check();
+    },
+
+    downloadUpdate: async () => {
+      await forge.updates.download();
+    },
+
+    installUpdate: async () => {
+      await forge.updates.install();
     },
 
     sendChat: async (text) => {

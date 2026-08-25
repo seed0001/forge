@@ -296,6 +296,10 @@ input, textarea { font: inherit; color: inherit; }
   font-size: var(--t-xs); font-weight: 600; color: var(--fg-2);
 }
 .autonomy-trigger:hover { background: var(--bg-hover); color: var(--fg); }
+.autonomy-trigger:disabled { cursor: default; opacity: 0.7; }
+.autonomy-trigger:disabled:hover { background: none; }
+.spin { animation: spin 1s linear infinite; }
+@keyframes spin { to { transform: rotate(360deg); } }
 .autonomy-menu {
   position: absolute; top: calc(100% + 6px); right: 0; z-index: 30;
   width: 260px;

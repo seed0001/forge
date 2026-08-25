@@ -47,6 +47,11 @@ export const IPC = {
   modelsList: 'models:list',
   modelsGetCurrent: 'models:get-current',
   modelsSetCurrent: 'models:set-current',
+
+  updateCheck: 'update:check',
+  updateDownload: 'update:download',
+  updateInstall: 'update:install',
+  updateStatus: 'update:status',
 } as const;
 
 export type WorkspaceStatus = 'idle' | 'running' | 'review';
@@ -176,6 +181,22 @@ export interface OpenRouterModel {
   /** Both prompt and completion pricing are zero — OpenRouter's own definition of a free model. */
   isFree: boolean;
 }
+
+/**
+ * State of a manual update check. Nothing here happens without the Operator
+ * clicking a button: 'checking' only follows an explicit check, 'downloading'
+ * only follows an explicit download click, and installing is a separate
+ * click again once 'downloaded'. See electron/updater.ts for why this is
+ * manual-only rather than automatic.
+ */
+export type UpdateStatus =
+  | { state: 'idle' }
+  | { state: 'checking' }
+  | { state: 'not-available' }
+  | { state: 'available'; version: string }
+  | { state: 'downloading'; version: string; percent: number }
+  | { state: 'downloaded'; version: string }
+  | { state: 'error'; message: string };
 
 /** Everything the renderer needs to display a workspace it has switched to. */
 export interface WorkspaceHydration {

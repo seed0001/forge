@@ -1,7 +1,24 @@
 import http from 'node:http';
+import path from 'node:path';
 import { WebSocketServer, type WebSocket } from 'ws';
 import type { Workspace } from './workspace';
 import type { ChatMessage } from './ipc-channels';
+import { readFileBinaryDetailed } from './fs-service';
+
+/** Enough for chat-attached media (generated images/audio) — extend if a new generator produces another type. */
+const MEDIA_CONTENT_TYPES: Record<string, string> = {
+  '.mp3': 'audio/mpeg',
+  '.wav': 'audio/wav',
+  '.ogg': 'audio/ogg',
+  '.m4a': 'audio/mp4',
+  '.flac': 'audio/flac',
+  '.png': 'image/png',
+  '.jpg': 'image/jpeg',
+  '.jpeg': 'image/jpeg',
+  '.gif': 'image/gif',
+  '.webp': 'image/webp',
+  '.svg': 'image/svg+xml',
+};
 
 export interface PortalHandle {
   broadcastMessage: (msg: ChatMessage) => void;
@@ -34,7 +51,7 @@ export function startPortalServer(getWorkspace: () => Workspace | null, port: nu
         return;
       }
       if (data?.type === 'text' && typeof data.text === 'string' && data.text.trim()) {
-        void getWorkspace()?.sendToAgent(data.text.trim());
+        void getWorkspace()?.sendToAgent(data.text.trim(), undefined, 'portal');
       }
     });
   });
@@ -71,6 +88,32 @@ async function handleRequest(
     const ws = getWorkspace();
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify(ws?.chat ?? []));
+    return;
+  }
+
+  if (req.method === 'GET' && url.startsWith('/api/media')) {
+    const ws = getWorkspace();
+    const rootPath = ws?.rootPath;
+    const reqUrl = new URL(url, 'http://localhost');
+    const rawPath = reqUrl.searchParams.get('path');
+    if (!rootPath || !rawPath) {
+      res.writeHead(400);
+      res.end('Bad request');
+      return;
+    }
+    // Root-scoped exactly like the desktop app's own file reads (fs-service's
+    // assertInside, via readFileBinaryDetailed) — a phone-facing route is the
+    // last place we want an arbitrary-file-read hole.
+    const result = await readFileBinaryDetailed(rootPath, rawPath);
+    if (!result.ok) {
+      res.writeHead(result.reason === 'outside-root' ? 403 : 404);
+      res.end(result.detail);
+      return;
+    }
+    const ext = path.extname(rawPath).toLowerCase();
+    const contentType = MEDIA_CONTENT_TYPES[ext] ?? 'application/octet-stream';
+    res.writeHead(200, { 'Content-Type': contentType, 'Content-Length': result.data.length });
+    res.end(result.data);
     return;
   }
 
@@ -115,9 +158,43 @@ const PAGE_HTML = `<!doctype html>
     flex-direction: column;
     gap: 10px;
   }
-  .bubble { max-width: 86%; padding: 10px 13px; border-radius: 14px; white-space: pre-wrap; word-wrap: break-word; }
+  .bubble { max-width: 86%; padding: 10px 13px; border-radius: 14px; word-wrap: break-word; overflow-wrap: break-word; }
   .user { align-self: flex-end; background: #2a2a2e; border-bottom-right-radius: 4px; }
   .assistant { align-self: flex-start; background: #17171a; border: 1px solid #232326; border-bottom-left-radius: 4px; }
+  .bubble > *:first-child { margin-top: 0; }
+  .bubble > *:last-child { margin-bottom: 0; }
+  .bubble h1, .bubble h2, .bubble h3, .bubble h4, .bubble h5, .bubble h6 { margin: 0.5em 0 0.3em; font-weight: 600; line-height: 1.3; }
+  .bubble h1 { font-size: 1.3em; }
+  .bubble h2 { font-size: 1.18em; }
+  .bubble h3 { font-size: 1.08em; }
+  .bubble h4, .bubble h5, .bubble h6 { font-size: 1em; }
+  .bubble p { margin: 0.5em 0; }
+  .bubble ul, .bubble ol { margin: 0.5em 0; padding-left: 1.3em; }
+  .bubble li { margin: 0.2em 0; }
+  .bubble code {
+    font-family: ui-monospace, SFMono-Regular, Consolas, 'Liberation Mono', Menlo, monospace;
+    background: rgba(255, 255, 255, 0.09);
+    padding: 0.15em 0.35em;
+    border-radius: 4px;
+    font-size: 0.88em;
+  }
+  .bubble pre.code-block {
+    background: #0e0e10;
+    border: 1px solid #232326;
+    border-radius: 8px;
+    padding: 10px 12px;
+    margin: 0.5em 0;
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+  }
+  .bubble pre.code-block code { background: none; padding: 0; font-size: 0.85em; white-space: pre; }
+  .bubble a { color: #d7b56d; text-decoration: underline; word-break: break-word; }
+  .bubble .table-wrap { overflow-x: auto; margin: 0.5em 0; -webkit-overflow-scrolling: touch; }
+  .bubble table { border-collapse: collapse; width: 100%; font-size: 0.88em; }
+  .bubble th, .bubble td { border: 1px solid #29292c; padding: 6px 10px; text-align: left; white-space: nowrap; }
+  .bubble th { background: #1c1c1f; font-weight: 600; }
+  .bubble img.chat-image { max-width: 100%; height: auto; border-radius: 8px; margin: 0.4em 0; display: block; }
+  .bubble audio.chat-audio { width: 100%; margin: 0.4em 0; }
   #bar {
     display: flex;
     gap: 8px;
@@ -205,10 +282,191 @@ const PAGE_HTML = `<!doctype html>
     showToast._t = setTimeout(() => toast.classList.remove('show'), 2600);
   }
 
-  function bubble(role, text) {
+  // --- Minimal, dependency-free markdown renderer -----------------------
+  // Message text originates from the AI agent's own output, so raw HTML in
+  // it is escaped FIRST; every transform below only ever adds tags we wrote
+  // ourselves, so the escaped+transformed result is safe to drop in via
+  // innerHTML.
+  function escapeHtml(str) {
+    return String(str)
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&#39;');
+  }
+
+  function splitTableRow(line) {
+    let t = line.trim();
+    if (t.startsWith('|')) t = t.slice(1);
+    if (t.endsWith('|')) t = t.slice(0, -1);
+    return t.split('|').map((c) => c.trim());
+  }
+
+  function isTableSeparatorLine(line) {
+    const cells = splitTableRow(line);
+    return cells.length > 0 && cells.every((c) => /^:?-{2,}:?$/.test(c));
+  }
+
+  function inlineFormat(text) {
+    // Links first, so their [text] and (url) aren't mistaken for emphasis.
+    text = text.replace(
+      /\\[([^\\]]+)\\]\\((https?:\\/\\/[^\\s)]+)\\)/g,
+      '<a href="$2" target="_blank" rel="noopener noreferrer">$1</a>'
+    );
+    // Bold before italic -- consumes ** / __ pairs so the single-char italic
+    // regexes below only ever see genuine single markers.
+    text = text.replace(/\\*\\*(.+?)\\*\\*/g, '<strong>$1</strong>');
+    text = text.replace(/__(.+?)__/g, '<strong>$1</strong>');
+    text = text.replace(/\\*(.+?)\\*/g, '<em>$1</em>');
+    text = text.replace(/_(.+?)_/g, '<em>$1</em>');
+    return text;
+  }
+
+  function mdToHtml(src) {
+    const escaped = escapeHtml(src);
+
+    // Pull code (block + inline) out before any other transform touches the
+    // text, so markdown/HTML-ish characters inside code are shown literally.
+    const codeBlocks = [];
+    let text = escaped.replace(/\`\`\`([a-zA-Z0-9_+-]*)\\n?([\\s\\S]*?)\`\`\`/g, function (_m, _lang, code) {
+      const idx = codeBlocks.length;
+      codeBlocks.push(code.replace(/\\n$/, ''));
+      return ' CODEBLOCK' + idx + ' ';
+    });
+    const inlineCodes = [];
+    text = text.replace(/\`([^\`\\n]+)\`/g, function (_m, code) {
+      const idx = inlineCodes.length;
+      inlineCodes.push(code);
+      return ' INLINECODE' + idx + ' ';
+    });
+
+    const lines = text.split('\\n');
+    const out = [];
+    let i = 0;
+    while (i < lines.length) {
+      const line = lines[i];
+
+      // GFM pipe table: a row followed by a |---|---| separator row.
+      if (line.indexOf('|') !== -1 && i + 1 < lines.length && isTableSeparatorLine(lines[i + 1])) {
+        const headerCells = splitTableRow(line);
+        i += 2;
+        const bodyRows = [];
+        while (i < lines.length && lines[i].trim() !== '' && lines[i].indexOf('|') !== -1) {
+          bodyRows.push(splitTableRow(lines[i]));
+          i++;
+        }
+        let html =
+          '<div class="table-wrap"><table><thead><tr>' +
+          headerCells.map((c) => '<th>' + inlineFormat(c) + '</th>').join('') +
+          '</tr></thead><tbody>';
+        for (const row of bodyRows) {
+          html += '<tr>' + row.map((c) => '<td>' + inlineFormat(c) + '</td>').join('') + '</tr>';
+        }
+        html += '</tbody></table></div>';
+        out.push(html);
+        continue;
+      }
+
+      // Headers
+      const headerMatch = line.match(/^(#{1,6})\\s+(.*)$/);
+      if (headerMatch) {
+        const level = headerMatch[1].length;
+        out.push('<h' + level + '>' + inlineFormat(headerMatch[2]) + '</h' + level + '>');
+        i++;
+        continue;
+      }
+
+      // Bullet list
+      if (/^\\s*[-*+]\\s+/.test(line)) {
+        const items = [];
+        while (i < lines.length && /^\\s*[-*+]\\s+/.test(lines[i])) {
+          items.push(lines[i].replace(/^\\s*[-*+]\\s+/, ''));
+          i++;
+        }
+        out.push('<ul>' + items.map((it) => '<li>' + inlineFormat(it) + '</li>').join('') + '</ul>');
+        continue;
+      }
+
+      // Numbered list
+      if (/^\\s*\\d+[.)]\\s+/.test(line)) {
+        const items = [];
+        while (i < lines.length && /^\\s*\\d+[.)]\\s+/.test(lines[i])) {
+          items.push(lines[i].replace(/^\\s*\\d+[.)]\\s+/, ''));
+          i++;
+        }
+        out.push('<ol>' + items.map((it) => '<li>' + inlineFormat(it) + '</li>').join('') + '</ol>');
+        continue;
+      }
+
+      // Blank line separates blocks
+      if (line.trim() === '') {
+        i++;
+        continue;
+      }
+
+      // Lone code-block placeholder line -- keep it out of paragraph grouping.
+      // (Tested against the raw line, not a trimmed copy: trimming would eat
+      // the leading/trailing space the placeholder and its restore regex both
+      // rely on to delimit the token.)
+      if (/^ CODEBLOCK\\d+ $/.test(line)) {
+        out.push(line);
+        i++;
+        continue;
+      }
+
+      // Paragraph: gather consecutive plain lines, join with <br>
+      const paraLines = [line];
+      i++;
+      while (
+        i < lines.length &&
+        lines[i].trim() !== '' &&
+        !/^(#{1,6})\\s+/.test(lines[i]) &&
+        !/^\\s*[-*+]\\s+/.test(lines[i]) &&
+        !/^\\s*\\d+[.)]\\s+/.test(lines[i]) &&
+        !/^ CODEBLOCK\\d+ $/.test(lines[i])
+      ) {
+        paraLines.push(lines[i]);
+        i++;
+      }
+      out.push('<p>' + inlineFormat(paraLines.join('<br>')) + '</p>');
+    }
+
+    let html = out.join('\\n');
+    html = html.replace(
+      / CODEBLOCK(\\d+) /g,
+      function (_m, idx) { return '<pre class="code-block"><code>' + codeBlocks[Number(idx)] + '</code></pre>'; }
+    );
+    html = html.replace(/ INLINECODE(\\d+) /g, function (_m, idx) { return '<code>' + inlineCodes[Number(idx)] + '</code>'; });
+    return html;
+  }
+  // ------------------------------------------------------------------------
+
+  function bubble(role, text, images, audio) {
     const el = document.createElement('div');
     el.className = 'bubble ' + (role === 'user' ? 'user' : 'assistant');
-    el.textContent = text;
+    let html = text ? mdToHtml(text) : '';
+    if (Array.isArray(images)) {
+      for (const img of images) {
+        if (!img || !img.path) continue;
+        html +=
+          '<img class="chat-image" src="/api/media?path=' +
+          encodeURIComponent(img.path) +
+          '" alt="' +
+          escapeHtml(img.name || 'image') +
+          '" />';
+      }
+    }
+    if (Array.isArray(audio)) {
+      for (const a of audio) {
+        if (!a || !a.path) continue;
+        html +=
+          '<audio class="chat-audio" controls preload="none" src="/api/media?path=' +
+          encodeURIComponent(a.path) +
+          '"></audio>';
+      }
+    }
+    el.innerHTML = html;
     log.appendChild(el);
     log.scrollTop = log.scrollHeight;
     return el;
@@ -235,7 +493,7 @@ const PAGE_HTML = `<!doctype html>
   }
 
   fetch('/api/history').then((r) => r.json()).then((history) => {
-    for (const m of history) bubble(m.role, m.text || '');
+    for (const m of history) bubble(m.role, m.text || '', m.images, m.audio);
   }).catch(() => {});
 
   const proto = location.protocol === 'https:' ? 'wss' : 'ws';
@@ -252,7 +510,7 @@ const PAGE_HTML = `<!doctype html>
     ws.onmessage = (evt) => {
       const data = JSON.parse(evt.data);
       if (data.type === 'chat') {
-        bubble(data.msg.role, data.msg.text || '');
+        bubble(data.msg.role, data.msg.text || '', data.msg.images, data.msg.audio);
         if (data.msg.role === 'assistant') speak(data.msg.text || '');
       } else if (data.type === 'status') {
         statusEl.textContent = data.running ? 'thinking…' : 'idle';

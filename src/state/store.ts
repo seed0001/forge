@@ -100,6 +100,17 @@ export interface WorkspaceView {
   board: FocusMessage[];
   /** Focus agents' ask_and_wait calls waiting on the Operator, keyed by requestId — deliberately not session-scoped, same reasoning as pendingSubagentApprovals. */
   pendingFocusQuestions: Record<string, PendingFocusQuestion>;
+  /**
+   * Live activity trail for each Focus agent, keyed by focus-agent id (not
+   * session id) — mirrors `activity` above but for Focus agents, which run on
+   * their own dedicated background session and so never match
+   * `summary.activeSessionId`. Without this, forge.agent.onActivity's
+   * active-session filter would silently drop every Focus agent's tool-call
+   * trail. Populated only from live broadcasts going forward — there is no
+   * backfill of a Focus agent's history from before the workspace was
+   * hydrated.
+   */
+  focusActivity: Record<string, ActivityEvent[]>;
 }
 
 interface ForgeState {
@@ -249,6 +260,7 @@ function emptyView(summary: WorkspaceSummary): WorkspaceView {
     focusAgents: [],
     board: [],
     pendingFocusQuestions: {},
+    focusActivity: {},
   };
 }
 
@@ -375,20 +387,48 @@ export const useForge = create<ForgeState>((set, get) => {
 
       forge.agent.onActivity((workspaceId, sessionId, evt) => {
         patch(workspaceId, (v) => {
+          let next = v;
+
           // Each session runs independently now — a background session's
           // activity is already being persisted server-side regardless;
           // the visible trail only ever reflects whichever session is on
           // screen right now, so a broadcast for any other session is
           // simply not applied here (switching to it later fetches its
           // real current state via sessions.select, same as today).
-          if (sessionId !== v.summary.activeSessionId) return v;
-          // A summary event is the whole run's trail collapsed into one row —
-          // replace everything rather than append, so a task with dozens of
-          // tool calls ends as one line instead of a long stacked list.
-          if (evt.summary) return { ...v, activity: [evt] };
-          const idx = v.activity.findIndex((a) => a.id === evt.id);
-          const activity = idx >= 0 ? v.activity.map((a, i) => (i === idx ? evt : a)) : [...v.activity, evt];
-          return { ...v, activity };
+          if (sessionId === v.summary.activeSessionId) {
+            // A summary event is the whole run's trail collapsed into one row —
+            // replace everything rather than append, so a task with dozens of
+            // tool calls ends as one line instead of a long stacked list.
+            const activity = evt.summary
+              ? [evt]
+              : (() => {
+                  const idx = v.activity.findIndex((a) => a.id === evt.id);
+                  return idx >= 0 ? v.activity.map((a, i) => (i === idx ? evt : a)) : [...v.activity, evt];
+                })();
+            next = { ...next, activity };
+          }
+
+          // A Focus agent runs on its own dedicated background session,
+          // broadcast on this same channel but tagged with that session's id
+          // rather than the workspace's activeSessionId — the check above
+          // alone would otherwise silently drop it (which is exactly what
+          // happened before this branch existed). Mirror the same
+          // collapse-on-summary/append-otherwise logic into a separate log
+          // keyed by focus-agent id so the Focus panel can show its live
+          // trail no matter which session is on screen.
+          const focusAgent = v.focusAgents.find((f) => f.sessionId === sessionId);
+          if (focusAgent) {
+            const existing = next.focusActivity[focusAgent.id] ?? [];
+            const updated = evt.summary
+              ? [evt]
+              : (() => {
+                  const idx = existing.findIndex((a) => a.id === evt.id);
+                  return idx >= 0 ? existing.map((a, i) => (i === idx ? evt : a)) : [...existing, evt];
+                })();
+            next = { ...next, focusActivity: { ...next.focusActivity, [focusAgent.id]: updated } };
+          }
+
+          return next;
         });
       });
 

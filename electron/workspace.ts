@@ -1228,10 +1228,20 @@ export class Workspace {
     this.emit.terminal(this.id, evt);
   }
 
-  /** Always acts on whichever session is currently active — the renderer's composer only ever sends to the session it's displaying. */
-  async sendToAgent(text: string, images?: ChatImage[]) {
+  /**
+   * Always acts on whichever session is currently active — the renderer's
+   * composer only ever sends to the session it's displaying.
+   *
+   * Refuses (returns false) if that session's agent is already mid-turn, for
+   * the same reason sendToSession does: calling AgentSession.send() again
+   * before a previous call has returned would race on its shared internal
+   * message array. This matters most for the portal, which — unlike the
+   * desktop composer — has no client-side "already sending" lock.
+   */
+  async sendToAgent(text: string, images?: ChatImage[], source: 'desktop' | 'portal' = 'desktop'): Promise<boolean> {
     if (!this.activeSessionId) this.newSession();
     const sessionId = this.activeSessionId!;
+    if (this.runtimes.get(sessionId)?.running) return false;
     const session = this.sessions.find((s) => s.id === sessionId)!;
 
     const msg: ChatMessage = { role: 'user', text, images };
@@ -1248,7 +1258,8 @@ export class Workspace {
     this.unseenCompletion = false;
     // Deliberately not awaited: the agent loop runs to completion in the
     // background so the user can switch sessions/tabs and come back to the result.
-    void this.ensureAgent(sessionId).send(text, images);
+    void this.ensureAgent(sessionId).send(text, images, source);
+    return true;
   }
 
   /** Stops whichever session is currently active — same "acts on what's displayed" rule as sendToAgent. */

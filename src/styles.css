@@ -904,3 +904,53 @@ input, textarea { font: inherit; color: inherit; }
 /* The real browser is a native view the main process overlays exactly on top
    of this element — it renders nothing itself, just occupies the space. */
 .browser-surface { flex: 1; min-height: 0; background: var(--bg-raised); }
+
+/* ── Focus agent panel ─────────────────────────────────────────────────── */
+.focus-panel {
+  width: 300px; flex: none; display: flex; flex-direction: column;
+  border-left: 1px solid var(--line); background: var(--bg-panel); min-height: 0;
+}
+.focus-panel-head {
+  height: 40px; flex: none; display: flex; align-items: center; gap: var(--s2);
+  padding: 0 var(--s3); border-bottom: 1px solid var(--line); color: var(--fg-3);
+}
+.focus-panel-title { font-size: var(--t-sm); font-weight: 600; color: var(--fg-2); }
+.focus-panel-toggle {
+  width: 22px; height: 22px; border-radius: var(--r-sm); display: flex;
+  align-items: center; justify-content: center; color: var(--fg-3);
+}
+.focus-panel-toggle:hover { background: var(--bg-hover); color: var(--fg); }
+.focus-panel-body {
+  flex: 1; min-height: 0; overflow-y: auto; padding: var(--s3);
+  display: flex; flex-direction: column; gap: var(--s3);
+}
+.focus-panel-collapsed {
+  width: 32px; flex: none; display: flex; flex-direction: column; align-items: center;
+  gap: var(--s2); padding-top: var(--s3); border-left: 1px solid var(--line);
+  background: var(--bg-panel); color: var(--fg-3);
+}
+.focus-panel-collapsed:hover { background: var(--bg-hover); color: var(--fg); }
+.focus-panel-count { font-size: var(--t-xs); font-weight: 600; }
+.focus-panel-livedot {
+  width: 6px; height: 6px; border-radius: 50%; background: var(--amber);
+  animation: breathe 1.6s ease-in-out infinite;
+}
+
+.focus-card { border: 1px solid var(--line); border-radius: var(--r-lg); background: var(--bg-raised); padding: var(--s3); }
+.focus-card-head { display: flex; align-items: flex-start; gap: var(--s2); }
+.focus-card-title { font-size: var(--t-sm); font-weight: 600; color: var(--fg); }
+.focus-card-task {
+  font-size: var(--t-xs); color: var(--fg-3); margin-top: 2px;
+  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
+}
+.focus-progress { height: 4px; border-radius: var(--r-pill); background: var(--bg-active); overflow: hidden; margin-top: var(--s2); }
+.focus-progress-fill { height: 100%; transition: width 0.4s ease; }
+.focus-card-meta {
+  display: flex; align-items: center; justify-content: space-between;
+  font-size: var(--t-xs); color: var(--fg-3); margin-top: var(--s1); font-variant-numeric: tabular-nums;
+}
+.focus-card-trail {
+  max-height: 160px; overflow-y: auto; margin-top: var(--s2); padding-top: var(--s2);
+  border-top: 1px solid var(--line);
+}
+.focus-card-empty { font-size: var(--t-xs); color: var(--fg-3); font-style: italic; margin-top: var(--s2); }

@@ -30,6 +30,7 @@ import type {
   PendingDiff,
   FileNode,
   ChatImage,
+  ChatAudio,
   ChatProvider,
   RoadmapItem,
   PermissionCategory,
@@ -78,7 +79,7 @@ export interface AgentCallbacks {
   onActivity: (evt: ActivityEvent) => void;
   onTerminal: (evt: TermDataEvent) => void;
   /** `note` marks an interim "about to do X" statement flushed alongside a batch of tool calls, distinct from a turn's real final reply. */
-  onMessage: (text: string, images?: ChatImage[], note?: boolean) => void;
+  onMessage: (text: string, images?: ChatImage[], note?: boolean, audio?: ChatAudio[]) => void;
   onStatus: (running: boolean) => void;
   onDiffProposed: (diff: PendingDiff) => void;
   /** propose_roadmap fires this — a whole new checklist for the Operator to review, fire-and-forget like onDiffProposed. */
@@ -1070,6 +1071,8 @@ export class AgentSession {
   private activeSubagents = new Set<AgentSession>();
   /** Images generate_image produced this turn, flushed onto the next onMessage call so they show up as real chat attachments. */
   private pendingImages: ChatImage[] = [];
+  /** Audio generate_music produced this turn, flushed onto the next onMessage call so it shows up as a real, playable chat attachment. */
+  private pendingAudio: ChatAudio[] = [];
   /** image_ref -> data URL, keyed by mtime so an image_ref never re-reads/re-encodes the same file every turn. */
   private imageCache = new Map<string, { mtimeMs: number; dataUrl: string }>();
 
@@ -2229,6 +2232,7 @@ export class AgentSession {
         await writeBinaryFile(this.rootPath, abs, result.audio);
         await audit(this.rootPath, 'write', `generate_music → ${rel}`, `model ${model}`);
         this.trackActivity({ id: actId, kind: 'generate', detail: `Generated music → ${rel}`, status: 'done' });
+        this.pendingAudio.push({ path: abs, name: path.basename(rel) });
         return `Music generated and saved to ${rel} (model: ${model}).`;
       } catch (err) {
         this.trackActivity({ id: actId, kind: 'generate', detail: 'Music generation failed', status: 'error' });
@@ -2491,17 +2495,19 @@ export class AgentSession {
     return thinkPart ? `${parts.join(', ')} — ${thinkPart}` : parts.join(', ');
   }
 
-  /** Flushes any images produced this turn (generate_image, bubbled-up subagent output) onto the visible reply. */
+  /** Flushes any images/audio produced this turn (generate_image, generate_music, bubbled-up subagent output) onto the visible reply. */
   private flushMessage(text: string) {
     const images = this.pendingImages.length ? this.pendingImages : undefined;
     this.pendingImages = [];
+    const audio = this.pendingAudio.length ? this.pendingAudio : undefined;
+    this.pendingAudio = [];
     const summary = this.buildActivitySummary();
     if (summary) {
       this.cb.onActivity({ id: nextId('act'), kind: 'done', detail: summary, status: 'done', summary: true });
     }
     // Strips any [TRUSTED: ...] / [UNTRUSTED] fence the model echoed back
     // verbatim — internal harness markup, never meant for the Operator to see.
-    this.cb.onMessage(stripLeakedTags(text), images);
+    this.cb.onMessage(stripLeakedTags(text), images, undefined, audio);
   }
 
   /**
@@ -2610,7 +2616,7 @@ export class AgentSession {
     return { kind: 'failed', message: `Request to ${PROVIDER_LABEL[cfg.provider]} failed after ${MAX_FETCH_ATTEMPTS} attempts.` };
   }
 
-  async send(userText: string, images?: ChatImage[]) {
+  async send(userText: string, images?: ChatImage[], source: 'desktop' | 'portal' = 'desktop') {
     this.aborted = false;
     this.activityTally = {};
     this.activityErrors = 0;
@@ -2746,6 +2752,19 @@ export class AgentSession {
       if (this.pendingGuardrailNote) {
         wireMessages.push({ role: 'system', content: this.pendingGuardrailNote });
         this.pendingGuardrailNote = null;
+      }
+
+      // Ephemeral for this one request only, like the notes above — never
+      // spliced into this.messages, so it never persists past this call and
+      // never affects the desktop app, which always sends source: 'desktop'.
+      if (source === 'portal') {
+        wireMessages.push({
+          role: 'system',
+          content:
+            "You are being accessed via a phone's small screen right now. Keep your reply short and " +
+            'scannable by default — a few sentences, not long paragraphs — unless the Operator explicitly ' +
+            'asks for more detail or a full explanation.',
+        });
       }
 
       const attempt = await this.fetchCompletionWithRetry(cfg, activeModel, wireMessages, thinkId);

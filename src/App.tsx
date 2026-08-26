@@ -8,6 +8,7 @@ import { TerminalPanel } from './components/TerminalPanel';
 import { RoadmapPanel } from './components/RoadmapPanel';
 import { SchedulerPanel } from './components/SchedulerPanel';
 import { BrowserPanel } from './components/BrowserPanel';
+import { FocusPanel } from './components/FocusPanel';
 import { WorkspaceChooser } from './components/WorkspaceChooser';
 import { ReviewOverlay } from './components/ReviewOverlay';
 import { PaintEditorOverlay } from './components/PaintEditorOverlay';
@@ -90,6 +91,7 @@ export default function App() {
                 {center === 'browser' && <BrowserPanel />}
               </div>
             </div>
+            <FocusPanel />
           </>
         )}
       </div>

@@ -235,10 +235,17 @@ export interface ChatImage {
   name: string;
 }
 
+/** An audio clip the agent generated (generate_music) — always a project-root path, never a user upload. */
+export interface ChatAudio {
+  path: string;
+  name: string;
+}
+
 export interface ChatMessage {
   role: 'user' | 'assistant';
   text: string;
   images?: ChatImage[];
+  audio?: ChatAudio[];
   /**
    * Set on an interim "here's what I'm about to do" note flushed alongside a
    * batch of tool calls, as opposed to the turn's real final reply — lets the

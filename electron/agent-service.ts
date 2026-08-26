@@ -10,7 +10,7 @@ import { listCatalogModels } from './models-service';
 import { OPENROUTER_URL, FAIRROUTER_URL, PROVIDER_LABEL, chatHeaders, resolveChatProvider } from './chat-provider';
 import type { ChatProviderConfig } from './chat-provider';
 import { matchesAllowlist, isShellChained } from './perm-store';
-import { buildGuardrailNote, containsForeignScript, stripLeakedTags } from './guardrails';
+import { buildGuardrailNote, containsForeignScript, stripLeakedTags, looksCollapsed } from './guardrails';
 import type {
   ActivityEvent,
   TermDataEvent,
@@ -177,6 +177,46 @@ const COMPACT_MARKER = '[compacted]';
 /** Each subagent runs its own multi-turn loop and real API calls — bound the fan-out per batch. */
 const MAX_CONCURRENT_SUBAGENTS = 4;
 
+/** 1 initial try + up to this many retries on a transient failure before giving up on a single turn's request. */
+const MAX_FETCH_ATTEMPTS = 4;
+/** Doubles each retry (1s, 2s, 4s), unless the provider's own Retry-After header says otherwise. */
+const RETRY_BASE_DELAY_MS = 1000;
+/** No provider response at all within this long is treated as a stalled connection, same as a network error. */
+const REQUEST_TIMEOUT_MS = 90_000;
+
+/** A dropped connection, DNS hiccup, or timed-out socket — worth a retry, unlike a real 4xx from the provider. */
+function isTransientNetError(err: unknown): boolean {
+  const msg = err instanceof Error ? err.message : String(err);
+  return /ECONNRESET|ETIMEDOUT|ENOTFOUND|EAI_AGAIN|socket hang up|fetch failed|network/i.test(msg);
+}
+
+/** Rate-limited or a transient provider-side failure — both are worth retrying; anything else (4xx) is not. */
+function isRetryableStatus(status: number): boolean {
+  return status === 429 || status === 500 || status === 502 || status === 503 || status === 504;
+}
+
+/**
+ * Picks a same-provider, similarly-priced sibling model to fail over to after
+ * the active model's output looked degenerate (see guardrails.ts's
+ * looksCollapsed). Best-effort: any catalog failure or empty result just
+ * means no failover happens, never a thrown error on top of the collapse.
+ */
+async function pickFailoverModel(currentModel: string, provider: ChatProvider, avoid: Set<string>): Promise<string | null> {
+  try {
+    const models = await listCatalogModels();
+    const candidates = models.filter((m) => m.provider === provider && m.id !== currentModel && !avoid.has(m.id));
+    if (!candidates.length) return null;
+    const current = models.find((m) => m.id === currentModel && m.provider === provider);
+    if (!current) return candidates[0].id;
+    const similarlyPriced = candidates.filter(
+      (m) => m.promptPrice <= current.promptPrice * 3 && m.promptPrice >= current.promptPrice / 3
+    );
+    return (similarlyPriced[0] ?? candidates[0]).id;
+  } catch {
+    return null;
+  }
+}
+
 const BASE_TOOLS = [
   {
     type: 'function',
@@ -340,6 +380,14 @@ const SPAWN_TOOL = {
           description:
             'A complete, self-contained brief: the goal, any context the subagent needs (it cannot see this ' +
             'conversation), and what a finished result looks like.',
+        },
+        model: {
+          type: 'string',
+          description:
+            'Optional: a specific model id to run this one subagent on instead of your own current model — ' +
+            'e.g. a cheaper/faster model for a simple, well-defined task, or a stronger one for a hard piece ' +
+            "of work. Must be a real model id from this workspace's configured provider. Leave unset to " +
+            'inherit your own current model.',
         },
       },
       required: ['task'],
@@ -517,7 +565,9 @@ function buildSystemPrompt(rootPath: string, hasRules: boolean, isSubagent = fal
           '  pieces of work. Each call starts a subagent with no memory of this conversation, so give it',
           '  everything it needs in the task text. It runs at the same autonomy as you — its edits and',
           '  commands are still subject to whatever review/approval this conversation is, they are not',
-          '  applied unsupervised just because you delegated them.',
+          '  applied unsupervised just because you delegated them. Optionally give it a different model id',
+          '  — e.g. something cheaper for a simple, well-defined task — via the "model" argument; leave it',
+          '  unset to inherit your own current model.',
           '- propose_roadmap proposes an ordered checklist of milestones, each with its own detailed plan,',
           '  for a genuinely multi-step project. Use your own judgment: only for real multi-milestone work,',
           "  never for a small or single-step ask — just do those directly. It does not start any work; the",
@@ -603,6 +653,21 @@ export class AgentSession {
   private failureStreak = 0;
   /** One ephemeral system message queued for the NEXT request only — see guardrails.ts and send(). Never added to this.messages, so it's never persisted. */
   private pendingGuardrailNote: string | null = null;
+  /** Consecutive turns with neither a tool call nor any text — reset on the first real reply. Capped at 2 auto-retries before a blank reply is shown as-is. */
+  private emptyReplyStreak = 0;
+  /** The last turn's whole batch of tool calls (name+args, sorted, joined) — compared to the current turn's to catch a stuck loop. */
+  private lastToolBatchSignature: string | null = null;
+  private identicalBatchStreak = 0;
+  /** Set once this task has already failed over to a different model — caps it at one failover per send() call, not one per collapsed reply. */
+  private failedOverThisTurn = false;
+  /**
+   * Models this session has already failed over AWAY from — persists across
+   * every send() call on this session (not reset per-turn) so a later task
+   * doesn't immediately fail back onto a model that just proved degenerate.
+   */
+  private avoidedModels = new Set<string>();
+  /** Set by runSubagent when a spawn_subagent call requests a specific model for that one subagent; null means inherit the primary's active model. */
+  private modelOverride: string | null = null;
 
   constructor(rootPath: string, cb: AgentCallbacks, rulesDir: string | null, isSubagent = false) {
     this.rootPath = rootPath;
@@ -623,6 +688,11 @@ export class AgentSession {
         content: buildSystemPrompt(rootPath, this.rules.enabled, this.isSubagent),
       };
     }
+  }
+
+  /** Only ever called by runSubagent, right after constructing a subagent, before its first send(). */
+  setModelOverride(model: string | null) {
+    this.modelOverride = model;
   }
 
   /**
@@ -888,10 +958,15 @@ export class AgentSession {
    * (denied) if the Operator never answers — bounding the "no one watching"
    * risk without ever letting this tool call hang indefinitely.
    */
-  private async runSubagent(task: string): Promise<string> {
+  private async runSubagent(task: string, model?: string): Promise<string> {
     const actId = nextId('act');
     const label = task.slice(0, 80);
-    this.trackActivity({ id: actId, kind: 'thinking', detail: `Subagent started: ${label}`, status: 'active' });
+    this.trackActivity({
+      id: actId,
+      kind: 'thinking',
+      detail: model ? `Subagent started (model: ${model}): ${label}` : `Subagent started: ${label}`,
+      status: 'active',
+    });
 
     let finalText: string | null = null;
     const sub = new AgentSession(
@@ -931,6 +1006,7 @@ export class AgentSession {
       this.rulesDir,
       true
     );
+    if (model) sub.setModelOverride(model);
 
     this.activeSubagents.add(sub);
     try {
@@ -1071,7 +1147,8 @@ export class AgentSession {
       const task = String(args.task ?? '').trim();
       if (!task) return 'ERROR: spawn_subagent requires a "task" describing what the subagent should do.';
       if (this.isSubagent) return 'ERROR: subagents cannot spawn further subagents.';
-      return this.runSubagent(task);
+      const model = typeof args.model === 'string' && args.model.trim() ? args.model.trim() : undefined;
+      return this.runSubagent(task, model);
     }
 
     if (name === 'propose_roadmap') {
@@ -1568,6 +1645,93 @@ export class AgentSession {
     this.cb.onMessage(stripLeakedTags(text), images);
   }
 
+  private sleep(ms: number): Promise<void> {
+    return new Promise((resolve) => setTimeout(resolve, ms));
+  }
+
+  /**
+   * One turn's completion request, with retry+backoff on a transient network
+   * error or a retryable provider status (429/5xx), and a watchdog timeout
+   * standing in for a hung connection (this endpoint isn't streamed, so
+   * there's no natural "still receiving bytes" signal to watch instead). The
+   * Operator's own Stop is checked between every attempt and never retried
+   * past — this.aborted short-circuits to 'aborted' immediately.
+   */
+  private async fetchCompletionWithRetry(
+    cfg: ChatProviderConfig,
+    model: string,
+    wireMessages: Record<string, unknown>[],
+    thinkId: string
+  ): Promise<{ kind: 'ok'; data: any } | { kind: 'aborted' } | { kind: 'failed'; message: string }> {
+    for (let attempt = 1; attempt <= MAX_FETCH_ATTEMPTS; attempt++) {
+      if (this.aborted) return { kind: 'aborted' };
+      this.controller = new AbortController();
+      let watchdogFired = false;
+      const watchdog = setTimeout(() => {
+        watchdogFired = true;
+        this.controller?.abort();
+      }, REQUEST_TIMEOUT_MS);
+
+      let resp: Response;
+      try {
+        resp = await fetch(cfg.url, {
+          method: 'POST',
+          signal: this.controller.signal,
+          headers: { Authorization: `Bearer ${cfg.apiKey}`, ...chatHeaders(cfg.provider) },
+          body: JSON.stringify({
+            model,
+            messages: wireMessages,
+            tools: this.tools,
+            tool_choice: 'auto',
+            usage: { include: true },
+          }),
+        });
+      } catch (err) {
+        clearTimeout(watchdog);
+        if (this.aborted) return { kind: 'aborted' };
+        const canRetry = (watchdogFired || isTransientNetError(err)) && attempt < MAX_FETCH_ATTEMPTS;
+        if (canRetry) {
+          this.trackActivity({
+            id: thinkId,
+            kind: 'thinking',
+            detail: `${watchdogFired ? 'No response from provider' : 'Connection issue'} — retrying (${attempt}/${MAX_FETCH_ATTEMPTS - 1})…`,
+            status: 'active',
+          });
+          await this.sleep(RETRY_BASE_DELAY_MS * 2 ** (attempt - 1));
+          if (this.aborted) return { kind: 'aborted' };
+          continue;
+        }
+        return {
+          kind: 'failed',
+          message: `Request to ${PROVIDER_LABEL[cfg.provider]} failed: ${watchdogFired ? `no response after ${REQUEST_TIMEOUT_MS / 1000}s` : String(err)}`,
+        };
+      }
+      clearTimeout(watchdog);
+      if (this.aborted) return { kind: 'aborted' };
+
+      if (!resp.ok) {
+        if (isRetryableStatus(resp.status) && attempt < MAX_FETCH_ATTEMPTS) {
+          const retryAfter = Number(resp.headers.get('retry-after'));
+          const delay = Number.isFinite(retryAfter) && retryAfter > 0 ? retryAfter * 1000 : RETRY_BASE_DELAY_MS * 2 ** (attempt - 1);
+          this.trackActivity({
+            id: thinkId,
+            kind: 'thinking',
+            detail: `${PROVIDER_LABEL[cfg.provider]} is busy (${resp.status}) — retrying (${attempt}/${MAX_FETCH_ATTEMPTS - 1})…`,
+            status: 'active',
+          });
+          await this.sleep(delay);
+          if (this.aborted) return { kind: 'aborted' };
+          continue;
+        }
+        const text = await resp.text();
+        return { kind: 'failed', message: `${PROVIDER_LABEL[cfg.provider]} error (${resp.status}): ${text.slice(0, 500)}` };
+      }
+
+      return { kind: 'ok', data: await resp.json() };
+    }
+    return { kind: 'failed', message: `Request to ${PROVIDER_LABEL[cfg.provider]} failed after ${MAX_FETCH_ATTEMPTS} attempts.` };
+  }
+
   async send(userText: string, images?: ChatImage[]) {
     this.aborted = false;
     this.activityTally = {};
@@ -1577,6 +1741,10 @@ export class AgentSession {
     this.thinkTotalMs = 0;
     this.failureStreak = 0;
     this.pendingGuardrailNote = null;
+    this.emptyReplyStreak = 0;
+    this.lastToolBatchSignature = null;
+    this.identicalBatchStreak = 0;
+    this.failedOverThisTurn = false;
     this.cb.onStatus(true);
     await this.engageRules(userText);
     if (images?.length) {
@@ -1604,6 +1772,11 @@ export class AgentSession {
       return;
     }
 
+    // The model actually used for this task's requests — starts as whatever
+    // the Operator (or, for a subagent, spawn_subagent's "model" argument)
+    // configured, but can change mid-task exactly once if the output collapses.
+    let activeModel = this.modelOverride ?? cfg.model;
+
     // Investigating before answering costs tool calls; too low a ceiling is
     // itself a push toward guessing. Operator-configurable via Settings
     // (MAX_TOOL_CALLS in .env), clamped to MAX_TOOL_CALLS_LIMIT.
@@ -1614,7 +1787,19 @@ export class AgentSession {
         : MAX_TOOL_CALLS_DEFAULT;
     for (let turn = 0; turn < MAX_TURNS; turn++) {
       if (this.aborted) return;
-      this.controller = new AbortController();
+
+      // A lightweight, free progress check every few turns — no extra API
+      // call, unlike a generated scratchpad — so a task that's wandering has
+      // a chance to notice and change course before hitting the turn limit.
+      if (turn > 0 && turn % 5 === 0) {
+        this.pendingGuardrailNote = [
+          this.pendingGuardrailNote,
+          `Progress check: this is turn ${turn + 1} of at most ${MAX_TURNS} for this task. If you are not ` +
+            'converging, try a simpler approach or explain the situation to the Operator instead of continuing to explore.',
+        ]
+          .filter(Boolean)
+          .join(' ');
+      }
 
       // A silent stretch here (waiting on the model) is indistinguishable from
       // a hang without some running signal — tick a live elapsed counter so
@@ -1639,48 +1824,21 @@ export class AgentSession {
         this.pendingGuardrailNote = null;
       }
 
-      let resp: Response;
-      try {
-        resp = await fetch(cfg.url, {
-          method: 'POST',
-          signal: this.controller.signal,
-          headers: { Authorization: `Bearer ${cfg.apiKey}`, ...chatHeaders(cfg.provider) },
-          body: JSON.stringify({
-            model: cfg.model,
-            messages: wireMessages,
-            tools: this.tools,
-            tool_choice: 'auto',
-            usage: { include: true },
-          }),
-        });
-      } catch (err) {
-        clearInterval(tick);
-        if (this.aborted) {
-          this.trackActivity({ id: thinkId, kind: 'thinking', detail: 'Stopped', status: 'error' });
-          return;
-        }
-        this.trackActivity({ id: thinkId, kind: 'thinking', detail: 'Thinking… failed', status: 'error' });
-        this.flushMessage(`Request to ${PROVIDER_LABEL[cfg.provider]} failed: ${String(err)}`);
-        this.cb.onStatus(false);
-        return;
-      }
-
+      const attempt = await this.fetchCompletionWithRetry(cfg, activeModel, wireMessages, thinkId);
       clearInterval(tick);
 
-      if (this.aborted) {
+      if (attempt.kind === 'aborted') {
         this.trackActivity({ id: thinkId, kind: 'thinking', detail: 'Stopped', status: 'error' });
         return;
       }
-
-      if (!resp.ok) {
-        const text = await resp.text();
+      if (attempt.kind === 'failed') {
         this.trackActivity({ id: thinkId, kind: 'thinking', detail: 'Thinking… failed', status: 'error' });
-        this.flushMessage(`${PROVIDER_LABEL[cfg.provider]} error (${resp.status}): ${text.slice(0, 500)}`);
+        this.flushMessage(attempt.message);
         this.cb.onStatus(false);
         return;
       }
 
-      const data = await resp.json();
+      const data = attempt.data;
       this.thinkTotalMs += Date.now() - turnStart;
       const thinkSecs = Math.round((Date.now() - turnStart) / 1000);
       this.trackActivity({
@@ -1692,7 +1850,7 @@ export class AgentSession {
       if (typeof data.usage?.prompt_tokens === 'number') {
         this.cb.onUsage({
           promptTokens: data.usage.prompt_tokens,
-          contextWindow: await contextWindowForModel(cfg.model, cfg.provider),
+          contextWindow: await contextWindowForModel(activeModel, cfg.provider),
         });
       }
       if (typeof data.usage?.cost === 'number') {
@@ -1703,10 +1861,28 @@ export class AgentSession {
       this.messages.push(message);
 
       if (typeof data.usage?.prompt_tokens === 'number') {
-        await this.compactIfNeeded(data.usage.prompt_tokens, await contextWindowForModel(cfg.model, cfg.provider), cfg);
+        await this.compactIfNeeded(data.usage.prompt_tokens, await contextWindowForModel(activeModel, cfg.provider), cfg);
       }
 
-      if (message.tool_calls && message.tool_calls.length > 0) {
+      const hasToolCalls = !!(message.tool_calls && message.tool_calls.length > 0);
+      const replyText = textOf(message.content).trim();
+
+      // A genuinely empty turn — no tool call, no text — is usually a
+      // transient miss rather than an intentional silent finish. Give it a
+      // couple of ephemeral nudges before showing a dead-looking blank reply.
+      if (!hasToolCalls && !replyText) {
+        this.emptyReplyStreak++;
+        if (this.emptyReplyStreak <= 2) {
+          this.pendingGuardrailNote = [this.pendingGuardrailNote, buildGuardrailNote(false, false, true)]
+            .filter(Boolean)
+            .join(' ');
+          continue;
+        }
+      } else {
+        this.emptyReplyStreak = 0;
+      }
+
+      if (hasToolCalls) {
         const parsedArgs = (call: ToolCall): Record<string, unknown> => {
           try {
             return JSON.parse(call.function.arguments || '{}');
@@ -1716,8 +1892,8 @@ export class AgentSession {
         };
 
         const results = new Map<string, string>();
-        const spawnCalls = message.tool_calls.filter((c) => c.function.name === 'spawn_subagent');
-        const otherCalls = message.tool_calls.filter((c) => c.function.name !== 'spawn_subagent');
+        const spawnCalls = message.tool_calls!.filter((c) => c.function.name === 'spawn_subagent');
+        const otherCalls = message.tool_calls!.filter((c) => c.function.name !== 'spawn_subagent');
 
         // Subagents run concurrently, in bounded batches — that's the point of being
         // able to spawn several at once instead of working through them one at a time.
@@ -1735,8 +1911,21 @@ export class AgentSession {
           results.set(call.id, await this.callTool(call.function.name, parsedArgs(call)));
         }
 
+        // Loop breaker: the exact same batch of calls (name+args), repeated
+        // 3 times in a row, means nothing is changing between attempts —
+        // stop rather than keep burning turns on it.
+        const batchSignature = message.tool_calls!
+          .map((c) => `${c.function.name}(${c.function.arguments})`)
+          .sort()
+          .join('|');
+        if (batchSignature === this.lastToolBatchSignature) this.identicalBatchStreak++;
+        else {
+          this.identicalBatchStreak = 1;
+          this.lastToolBatchSignature = batchSignature;
+        }
+
         // Push results in the model's original order, not completion order.
-        for (const call of message.tool_calls) {
+        for (const call of message.tool_calls!) {
           this.messages.push({
             role: 'tool',
             tool_call_id: call.id,
@@ -1754,10 +1943,50 @@ export class AgentSession {
             .filter(Boolean)
             .join(' ');
         }
+
+        if (this.identicalBatchStreak >= 3) {
+          this.trackActivity({
+            id: nextId('act'),
+            kind: 'stopped',
+            detail: 'Stopped: repeated the same tool call 3 times in a row',
+            status: 'error',
+          });
+          this.flushMessage(
+            "I called the same tool with identical arguments 3 times in a row without making progress, so I " +
+              "stopped rather than keep looping. Let me know how you'd like to proceed."
+          );
+          this.cb.onStatus(false);
+          return;
+        }
         continue;
       }
 
-      this.flushMessage(textOf(message.content) || '(agent returned no text)');
+      // A plain text reply, no tool call — check for a model that's
+      // degenerated into repetition before showing it, and fail over to a
+      // different model ONCE per task rather than surface visibly broken text.
+      if (!this.failedOverThisTurn && looksCollapsed(replyText)) {
+        const fallback = await pickFailoverModel(activeModel, cfg.provider, this.avoidedModels);
+        if (fallback) {
+          this.failedOverThisTurn = true;
+          this.avoidedModels.add(activeModel);
+          this.trackActivity({
+            id: nextId('act'),
+            kind: 'thinking',
+            detail: `Output looked degenerate — switching from ${activeModel} to ${fallback} and retrying`,
+            status: 'done',
+          });
+          activeModel = fallback;
+          this.pendingGuardrailNote = [
+            this.pendingGuardrailNote,
+            'Your previous response looked repetitive/degenerate and was discarded — answer the original request normally.',
+          ]
+            .filter(Boolean)
+            .join(' ');
+          continue;
+        }
+      }
+
+      this.flushMessage(replyText || '(agent returned no text)');
       this.cb.onStatus(false);
       return;
     }

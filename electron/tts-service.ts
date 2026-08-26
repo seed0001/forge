@@ -45,18 +45,39 @@ function streamToBuffer(stream: NodeJS.ReadableStream): Promise<Buffer> {
   });
 }
 
-async function synthesizeEdge(text: string, voice: string): Promise<TtsResult> {
+async function synthesizeEdgeOnce(text: string, voice: string): Promise<Buffer> {
   const tts = new MsEdgeTTS();
   try {
     await tts.setMetadata(voice || 'en-US-AndrewNeural', OUTPUT_FORMAT.AUDIO_24KHZ_96KBITRATE_MONO_MP3);
     const { audioStream } = tts.toStream(text);
-    const audio = await streamToBuffer(audioStream);
-    return { audio, mimeType: 'audio/mpeg' };
-  } catch (err) {
-    return { audio: null, mimeType: 'audio/mpeg', error: `Edge TTS failed: ${String(err)}` };
+    return await streamToBuffer(audioStream);
   } finally {
     tts.close();
   }
+}
+
+/**
+ * Microsoft's Read Aloud endpoint occasionally drops the WebSocket before
+ * sending its closing "turn.end" message — a transient connection hiccup on
+ * their end, not something a request can avoid. msedge-tts correctly reports
+ * that as a truncation error rather than silently returning partial audio; a
+ * fresh connection on retry almost always succeeds, so retry a couple of
+ * times before giving up.
+ */
+async function synthesizeEdge(text: string, voice: string): Promise<TtsResult> {
+  const attempts = 3;
+  for (let i = 1; i <= attempts; i++) {
+    try {
+      const audio = await synthesizeEdgeOnce(text, voice);
+      return { audio, mimeType: 'audio/mpeg' };
+    } catch (err) {
+      if (i === attempts) {
+        return { audio: null, mimeType: 'audio/mpeg', error: `Edge TTS failed after ${attempts} attempts: ${String(err)}` };
+      }
+    }
+  }
+  // Unreachable — the loop above always returns.
+  return { audio: null, mimeType: 'audio/mpeg', error: 'Edge TTS failed.' };
 }
 
 async function listEdgeVoices(): Promise<TtsVoice[]> {

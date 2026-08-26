@@ -15,7 +15,7 @@ const shared = {
   target: 'node20',
   // Kept out of the bundle in dev too, so its behavior matches the packaged
   // build exactly — see the comment in build-main.mjs.
-  external: ['electron', 'electron-updater', 'ws'],
+  external: ['electron', 'electron-updater', 'ws', 'axios'],
   sourcemap: true,
 };
 
@@ -24,6 +24,9 @@ async function buildMainProcess() {
     ...shared,
     entryPoints: [path.join(root, 'electron', 'main.ts')],
     outfile: path.join(root, 'dist-electron', 'main.js'),
+    // See the matching comment in build-main.mjs — polyfills `require` so
+    // msedge-tts's bundled internal require("axios") resolves at runtime.
+    banner: { js: "import { createRequire } from 'module'; const require = createRequire(import.meta.url);" },
   });
 
   // page-extract.ts injects these into the live browsed page and runs

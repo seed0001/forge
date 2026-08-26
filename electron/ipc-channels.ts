@@ -63,6 +63,9 @@ export const IPC = {
 
   voiceTranscribe: 'voice:transcribe',
 
+  ttsSynthesize: 'tts:synthesize',
+  ttsListVoices: 'tts:list-voices',
+
   attachmentSave: 'attachment:save',
   imageRead: 'image:read',
 
@@ -356,6 +359,21 @@ export const MODEL_ENV_KEY: Record<ChatProvider, string> = {
   llamacpp: 'LLAMACPP_MODEL',
 };
 
+/** Which text-to-speech backend a voice-output request goes through. */
+export type TtsProvider = 'edge' | 'sapi' | 'xtts';
+
+export const TTS_PROVIDERS: { id: TtsProvider; label: string }[] = [
+  { id: 'edge', label: 'Edge TTS' },
+  { id: 'sapi', label: 'Windows SAPI' },
+  { id: 'xtts', label: 'XTTS (Coqui)' },
+];
+
+/** One selectable voice from a TTS provider's catalog. */
+export interface TtsVoice {
+  id: string;
+  label: string;
+}
+
 /** Every OpenAI-compatible endpoint's model listing lives at {baseUrl}/models, {baseUrl}/chat/completions. */
 export const DEFAULT_OLLAMA_BASE_URL = 'http://localhost:11434/v1';
 export const DEFAULT_LLAMACPP_BASE_URL = 'http://localhost:8080/v1';
@@ -425,6 +443,11 @@ export interface ProviderSettings {
   TRANSCRIBE_API_KEY: string;
   TRANSCRIBE_BASE_URL: string;
   TRANSCRIBE_MODEL: string;
+  TTS_PROVIDER: string;
+  TTS_EDGE_VOICE: string;
+  TTS_SAPI_VOICE: string;
+  TTS_XTTS_SERVER_URL: string;
+  TTS_XTTS_VOICE: string;
   MAX_TOOL_CALLS: string;
   /** Blank means no limit. A soft warning fires once a task's own spend crosses this; a hard stop fires past 2x it. */
   MAX_COST_PER_TASK_USD: string;
@@ -441,6 +464,11 @@ export const SETTINGS_KEYS = [
   'TRANSCRIBE_API_KEY',
   'TRANSCRIBE_BASE_URL',
   'TRANSCRIBE_MODEL',
+  'TTS_PROVIDER',
+  'TTS_EDGE_VOICE',
+  'TTS_SAPI_VOICE',
+  'TTS_XTTS_SERVER_URL',
+  'TTS_XTTS_VOICE',
   'MAX_TOOL_CALLS',
   'MAX_COST_PER_TASK_USD',
 ] as const satisfies readonly (keyof ProviderSettings)[];

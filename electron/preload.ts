@@ -7,6 +7,7 @@ import type {
   PermissionOverrides,
   ApprovalDecision,
   ScheduleSpec,
+  TtsProvider,
 } from './ipc-channels';
 
 /** Subscribe helper: events are broadcast for every workspace, tagged with its id. */
@@ -100,6 +101,11 @@ contextBridge.exposeInMainWorld('forge', {
   voice: {
     transcribe: (buffer: ArrayBuffer, mimeType: string) =>
       ipcRenderer.invoke(IPC.voiceTranscribe, buffer, mimeType),
+  },
+  tts: {
+    synthesize: (text: string, provider: TtsProvider, voice: string) =>
+      ipcRenderer.invoke(IPC.ttsSynthesize, text, provider, voice),
+    listVoices: (provider: TtsProvider) => ipcRenderer.invoke(IPC.ttsListVoices, provider),
   },
   attachments: {
     save: (workspaceId: string, buffer: ArrayBuffer, mimeType: string) =>

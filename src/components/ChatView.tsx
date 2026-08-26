@@ -2,7 +2,9 @@ import { useEffect, useRef, useState } from 'react';
 import { useForge, useActiveWorkspace } from '../state/store';
 import { deriveMood } from '../lib/mood';
 import { useVoice } from '../lib/use-voice';
+import { useTts } from '../lib/use-tts';
 import { usePacedActivity } from '../lib/use-paced-activity';
+import type { TtsProvider } from '../../electron/ipc-channels';
 import { Aurora } from './Aurora';
 import { Markdown } from './Markdown';
 import { ChatImageThumb } from './ChatImageThumb';
@@ -19,6 +21,9 @@ import {
   IconCheck,
   IconX,
   IconRoadmap,
+  IconVolume,
+  IconVolumeOff,
+  IconRefresh,
 } from './icons';
 
 /** Pulls image Files out of a clipboard paste or a file drop — everything else passes through untouched. */
@@ -48,10 +53,22 @@ export function ChatView() {
   const decideSubagentApproval = useForge((s) => s.decideSubagentApproval);
   const addComposerImage = useForge((s) => s.addComposerImage);
   const removeComposerImage = useForge((s) => s.removeComposerImage);
+  const providerSettings = useForge((s) => s.providerSettings);
+  const ttsAutoSpeak = useForge((s) => s.ttsAutoSpeak);
+  const setTtsAutoSpeak = useForge((s) => s.setTtsAutoSpeak);
 
   const [text, setText] = useState('');
   const scrollRef = useRef<HTMLDivElement>(null);
   const taRef = useRef<HTMLTextAreaElement>(null);
+
+  const ttsProvider = (providerSettings?.TTS_PROVIDER as TtsProvider) || 'edge';
+  const ttsVoice =
+    ttsProvider === 'sapi'
+      ? providerSettings?.TTS_SAPI_VOICE || ''
+      : ttsProvider === 'xtts'
+        ? providerSettings?.TTS_XTTS_VOICE || ''
+        : providerSettings?.TTS_EDGE_VOICE || '';
+  const tts = useTts(ttsProvider, ttsVoice);
 
   async function attachImages(files: File[]) {
     for (const file of files) {
@@ -118,6 +135,27 @@ export function ChatView() {
     ta.style.height = `${Math.min(ta.scrollHeight, 160)}px`;
   }, [text]);
 
+  // Auto-speak: fires once per newly-arrived final assistant reply, never on
+  // a re-render or a switch back to a workspace with old messages already in it.
+  const lastAutoSpokenRef = useRef<{ wsId: string | null; len: number }>({ wsId: null, len: 0 });
+  useEffect(() => {
+    if (!view) return;
+    const wsId = view.summary.id;
+    const prev = lastAutoSpokenRef.current;
+    if (prev.wsId !== wsId) {
+      lastAutoSpokenRef.current = { wsId, len: view.chat.length };
+      return;
+    }
+    if (view.chat.length > prev.len) {
+      const lastIndex = view.chat.length - 1;
+      const last = view.chat[lastIndex];
+      lastAutoSpokenRef.current = { wsId, len: view.chat.length };
+      if (ttsAutoSpeak && last.role === 'assistant' && !last.note && last.text.trim()) {
+        void tts.speak(last.text, String(lastIndex));
+      }
+    }
+  }, [view?.chat.length, view?.summary.id, ttsAutoSpeak]);
+
   function submit() {
     const t = text.trim();
     if (!t && !view?.composerImages.length) return;
@@ -162,6 +200,32 @@ export function ChatView() {
                       <ChatImageThumb key={img.path} path={img.path} name={img.name} />
                     ))}
                   </div>
+                )}
+                {!m.note && !!m.text.trim() && (
+                  <button
+                    type="button"
+                    className="iconbtn tts-msg-btn"
+                    title={
+                      tts.speakingId === String(i)
+                        ? 'Stop speaking'
+                        : tts.synthesizingId === String(i)
+                          ? 'Synthesizing…'
+                          : 'Read this reply aloud'
+                    }
+                    onClick={() =>
+                      tts.speakingId === String(i) || tts.synthesizingId === String(i)
+                        ? tts.stop()
+                        : tts.speak(m.text, String(i))
+                    }
+                  >
+                    {tts.synthesizingId === String(i) ? (
+                      <IconRefresh className="icon-xs spin" />
+                    ) : tts.speakingId === String(i) ? (
+                      <IconVolumeOff className="icon-xs" />
+                    ) : (
+                      <IconVolume className="icon-xs" />
+                    )}
+                  </button>
                 )}
               </div>
             )
@@ -301,6 +365,11 @@ export function ChatView() {
               {voice.error}
             </div>
           )}
+          {tts.error && (
+            <div className="live-pill err" onClick={tts.clearError} title="Dismiss">
+              {tts.error}
+            </div>
+          )}
           {!voice.error && voice.state === 'listening' && (
             <div className="live-pill" style={{ borderColor: '#f43f5e' }}>
               <span className="live-dot" style={{ background: '#f43f5e' }} />
@@ -369,6 +438,13 @@ export function ChatView() {
               <span className="chip">read · edit · run</span>
               <span className="chip">{view.summary.name}</span>
               <div className="spacer" />
+              <button
+                className={`micbtn${ttsAutoSpeak ? ' live' : ''}`}
+                onClick={() => setTtsAutoSpeak(!ttsAutoSpeak)}
+                title={ttsAutoSpeak ? 'Auto-speak replies: on' : 'Auto-speak replies: off'}
+              >
+                {ttsAutoSpeak ? <IconVolume className="icon-sm" /> : <IconVolumeOff className="icon-sm" />}
+              </button>
               <button
                 className={`micbtn${voice.state === 'listening' ? ' live' : ''}`}
                 onClick={voice.toggle}

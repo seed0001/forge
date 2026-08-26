@@ -6,6 +6,7 @@ import { spawn } from 'node:child_process';
 
 import { loadEnv, setEnvValue } from './env';
 import { transcribe } from './transcribe';
+import { synthesizeSpeech, listVoices as listTtsVoices } from './tts-service';
 import { startPortalServer, type PortalHandle } from './portal-server';
 import { activeProviderId } from './chat-provider';
 import { IPC, SETTINGS_KEYS, SECRET_SETTINGS_KEYS, SECRET_SENTINEL, MAX_TOOL_CALLS_LIMIT, MODEL_ENV_KEY } from './ipc-channels';
@@ -19,6 +20,7 @@ import type {
   PermissionOverrides,
   ApprovalDecision,
   ScheduleSpec,
+  TtsProvider,
 } from './ipc-channels';
 import * as fsService from './fs-service';
 import { WorkspaceManager } from './workspace-manager';
@@ -560,6 +562,15 @@ app.whenReady().then(() => {
 
   ipcMain.handle(IPC.voiceTranscribe, async (_e, buffer: ArrayBuffer, mimeType: string) => {
     return transcribe(buffer, mimeType);
+  });
+
+  ipcMain.handle(IPC.ttsSynthesize, async (_e, text: string, provider: TtsProvider, voice: string) => {
+    const { audio, mimeType, error } = await synthesizeSpeech(text, provider, voice);
+    return { audio: audio ? audio.toString('base64') : null, mimeType, error };
+  });
+
+  ipcMain.handle(IPC.ttsListVoices, async (_e, provider: TtsProvider) => {
+    return listTtsVoices(provider);
   });
 
   ipcMain.handle(IPC.attachmentSave, async (_e, workspaceId: string, buffer: ArrayBuffer, mimeType: string) => {

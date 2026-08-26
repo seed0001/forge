@@ -415,6 +415,7 @@ input, textarea { font: inherit; color: inherit; }
 .turn.agent .chat-images { max-width: 100%; margin-top: var(--s2); }
 /* An interim "about to do X" note, not a real final reply — reads as a lighter, transient status. */
 .turn.agent.note .md { color: var(--fg-2); font-style: italic; }
+.tts-msg-btn { margin-top: var(--s1); align-self: flex-start; }
 .chat-image {
   width: 160px; height: 160px; object-fit: cover;
   border-radius: var(--r-md); border: 1px solid var(--line-strong);

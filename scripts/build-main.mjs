@@ -20,7 +20,13 @@ const shared = {
   // Node's own loader resolves those natively. It's a real "dependency" in
   // package.json, so electron-builder ships it in node_modules the same way
   // it already does electron-updater.
-  external: ['electron', 'electron-updater', 'ws'],
+  // axios (pulled in transitively by msedge-tts, used for its voice-list
+  // fetch) hits the same class of problem via combined-stream/form-data's
+  // dynamic `require("util")` — left external for the same reason. npm
+  // still installs it under node_modules as msedge-tts's own dependency, so
+  // electron-builder ships it unmodified without needing a direct entry in
+  // package.json.
+  external: ['electron', 'electron-updater', 'ws', 'axios'],
   minify: true,
 };
 
@@ -28,6 +34,13 @@ await esbuild.build({
   ...shared,
   entryPoints: [path.join(root, 'electron', 'main.ts')],
   outfile: path.join(root, 'dist-electron', 'main.js'),
+  // msedge-tts ships as CommonJS and gets bundled (unlike axios/ws, it isn't
+  // external); its internal require("axios") calls go through esbuild's
+  // __require2 shim, which falls back to a real `require` — absent by
+  // default in an ESM module. This polyfills one via node:module so that
+  // fallback actually resolves axios from node_modules at runtime instead
+  // of throwing "Dynamic require of axios is not supported".
+  banner: { js: "import { createRequire } from 'module'; const require = createRequire(import.meta.url);" },
 });
 
 // page-extract.ts injects these two small libraries into the live browsed

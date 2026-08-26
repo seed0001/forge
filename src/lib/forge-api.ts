@@ -27,6 +27,8 @@ import type {
   ScheduledTask,
   FocusAgentSummary,
   FocusMessage,
+  TtsProvider,
+  TtsVoice,
 } from '../../electron/ipc-channels';
 
 type Unsubscribe = () => void;
@@ -115,6 +117,14 @@ export interface ForgeApi {
   };
   voice: {
     transcribe: (buffer: ArrayBuffer, mimeType: string) => Promise<{ text: string; error?: string }>;
+  };
+  tts: {
+    synthesize: (
+      text: string,
+      provider: TtsProvider,
+      voice: string
+    ) => Promise<{ audio: string | null; mimeType: string; error?: string }>;
+    listVoices: (provider: TtsProvider) => Promise<TtsVoice[]>;
   };
   attachments: {
     save: (workspaceId: string, buffer: ArrayBuffer, mimeType: string) => Promise<ChatImage>;

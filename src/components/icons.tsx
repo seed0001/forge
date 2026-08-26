@@ -125,6 +125,18 @@ export const IconRefresh = (p: P) => (
     <path d="M17.5 3.5V7h-3.5M6.5 20.5V17H10" />
   </svg>
 );
+export const IconVolume = (p: P) => (
+  <svg {...stroke(p)}>
+    <path d="M4 9.5h3.5L12 5.5v13L7.5 14.5H4z" />
+    <path d="M15.5 9a4.5 4.5 0 0 1 0 6M18 6.5a8 8 0 0 1 0 11" />
+  </svg>
+);
+export const IconVolumeOff = (p: P) => (
+  <svg {...stroke(p)}>
+    <path d="M4 9.5h3.5L12 5.5v13L7.5 14.5H4z" />
+    <path d="M15.5 9.5l4.5 5M20 9.5l-4.5 5" />
+  </svg>
+);
 export const IconSearch = (p: P) => (
   <svg {...stroke(p)}><circle cx="10.5" cy="10.5" r="6.5" /><path d="M19.5 19.5l-4.3-4.3" /></svg>
 );

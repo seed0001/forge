@@ -1,16 +1,21 @@
 import { useEffect, useState } from 'react';
 import { useForge } from '../state/store';
+import { forge } from '../lib/forge-api';
+import { useTts } from '../lib/use-tts';
 import {
   DEFAULT_LLAMACPP_BASE_URL,
   DEFAULT_OLLAMA_BASE_URL,
   MAX_TOOL_CALLS_DEFAULT,
   MAX_TOOL_CALLS_LIMIT,
   SECRET_SENTINEL,
+  TTS_PROVIDERS,
   type ProviderSettings,
   type PermissionCategory,
   type PermissionLevel,
+  type TtsProvider,
+  type TtsVoice,
 } from '../../electron/ipc-channels';
-import { IconCheck, IconEye, IconEyeOff, IconGear, IconX } from './icons';
+import { IconCheck, IconEye, IconEyeOff, IconGear, IconVolume, IconRefresh, IconX } from './icons';
 import { PortalControl } from './PortalControl';
 
 const PERMISSION_CATEGORIES: { id: PermissionCategory; label: string; blurb: string }[] = [
@@ -160,6 +165,11 @@ const EMPTY: ProviderSettings = {
   TRANSCRIBE_API_KEY: '',
   TRANSCRIBE_BASE_URL: '',
   TRANSCRIBE_MODEL: '',
+  TTS_PROVIDER: '',
+  TTS_EDGE_VOICE: '',
+  TTS_SAPI_VOICE: '',
+  TTS_XTTS_SERVER_URL: '',
+  TTS_XTTS_VOICE: '',
   MAX_TOOL_CALLS: '',
   MAX_COST_PER_TASK_USD: '',
 };
@@ -185,6 +195,27 @@ export function SettingsOverlay() {
   useEffect(() => {
     if (saved) setDraft(saved);
   }, [saved]);
+
+  const ttsProvider = (draft.TTS_PROVIDER as TtsProvider) || 'edge';
+  const ttsVoiceKey =
+    ttsProvider === 'sapi' ? 'TTS_SAPI_VOICE' : ttsProvider === 'xtts' ? 'TTS_XTTS_VOICE' : 'TTS_EDGE_VOICE';
+
+  const [ttsVoices, setTtsVoices] = useState<TtsVoice[]>([]);
+  const [ttsVoicesLoading, setTtsVoicesLoading] = useState(false);
+  useEffect(() => {
+    if (!open) return;
+    let cancelled = false;
+    setTtsVoicesLoading(true);
+    forge.tts
+      .listVoices(ttsProvider)
+      .then((v) => !cancelled && setTtsVoices(v))
+      .finally(() => !cancelled && setTtsVoicesLoading(false));
+    return () => {
+      cancelled = true;
+    };
+  }, [open, ttsProvider]);
+
+  const ttsTest = useTts(ttsProvider, draft[ttsVoiceKey]);
 
   if (!open) return null;
 
@@ -308,6 +339,111 @@ export function SettingsOverlay() {
               })}
             </div>
           ))
+        )}
+
+        {saved && (
+          <div className="settings-section">
+            <div className="settings-section-head">
+              <div className="row" style={{ gap: 'var(--s2)' }}>
+                <span className="settings-dot" style={{ background: 'var(--fg-3)' }} />
+                <span className="settings-section-name">Voice output</span>
+              </div>
+            </div>
+            <div className="settings-section-blurb">
+              Lets the agent read its replies aloud. Edge TTS needs no setup; Windows SAPI is fully offline; XTTS
+              points at a local voice-cloning server (e.g.{' '}
+              <a
+                className="settings-link"
+                href="https://github.com/daswer123/xtts-api-server"
+                target="_blank"
+                rel="noreferrer"
+              >
+                daswer123/xtts-api-server
+              </a>
+              ) — drop a reference clip (a short .wav sample of the voice) into <code>forge/voices/</code> and it
+              shows up below as a selectable voice.
+            </div>
+
+            <label className="settings-field">
+              <span className="settings-field-label">Provider</span>
+              <div className="settings-input-wrap">
+                <select
+                  className="settings-input"
+                  value={ttsProvider}
+                  onChange={(e) => setDraft((d) => ({ ...d, TTS_PROVIDER: e.target.value }))}
+                >
+                  {TTS_PROVIDERS.map((p) => (
+                    <option key={p.id} value={p.id}>
+                      {p.label}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            </label>
+
+            <label className="settings-field">
+              <span className="settings-field-label">Voice</span>
+              <div className="settings-input-wrap">
+                <select
+                  className="settings-input"
+                  value={draft[ttsVoiceKey]}
+                  onChange={(e) => setDraft((d) => ({ ...d, [ttsVoiceKey]: e.target.value }))}
+                  disabled={ttsVoicesLoading}
+                >
+                  <option value="">
+                    {ttsVoicesLoading ? 'Loading…' : ttsProvider === 'xtts' ? 'No reference clips found' : 'Default'}
+                  </option>
+                  {ttsVoices.map((v) => (
+                    <option key={v.id} value={v.id}>
+                      {v.label}
+                    </option>
+                  ))}
+                </select>
+              </div>
+              {ttsProvider === 'xtts' && (
+                <span className="settings-field-hint">
+                  Voices here are the .wav files currently in <code>forge/voices/</code>.
+                </span>
+              )}
+            </label>
+
+            {ttsProvider === 'xtts' && (
+              <label className="settings-field">
+                <span className="settings-field-label">XTTS server URL</span>
+                <div className="settings-input-wrap">
+                  <input
+                    className="settings-input mono"
+                    type="text"
+                    placeholder="http://localhost:8020"
+                    spellCheck={false}
+                    autoComplete="off"
+                    value={draft.TTS_XTTS_SERVER_URL}
+                    onChange={(e) => setDraft((d) => ({ ...d, TTS_XTTS_SERVER_URL: e.target.value }))}
+                  />
+                </div>
+              </label>
+            )}
+
+            {ttsTest.error && <div className="settings-field-hint" style={{ color: 'var(--red)' }}>{ttsTest.error}</div>}
+
+            <button
+              type="button"
+              className="btn btn-outline"
+              style={{ marginTop: 'var(--s2)' }}
+              onClick={() =>
+                ttsTest.speakingId || ttsTest.synthesizingId
+                  ? ttsTest.stop()
+                  : ttsTest.speak('This is what the current voice sounds like.', 'settings-test')
+              }
+            >
+              {ttsTest.synthesizingId ? (
+                <IconRefresh className="icon-xs spin" />
+              ) : (
+                <IconVolume className="icon-xs" />
+              )}
+              {ttsTest.speakingId ? 'Stop' : ttsTest.synthesizingId ? 'Synthesizing…' : 'Test voice'}
+            </button>
+          </div>
         )}
 
         {permOverrides && (

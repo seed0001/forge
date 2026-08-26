@@ -134,6 +134,9 @@ interface ForgeState {
   permOverrides: PermissionOverrides | null;
   bashAllowlist: string[];
 
+  /** Whether a fresh assistant reply speaks itself automatically — a pure client-side preference, persisted to localStorage rather than the .env-backed settings. */
+  ttsAutoSpeak: boolean;
+
   init: () => Promise<void>;
   newWorkspace: () => Promise<void>;
   closeWorkspace: (id: string) => Promise<void>;
@@ -201,6 +204,7 @@ interface ForgeState {
   openSettings: () => void;
   closeSettings: () => void;
   saveSettings: (values: Partial<ProviderSettings>) => Promise<boolean>;
+  setTtsAutoSpeak: (enabled: boolean) => void;
 
   setPermOverride: (category: PermissionCategory, level: PermissionLevel | null) => Promise<void>;
   addAllowlistPattern: (pattern: string) => Promise<void>;
@@ -300,6 +304,14 @@ export const useForge = create<ForgeState>((set, get) => {
 
     permOverrides: null,
     bashAllowlist: [],
+
+    ttsAutoSpeak: (() => {
+      try {
+        return localStorage.getItem('forge-tts-auto-speak') === '1';
+      } catch {
+        return false;
+      }
+    })(),
 
     init: async () => {
       void forge.models
@@ -909,6 +921,15 @@ export const useForge = create<ForgeState>((set, get) => {
     },
 
     closeSettings: () => set({ settingsOpen: false }),
+
+    setTtsAutoSpeak: (enabled) => {
+      try {
+        localStorage.setItem('forge-tts-auto-speak', enabled ? '1' : '0');
+      } catch {
+        // localStorage can throw in a locked-down environment — the toggle still works for this session.
+      }
+      set({ ttsAutoSpeak: enabled });
+    },
 
     saveSettings: async (values) => {
       set({ settingsSaving: true });

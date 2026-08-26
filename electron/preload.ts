@@ -4,6 +4,7 @@ import type {
   ProviderSettings,
   ChatProvider,
   WorkspaceKind,
+  WorkspaceType,
   PermissionOverrides,
   ApprovalDecision,
   ScheduleSpec,
@@ -20,7 +21,7 @@ function on<T extends unknown[]>(channel: string, cb: (...args: T) => void) {
 contextBridge.exposeInMainWorld('forge', {
   workspaces: {
     list: () => ipcRenderer.invoke(IPC.wsList),
-    create: () => ipcRenderer.invoke(IPC.wsCreate),
+    create: (type?: WorkspaceType) => ipcRenderer.invoke(IPC.wsCreate, type),
     close: (id: string) => ipcRenderer.invoke(IPC.wsClose, id),
     setRoot: (id: string) => ipcRenderer.invoke(IPC.wsSetRoot, id),
     hydrate: (id: string) => ipcRenderer.invoke(IPC.wsHydrate, id),
@@ -32,6 +33,16 @@ contextBridge.exposeInMainWorld('forge', {
     setActive: (id: string) => ipcRenderer.invoke(IPC.wsSetActive, id),
     getInitialActive: () => ipcRenderer.invoke(IPC.wsGetInitialActive),
     onUpdated: (cb: (summary: unknown) => void) => on(IPC.wsUpdated, cb),
+  },
+  workspaceTree: {
+    list: () => ipcRenderer.invoke(IPC.wsTreeList),
+    rename: (workspaceId: string, label: string) => ipcRenderer.invoke(IPC.wsRename, workspaceId, label),
+    setMeta: (workspaceId: string, text: string) => ipcRenderer.invoke(IPC.wsSetMeta, workspaceId, text),
+    addProject: (workspaceId: string) => ipcRenderer.invoke(IPC.projectAdd, workspaceId),
+    listProjects: (workspaceId: string) => ipcRenderer.invoke(IPC.projectList, workspaceId),
+    removeProject: (workspaceId: string, projectId: string) => ipcRenderer.invoke(IPC.projectRemove, workspaceId, projectId),
+    setActiveProject: (workspaceId: string, projectId: string) =>
+      ipcRenderer.invoke(IPC.projectSetActive, workspaceId, projectId),
   },
   sessions: {
     list: (id: string) => ipcRenderer.invoke(IPC.sessList, id),

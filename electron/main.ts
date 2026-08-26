@@ -12,12 +12,13 @@ import { startPortalServer, type PortalHandle } from './portal-server';
 import { activeProviderId } from './chat-provider';
 import { IPC, SETTINGS_KEYS, SECRET_SETTINGS_KEYS, SECRET_SENTINEL, MAX_TOOL_CALLS_LIMIT, MODEL_ENV_KEY } from './ipc-channels';
 import type {
-  WorkspaceHydration,
+  ProjectHydration,
   ChatImage,
   ProviderSettings,
   ChatProvider,
   RoadmapItemStatus,
   WorkspaceKind,
+  WorkspaceType,
   PermissionOverrides,
   ApprovalDecision,
   ScheduleSpec,
@@ -65,7 +66,7 @@ if (overrideRules && fs.existsSync(overrideRules)) {
 }
 console.log(`[forge] ruleset: ${process.env.RULES_DIR || '(none found)'}`);
 
-// Seed the permission overrides cache so workspace.ts's resolvePermission
+// Seed the permission overrides cache so project.ts's resolvePermission
 // never needs to do a synchronous file read on the hot path.
 loadPermissionOverrides();
 
@@ -76,14 +77,15 @@ function send(channel: string, ...args: unknown[]) {
 }
 
 /**
- * The phone portal mirrors ONE workspace (the same one this desktop app opens
- * on startup) — set once that workspace exists, in app.whenReady. Declared up
- * here because the WorkspaceManager's emit callbacks (which fire from deep
- * inside agent turns) are wired before that workspace is created.
+ * The phone portal mirrors ONE project (the active project of the same
+ * workspace this desktop app opens on startup) — set once that project
+ * exists, in app.whenReady. Declared up here because the WorkspaceManager's
+ * emit callbacks (which fire from deep inside agent turns) are wired before
+ * that project is created.
  */
 let portal: PortalHandle | null = null;
-let portalWorkspaceId: string | null = null;
-/** Which workspace tab was focused last — tracked so it can be persisted and restored across restarts, and reported to the renderer's first load via IPC.wsGetInitialActive. */
+let portalProjectId: string | null = null;
+/** Which WORKSPACE was focused last — tracked so it can be persisted and restored across restarts, and (via its active project) reported to the renderer's first load via IPC.wsGetInitialActive. */
 let activeWorkspaceId: string | null = null;
 let portalTunnelProc: ReturnType<typeof spawn> | null = null;
 /** Current tunnel state — polled by the renderer's Portal control on mount via IPC.portalGetStatus, pushed live via IPC.portalStatus. Stays 'disabled' until the Operator explicitly enables it in Settings. */
@@ -101,51 +103,69 @@ app.on('before-quit', () => {
   portalTunnelProc?.kill();
 });
 
-/** Writes the current tab order/roots/kinds and active tab to disk — called after any mutation that should be remembered for next launch. */
+/** Writes the current workspace/project structure and active tab to disk — called after any mutation that should be remembered for next launch. */
 async function persistWorkspaceIndex(): Promise<void> {
   const list = manager.list();
-  const entries = list.map((w) => ({ rootPath: w.rootPath, kind: w.kind }));
-  const activeIndex = Math.max(
+  const workspaces = list.map((workspace) => {
+    const projects = workspace.listProjects();
+    return {
+      label: workspace.label,
+      type: workspace.type,
+      metaFile: workspace.metaFile,
+      projects: projects.map((p) => ({ rootPath: p.rootPath, kind: p.kind })),
+      activeProjectIndex: Math.max(
+        0,
+        projects.findIndex((p) => p.id === workspace.activeProjectId)
+      ),
+    };
+  });
+  const activeWorkspaceIndex = Math.max(
     0,
     list.findIndex((w) => w.id === activeWorkspaceId)
   );
-  await saveWorkspaceIndex({ entries, activeIndex });
+  await saveWorkspaceIndex({ workspaces, activeWorkspaceIndex });
 }
 
+// This ProjectEmit is wired with each callback keyed by a PROJECT id (the
+// argument name below is literally what Project passes as `this.id` — see
+// electron/project.ts). manager.findProject() resolves it without needing to
+// know which Workspace that project lives in.
 const manager = new WorkspaceManager({
-  terminal: (workspaceId, evt) => send(IPC.termData, workspaceId, evt),
-  activity: (workspaceId, sessionId, evt) => send(IPC.agentActivity, workspaceId, sessionId, evt),
-  message: (workspaceId, sessionId, msg) => {
-    send(IPC.agentMessage, workspaceId, sessionId, msg);
-    if (workspaceId === portalWorkspaceId) portal?.broadcastMessage(msg);
+  terminal: (projectId, evt) => send(IPC.termData, projectId, evt),
+  activity: (projectId, sessionId, evt) => send(IPC.agentActivity, projectId, sessionId, evt),
+  message: (projectId, sessionId, msg) => {
+    send(IPC.agentMessage, projectId, sessionId, msg);
+    if (projectId === portalProjectId) portal?.broadcastMessage(msg);
   },
-  status: (workspaceId) => {
-    const ws = manager.get(workspaceId);
-    if (ws) send(IPC.wsUpdated, ws.summary());
-    if (ws && workspaceId === portalWorkspaceId) portal?.broadcastStatus(ws.status === 'running');
+  status: (projectId) => {
+    const project = manager.findProject(projectId);
+    if (project) send(IPC.wsUpdated, project.summary());
+    if (project && projectId === portalProjectId) portal?.broadcastStatus(project.status === 'running');
   },
-  diffProposed: (workspaceId, diff) => send(IPC.diffProposed, workspaceId, diff),
-  diffUpdated: (workspaceId, diff) => send(IPC.diffUpdated, workspaceId, diff),
-  sessions: (workspaceId) => {
-    const ws = manager.get(workspaceId);
-    if (ws) send(IPC.sessUpdated, workspaceId, ws.listSessions());
+  diffProposed: (projectId, diff) => send(IPC.diffProposed, projectId, diff),
+  diffUpdated: (projectId, diff) => send(IPC.diffUpdated, projectId, diff),
+  sessions: (projectId) => {
+    const project = manager.findProject(projectId);
+    if (project) send(IPC.sessUpdated, projectId, project.listSessions());
   },
-  commandApproval: (workspaceId, sessionId, requestId, command, category) =>
-    send(IPC.cmdApprovalRequest, workspaceId, { requestId, command, sessionId, category }),
-  subagentCommandApproval: (workspaceId, req) => send(IPC.subagentCmdApprovalRequest, workspaceId, req),
-  roadmapUpdated: (workspaceId, sessionId, items) => send(IPC.roadmapUpdated, workspaceId, sessionId, items),
-  schedulerUpdated: (workspaceId, tasks) => send(IPC.schedUpdated, workspaceId, tasks),
-  focusUpdated: (workspaceId, agents) => send(IPC.focusUpdated, workspaceId, agents),
-  focusBoardUpdated: (workspaceId, messages) => send(IPC.focusBoardUpdated, workspaceId, messages),
-  focusQuestion: (workspaceId, req) => send(IPC.focusQuestionRequest, workspaceId, req),
+  commandApproval: (projectId, sessionId, requestId, command, category) =>
+    send(IPC.cmdApprovalRequest, projectId, { requestId, command, sessionId, category }),
+  subagentCommandApproval: (projectId, req) => send(IPC.subagentCmdApprovalRequest, projectId, req),
+  roadmapUpdated: (projectId, sessionId, items) => send(IPC.roadmapUpdated, projectId, sessionId, items),
+  schedulerUpdated: (projectId, tasks) => send(IPC.schedUpdated, projectId, tasks),
+  focusUpdated: (projectId, agents) => send(IPC.focusUpdated, projectId, agents),
+  focusBoardUpdated: (projectId, messages) => send(IPC.focusBoardUpdated, projectId, messages),
+  focusQuestion: (projectId, req) => send(IPC.focusQuestionRequest, projectId, req),
 });
 
-// Scheduled tasks are ticked centrally rather than each workspace running its
-// own timer — one interval, checked against every open workspace's own
+// Scheduled tasks are ticked centrally rather than each project running its
+// own timer — one interval, checked against every open project's own
 // schedule list, is simpler to reason about and impossible to leak a timer
-// from when a workspace closes.
+// from when a project closes.
 setInterval(() => {
-  for (const ws of manager.list()) ws.tickScheduler();
+  for (const workspace of manager.list()) {
+    for (const project of workspace.listProjects()) project.tickScheduler();
+  }
 }, 20_000);
 
 const browserViewManager = new BrowserViewManager((workspaceId, state) => send(IPC.browserNavState, workspaceId, state));
@@ -210,14 +230,14 @@ function startPortalTunnel(port: number) {
 /** Idempotent — a second call while already running/starting is a no-op. */
 function enablePortal() {
   if (portal || portalStatus.state === 'starting') return;
-  const target = manager.get(portalWorkspaceId ?? '') ?? manager.list()[0];
+  const target = manager.findProject(portalProjectId ?? '') ?? manager.list()[0]?.activeProject;
   if (!target) {
-    setPortalStatus({ state: 'unavailable', reason: 'No workspace open yet.' });
+    setPortalStatus({ state: 'unavailable', reason: 'No project open yet.' });
     return;
   }
-  portalWorkspaceId = target.id;
+  portalProjectId = target.id;
   const portalPort = Number(process.env.PORTAL_PORT) || 5333;
-  portal = startPortalServer(() => manager.get(portalWorkspaceId!) ?? null, portalPort);
+  portal = startPortalServer(() => manager.findProject(portalProjectId!) ?? null, portalPort);
   startPortalTunnel(portalPort);
 }
 
@@ -277,104 +297,202 @@ app.whenReady().then(async () => {
   });
   session.defaultSession.setPermissionCheckHandler((_wc, permission) => ALLOWED.has(permission));
 
-  // Reopen every workspace tab that was open last time, in the same order,
-  // pointed at the same folders (or blank), with the same Coding/Browsing
-  // kind so a reopened project skips straight back to its chat instead of
-  // landing on the chooser screen again. A fresh install (no index yet)
-  // falls back to today's default: in dev, the project's own folder so
-  // there's something real on screen immediately; packaged, that folder is
-  // inside the read-only asar and isn't a real project anyway, so start
-  // with one blank workspace and let the user pick one.
+  // Reopen every workspace (and every project inside each) that was open
+  // last time, in the same order, pointed at the same folders (or blank),
+  // with the same Coding/Browsing kind so a reopened project skips straight
+  // back to its chat instead of landing on the chooser screen again. A fresh
+  // install (no index yet) falls back to today's default: in dev, the
+  // project's own folder so there's something real on screen immediately;
+  // packaged, that folder is inside the read-only asar and isn't a real
+  // project anyway, so start with one blank workspace/project and let the
+  // user pick one. Note that neither workspace nor project ids are persisted
+  // (they never were, even before the workspace/project split) — this just
+  // rebuilds the same label/type/folder/kind structure with freshly minted ids.
   const index = await loadWorkspaceIndex();
-  const restoreEntries =
-    index.entries.length > 0
-      ? index.entries
-      : [{ rootPath: app.isPackaged ? null : path.join(__dirname, '..'), kind: null }];
-  const restored = restoreEntries.map((entry) => {
-    const ws = manager.create(entry.rootPath);
-    ws.kind = entry.kind;
-    void ws.restoreSessions();
-    return ws;
-  });
+  const restoreWorkspaces =
+    index.workspaces.length > 0
+      ? index.workspaces
+      : [
+          {
+            label: 'Workspace 1',
+            type: 'coding' as WorkspaceType,
+            metaFile: '',
+            projects: [{ rootPath: app.isPackaged ? null : path.join(__dirname, '..'), kind: null }],
+            activeProjectIndex: 0,
+          },
+        ];
+  const restoredWorkspaces = await Promise.all(
+    restoreWorkspaces.map(async (entry) => {
+      const workspace = manager.createWorkspace(entry.type, entry.label);
+      workspace.metaFile = entry.metaFile;
+      const projects = await Promise.all(
+        entry.projects.map(async (p) => {
+          const project = await manager.addProject(workspace.id, p.rootPath, p.kind);
+          if (project) void project.restoreSessions();
+          return project;
+        })
+      );
+      const activeIdx = Math.min(Math.max(entry.activeProjectIndex, 0), Math.max(projects.length - 1, 0));
+      const activeProject = projects[activeIdx] ?? projects[0];
+      if (activeProject) workspace.setActiveProject(activeProject.id);
+      return workspace;
+    })
+  );
 
-  const activeIdx = Math.min(Math.max(index.activeIndex, 0), restored.length - 1);
-  activeWorkspaceId = restored[activeIdx]?.id ?? restored[0]?.id ?? null;
+  const activeIdx = Math.min(Math.max(index.activeWorkspaceIndex, 0), restoredWorkspaces.length - 1);
+  activeWorkspaceId = restoredWorkspaces[activeIdx]?.id ?? restoredWorkspaces[0]?.id ?? null;
 
-  // Remembers which workspace the portal would mirror once enabled — the
+  // Remembers which project the portal would mirror once enabled — the
   // server and tunnel themselves only ever start in response to the
   // Operator's own click in Settings (see enablePortal), never here.
-  portalWorkspaceId = activeWorkspaceId;
+  portalProjectId = (activeWorkspaceId ? manager.get(activeWorkspaceId) : undefined)?.activeProjectId ?? null;
 
   createWindow();
   initUpdater((status) => send(IPC.updateStatus, status));
 
-  ipcMain.handle(IPC.wsList, async () => manager.list().map((w) => w.summary()));
+  // ── Renderer-facing "workspace" (= project tab) surface ─────────────────
+  // Every one of these keeps its pre-restructure signature and meaning: one
+  // tab per Project, `id` is a project id. Each Workspace this creates gets
+  // exactly one Project under it for now — the real multi-project-per-
+  // workspace surface is the wsTreeList/projectAdd/etc. section further down,
+  // not yet wired into any UI control.
 
-  ipcMain.handle(IPC.wsGetInitialActive, async () => activeWorkspaceId);
+  ipcMain.handle(IPC.wsList, async () =>
+    manager.list().flatMap((workspace) => workspace.listProjects().map((p) => p.summary()))
+  );
 
-  ipcMain.handle(IPC.wsSetActive, async (_e, workspaceId: string) => {
-    activeWorkspaceId = workspaceId;
+  ipcMain.handle(IPC.wsGetInitialActive, async () => {
+    const workspace = activeWorkspaceId ? manager.get(activeWorkspaceId) : undefined;
+    return workspace?.activeProjectId ?? null;
+  });
+
+  ipcMain.handle(IPC.wsSetActive, async (_e, projectId: string) => {
+    const workspace = manager.workspaceContaining(projectId);
+    if (workspace) {
+      activeWorkspaceId = workspace.id;
+      workspace.setActiveProject(projectId);
+    }
     void persistWorkspaceIndex();
     return true;
   });
 
-  ipcMain.handle(IPC.wsCreate, async () => {
-    const ws = manager.create(null);
-    ws.newSession();
+  ipcMain.handle(IPC.wsCreate, async (_e, type?: WorkspaceType) => {
+    const workspace = manager.createWorkspace(type ?? 'coding');
+    const project = await manager.addProject(workspace.id, null);
     void persistWorkspaceIndex();
-    return ws.summary();
+    return project!.summary();
   });
 
-  ipcMain.handle(IPC.wsClose, async (_e, workspaceId: string) => {
-    browserViewManager.forgetWorkspace(workspaceId);
-    manager.close(workspaceId);
+  ipcMain.handle(IPC.wsClose, async (_e, projectId: string) => {
+    const workspace = manager.workspaceContaining(projectId);
+    if (workspace) {
+      for (const p of workspace.listProjects()) browserViewManager.forgetWorkspace(p.id);
+      manager.close(workspace.id);
+    }
     void persistWorkspaceIndex();
-    return manager.list().map((w) => w.summary());
+    return manager.list().flatMap((w) => w.listProjects().map((p) => p.summary()));
   });
 
-  ipcMain.handle(IPC.wsMarkSeen, async (_e, workspaceId: string) => {
-    const ws = manager.get(workspaceId);
-    if (!ws) return null;
-    ws.markSeen();
-    return ws.summary();
+  ipcMain.handle(IPC.wsMarkSeen, async (_e, projectId: string) => {
+    const project = manager.findProject(projectId);
+    if (!project) return null;
+    project.markSeen();
+    return project.summary();
   });
 
-  ipcMain.handle(IPC.wsSetAutonomy, async (_e, workspaceId: string, level: 'manual' | 'balanced' | 'auto') => {
-    const ws = manager.get(workspaceId);
-    if (!ws) return null;
-    ws.setAutonomy(level);
-    return ws.summary();
+  ipcMain.handle(IPC.wsSetAutonomy, async (_e, projectId: string, level: 'manual' | 'balanced' | 'auto') => {
+    const project = manager.findProject(projectId);
+    if (!project) return null;
+    project.setAutonomy(level);
+    return project.summary();
   });
 
-  ipcMain.handle(IPC.wsSetKind, async (_e, workspaceId: string, kind: WorkspaceKind) => {
-    const ws = manager.get(workspaceId);
-    if (!ws) return null;
-    ws.setKind(kind);
+  ipcMain.handle(IPC.wsSetKind, async (_e, projectId: string, kind: WorkspaceKind) => {
+    const project = manager.findProject(projectId);
+    if (!project) return null;
+    project.setKind(kind);
     void persistWorkspaceIndex();
-    return ws.summary();
+    return project.summary();
   });
 
-  ipcMain.handle(IPC.wsSetClipsFolder, async (_e, workspaceId: string) => {
-    const ws = manager.get(workspaceId);
-    if (!ws || !win) return null;
+  ipcMain.handle(IPC.wsSetClipsFolder, async (_e, projectId: string) => {
+    const project = manager.findProject(projectId);
+    if (!project || !win) return null;
     const result = await dialog.showOpenDialog(win, { properties: ['openDirectory'] });
     if (result.canceled || result.filePaths.length === 0) return null;
-    ws.setClipsFolder(result.filePaths[0]);
-    return ws.summary();
+    project.setClipsFolder(result.filePaths[0]);
+    return project.summary();
+  });
+
+  // ── Real Workspace-level CRUD (new — not yet wired into any UI control) ──
+  // Everything below acts on genuine Workspace ids, not project ids. A later
+  // UI phase (the sidebar tree / splash / type-picker) is what will actually
+  // call these; for now they exist and work, callable by hand or by a future
+  // renderer change, without touching anything the current UI depends on.
+
+  ipcMain.handle(IPC.wsTreeList, async () => manager.list().map((w) => w.summary()));
+
+  ipcMain.handle(IPC.wsRename, async (_e, workspaceId: string, label: string) => {
+    const workspace = manager.get(workspaceId);
+    if (!workspace) return null;
+    workspace.label = label;
+    void persistWorkspaceIndex();
+    return workspace.summary();
+  });
+
+  ipcMain.handle(IPC.wsSetMeta, async (_e, workspaceId: string, text: string) => {
+    const workspace = manager.get(workspaceId);
+    if (!workspace) return null;
+    workspace.metaFile = text;
+    void persistWorkspaceIndex();
+    return workspace.summary();
+  });
+
+  ipcMain.handle(IPC.projectAdd, async (_e, workspaceId: string) => {
+    const workspace = manager.get(workspaceId);
+    if (!workspace || !win) return null;
+    const result = await dialog.showOpenDialog(win, { properties: ['openDirectory'] });
+    if (result.canceled || result.filePaths.length === 0) return null;
+    const project = await manager.addProject(workspaceId, result.filePaths[0]);
+    if (!project) return null;
+    workspace.setActiveProject(project.id);
+    void persistWorkspaceIndex();
+    return workspace.summary();
+  });
+
+  ipcMain.handle(IPC.projectList, async (_e, workspaceId: string) => {
+    return manager.get(workspaceId)?.listProjects().map((p) => p.summary()) ?? [];
+  });
+
+  ipcMain.handle(IPC.projectRemove, async (_e, workspaceId: string, projectId: string) => {
+    const workspace = manager.get(workspaceId);
+    if (!workspace) return null;
+    browserViewManager.forgetWorkspace(projectId);
+    manager.removeProject(workspaceId, projectId);
+    void persistWorkspaceIndex();
+    return workspace.summary();
+  });
+
+  ipcMain.handle(IPC.projectSetActive, async (_e, workspaceId: string, projectId: string) => {
+    const workspace = manager.get(workspaceId);
+    if (!workspace) return false;
+    const ok = workspace.setActiveProject(projectId);
+    if (ok) void persistWorkspaceIndex();
+    return ok;
   });
 
   ipcMain.handle(IPC.cmdApprovalDecide, async (_e, workspaceId: string, requestId: string, decision: ApprovalDecision) => {
-    manager.get(workspaceId)?.resolveApproval(requestId, decision);
+    manager.findProject(workspaceId)?.resolveApproval(requestId, decision);
     return true;
   });
 
   ipcMain.handle(IPC.subagentCmdApprovalDecide, async (_e, workspaceId: string, requestId: string, approved: boolean) => {
-    manager.get(workspaceId)?.resolveSubagentApproval(requestId, approved);
+    manager.findProject(workspaceId)?.resolveSubagentApproval(requestId, approved);
     return true;
   });
 
   ipcMain.handle(IPC.wsSetRoot, async (_e, workspaceId: string) => {
-    const ws = manager.get(workspaceId);
+    const ws = manager.findProject(workspaceId);
     if (!ws || !win) return null;
     const result = await dialog.showOpenDialog(win, { properties: ['openDirectory'] });
     if (result.canceled || result.filePaths.length === 0) return null;
@@ -386,11 +504,11 @@ app.whenReady().then(async () => {
   });
 
   ipcMain.handle(IPC.sessList, async (_e, workspaceId: string) => {
-    return manager.get(workspaceId)?.listSessions() ?? [];
+    return manager.findProject(workspaceId)?.listSessions() ?? [];
   });
 
   ipcMain.handle(IPC.sessNew, async (_e, workspaceId: string) => {
-    const ws = manager.get(workspaceId);
+    const ws = manager.findProject(workspaceId);
     if (!ws) return null;
     const created = ws.newSession();
     send(IPC.wsUpdated, ws.summary());
@@ -399,14 +517,14 @@ app.whenReady().then(async () => {
   });
 
   ipcMain.handle(IPC.sessSelect, async (_e, workspaceId: string, sessionId: string) => {
-    const ws = manager.get(workspaceId);
+    const ws = manager.findProject(workspaceId);
     if (!ws || !ws.selectSession(sessionId)) return null;
     send(IPC.wsUpdated, ws.summary());
     return { chat: ws.chat, activity: ws.activity, summary: ws.summary(), roadmap: ws.roadmap };
   });
 
   ipcMain.handle(IPC.sessDelete, async (_e, workspaceId: string, sessionId: string) => {
-    const ws = manager.get(workspaceId);
+    const ws = manager.findProject(workspaceId);
     if (!ws) return [];
     ws.deleteSession(sessionId);
     send(IPC.wsUpdated, ws.summary());
@@ -414,8 +532,8 @@ app.whenReady().then(async () => {
     return ws.listSessions();
   });
 
-  ipcMain.handle(IPC.wsHydrate, async (_e, workspaceId: string): Promise<WorkspaceHydration | null> => {
-    const ws = manager.get(workspaceId);
+  ipcMain.handle(IPC.wsHydrate, async (_e, workspaceId: string): Promise<ProjectHydration | null> => {
+    const ws = manager.findProject(workspaceId);
     if (!ws) return null;
     return {
       summary: ws.summary(),
@@ -434,25 +552,25 @@ app.whenReady().then(async () => {
   });
 
   ipcMain.handle(IPC.fsListDir, async (_e, workspaceId: string, dirPath: string) => {
-    const ws = manager.get(workspaceId);
+    const ws = manager.findProject(workspaceId);
     if (!ws?.rootPath) return [];
     return fsService.listDirDetailed(ws.rootPath, dirPath);
   });
 
   ipcMain.handle(IPC.fsListTree, async (_e, workspaceId: string) => {
-    const ws = manager.get(workspaceId);
+    const ws = manager.findProject(workspaceId);
     if (!ws?.rootPath) return [];
     return fsService.listDir(ws.rootPath);
   });
 
   ipcMain.handle(IPC.fsReadFile, async (_e, workspaceId: string, filePath: string) => {
-    const ws = manager.get(workspaceId);
+    const ws = manager.findProject(workspaceId);
     if (!ws?.rootPath) return '';
     return fsService.readFileSafe(ws.rootPath, filePath);
   });
 
   ipcMain.handle(IPC.fsWriteFile, async (_e, workspaceId: string, filePath: string, content: string) => {
-    const ws = manager.get(workspaceId);
+    const ws = manager.findProject(workspaceId);
     if (!ws?.rootPath) return false;
     await fsService.writeFile(ws.rootPath, filePath, content);
     return true;
@@ -467,25 +585,25 @@ app.whenReady().then(async () => {
   });
 
   ipcMain.handle(IPC.termRun, async (_e, workspaceId: string, command: string) => {
-    const ws = manager.get(workspaceId);
+    const ws = manager.findProject(workspaceId);
     if (!ws) return { exitCode: 1, output: 'No such workspace' };
     return ws.runCommand(command);
   });
 
   ipcMain.handle(IPC.termKill, async (_e, workspaceId: string) => {
-    manager.get(workspaceId)?.terminal.kill();
+    manager.findProject(workspaceId)?.terminal.kill();
     return true;
   });
 
   ipcMain.handle(IPC.agentSend, async (_e, workspaceId: string, text: string, images?: ChatImage[]) => {
-    const ws = manager.get(workspaceId);
+    const ws = manager.findProject(workspaceId);
     if (!ws) return false;
     await ws.sendToAgent(text, images);
     return true;
   });
 
   ipcMain.handle(IPC.agentStop, async (_e, workspaceId: string) => {
-    manager.get(workspaceId)?.stopAgent();
+    manager.findProject(workspaceId)?.stopAgent();
     return true;
   });
 
@@ -498,7 +616,7 @@ app.whenReady().then(async () => {
       hunkIndex: number | 'all',
       decision: 'accepted' | 'rejected'
     ) => {
-      const ws = manager.get(workspaceId);
+      const ws = manager.findProject(workspaceId);
       if (!ws?.rootPath) return null;
       const diff = await ws.diffs.decide(ws.rootPath, diffId, hunkIndex, decision);
       if (diff) {
@@ -514,25 +632,25 @@ app.whenReady().then(async () => {
   );
 
   ipcMain.handle(IPC.roadmapDecide, async (_e, workspaceId: string, itemId: string, decision: 'approve' | 'reject') => {
-    manager.get(workspaceId)?.decideRoadmapItem(itemId, decision);
+    manager.findProject(workspaceId)?.decideRoadmapItem(itemId, decision);
     return true;
   });
 
   ipcMain.handle(
     IPC.roadmapEdit,
     async (_e, workspaceId: string, itemId: string, patch: { title?: string; summary?: string; detail?: string }) => {
-      manager.get(workspaceId)?.editRoadmapItem(itemId, patch);
+      manager.findProject(workspaceId)?.editRoadmapItem(itemId, patch);
       return true;
     }
   );
 
   ipcMain.handle(IPC.roadmapPushBack, async (_e, workspaceId: string, itemId: string, newDetail: string) => {
-    manager.get(workspaceId)?.pushBackRoadmapItem(itemId, newDetail);
+    manager.findProject(workspaceId)?.pushBackRoadmapItem(itemId, newDetail);
     return true;
   });
 
   ipcMain.handle(IPC.roadmapSetStatus, async (_e, workspaceId: string, itemId: string, status: RoadmapItemStatus) => {
-    manager.get(workspaceId)?.setRoadmapItemStatus(itemId, status);
+    manager.findProject(workspaceId)?.setRoadmapItemStatus(itemId, status);
     return true;
   });
 
@@ -571,7 +689,7 @@ app.whenReady().then(async () => {
   });
 
   ipcMain.handle(IPC.browserSummarize, async (_e, workspaceId: string) => {
-    const ws = manager.get(workspaceId);
+    const ws = manager.findProject(workspaceId);
     if (!ws) return false;
     const url = browserViewManager.getCurrentUrl();
     const extracted = await browserViewManager.extractPage();
@@ -581,7 +699,7 @@ app.whenReady().then(async () => {
   });
 
   ipcMain.handle(IPC.browserSaveClip, async (_e, workspaceId: string) => {
-    const ws = manager.get(workspaceId);
+    const ws = manager.findProject(workspaceId);
     if (!ws) return { ok: false as const, error: 'Workspace not found.' };
     const url = browserViewManager.getCurrentUrl();
     const extracted = await browserViewManager.extractPage();
@@ -590,11 +708,11 @@ app.whenReady().then(async () => {
   });
 
   ipcMain.handle(IPC.checkpointList, async (_e, workspaceId: string) => {
-    return manager.get(workspaceId)?.diffs.listCheckpoints() ?? [];
+    return manager.findProject(workspaceId)?.diffs.listCheckpoints() ?? [];
   });
 
   ipcMain.handle(IPC.checkpointUndo, async (_e, workspaceId: string, filePath: string) => {
-    const ws = manager.get(workspaceId);
+    const ws = manager.findProject(workspaceId);
     if (!ws?.rootPath) return false;
     const cp = ws.diffs.findLatestCheckpoint(filePath);
     if (!cp) return false;
@@ -617,12 +735,12 @@ app.whenReady().then(async () => {
   });
 
   ipcMain.handle(IPC.attachmentSave, async (_e, workspaceId: string, buffer: ArrayBuffer, mimeType: string) => {
-    const ws = manager.get(workspaceId);
+    const ws = manager.findProject(workspaceId);
     return saveAttachment(ws?.rootPath ?? null, workspaceId, Buffer.from(buffer), mimeType);
   });
 
   ipcMain.handle(IPC.imageRead, async (_e, workspaceId: string, filePath: string) => {
-    const ws = manager.get(workspaceId);
+    const ws = manager.findProject(workspaceId);
     return readImageAsDataUrl(filePath, [attachmentDirFor(ws?.rootPath ?? null, workspaceId), ws?.rootPath ?? null]);
   });
 
@@ -723,13 +841,13 @@ app.whenReady().then(async () => {
   // ── Scheduler ─────────────────────────────────────────────────────────
 
   ipcMain.handle(IPC.schedList, async (_e, workspaceId: string) => {
-    return manager.get(workspaceId)?.listSchedules() ?? [];
+    return manager.findProject(workspaceId)?.listSchedules() ?? [];
   });
 
   ipcMain.handle(
     IPC.schedCreate,
     async (_e, workspaceId: string, label: string, prompt: string, schedule: ScheduleSpec) => {
-      return manager.get(workspaceId)?.createSchedule(label, prompt, schedule) ?? null;
+      return manager.findProject(workspaceId)?.createSchedule(label, prompt, schedule) ?? null;
     }
   );
 
@@ -741,42 +859,42 @@ app.whenReady().then(async () => {
       id: string,
       patch: { label?: string; prompt?: string; schedule?: ScheduleSpec; enabled?: boolean }
     ) => {
-      manager.get(workspaceId)?.updateSchedule(id, patch);
+      manager.findProject(workspaceId)?.updateSchedule(id, patch);
       return true;
     }
   );
 
   ipcMain.handle(IPC.schedDelete, async (_e, workspaceId: string, id: string) => {
-    manager.get(workspaceId)?.deleteSchedule(id);
+    manager.findProject(workspaceId)?.deleteSchedule(id);
     return true;
   });
 
   ipcMain.handle(IPC.schedRunNow, async (_e, workspaceId: string, id: string) => {
-    manager.get(workspaceId)?.runScheduleNow(id);
+    manager.findProject(workspaceId)?.runScheduleNow(id);
     return true;
   });
 
   // ── Focus agents & message board ─────────────────────────────────────────
 
   ipcMain.handle(IPC.focusList, async (_e, workspaceId: string) => {
-    return manager.get(workspaceId)?.listFocusAgents() ?? [];
+    return manager.findProject(workspaceId)?.listFocusAgents() ?? [];
   });
 
   ipcMain.handle(IPC.focusStart, async (_e, workspaceId: string, task: string, label: string, budgetMinutes?: number) => {
-    return manager.get(workspaceId)?.startFocusAgent(task, label, budgetMinutes) ?? null;
+    return manager.findProject(workspaceId)?.startFocusAgent(task, label, budgetMinutes) ?? null;
   });
 
   ipcMain.handle(IPC.focusStop, async (_e, workspaceId: string, id: string) => {
-    manager.get(workspaceId)?.stopFocusAgent(id);
+    manager.findProject(workspaceId)?.stopFocusAgent(id);
     return true;
   });
 
   ipcMain.handle(IPC.focusBoardList, async (_e, workspaceId: string) => {
-    return manager.get(workspaceId)?.readBoard(undefined, 200) ?? [];
+    return manager.findProject(workspaceId)?.readBoard(undefined, 200) ?? [];
   });
 
   ipcMain.handle(IPC.focusQuestionAnswer, async (_e, workspaceId: string, requestId: string, answer: string) => {
-    manager.get(workspaceId)?.answerFocusQuestion(requestId, answer);
+    manager.findProject(workspaceId)?.answerFocusQuestion(requestId, answer);
     return true;
   });
 

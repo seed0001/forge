@@ -108,7 +108,7 @@ export interface AgentCallbacks {
   ) => Promise<{ exitCode: number; output: string }>;
   /**
    * Read fresh each call — the Operator can change an override, or move the
-   * autonomy slider, mid-task. See workspace.ts's resolvePermission for how
+   * autonomy slider, mid-task. See project.ts's resolvePermission for how
    * this is derived: an explicit override always wins, otherwise it falls
    * back to the current autonomy level's default for that category.
    */
@@ -140,7 +140,7 @@ export interface AgentCallbacks {
    * Posts a question to the board (tagged needsAnswer) and blocks until the
    * Operator answers directly or another agent's post_message replies with a
    * matching in_reply_to, or the timeout elapses — resolving null in that
-   * case rather than hanging forever. See workspace.ts's requestFocusAnswer.
+   * case rather than hanging forever. See project.ts's requestFocusAnswer.
    */
   askAndWait: (from: string, question: string, timeoutMinutes?: number) => Promise<string | null>;
   /** Writes a structured bug report under the project's bugs/ folder and returns its relative path. */
@@ -153,6 +153,24 @@ export interface AgentCallbacks {
    * spawn_focus_agent, so this would never be called from one.
    */
   startFocusAgent?: (task: string, label: string, budgetMinutes?: number) => FocusAgentSummary;
+}
+
+/**
+ * What an AgentSession needs from its PARENT Workspace, on top of its own
+ * project-level context (PROJECT.md/SCRATCH.md, its own ContextStore) — the
+ * workspace's own knowledge base, its free-text meta-file, and a cheap
+ * listing of sibling projects so the agent knows they exist without loading
+ * them. Passed in at construction (see electron/project.ts's
+ * ProjectWorkspaceLink, which this type is aliased to) and re-read fresh
+ * every turn in send(), same as the project-level equivalents.
+ */
+export interface WorkspaceContext {
+  /** The parent workspace's own ContextStore (kind: 'workspace') — distinct from this session's project-scoped one. */
+  contextStore: ContextStore;
+  /** The workspace's free-text meta-file — a PROJECT.md-like note, but for the whole workspace, with no folder to put a real file in. */
+  getMetaFile: () => string;
+  /** Pre-formatted "- name (folder)" lines, one per OTHER project in this workspace — cheap, no full content. */
+  listSiblingProjects: () => string;
 }
 
 const OPENROUTER_IMAGES_URL = 'https://openrouter.ai/api/v1/images';
@@ -430,11 +448,18 @@ const BASE_TOOLS = [
       description:
         "Manage named topics in this project's persistent knowledge base — a structured place for durable " +
         'facts/rules/procedures that stays out of the conversation and out of SCRATCH.md (which is free-form ' +
-        'prose you rewrite as you work). Create a topic before adding records to it with memory_record.',
+        'prose you rewrite as you work). Create a topic before adding records to it with memory_record. Pass ' +
+        'scope: "workspace" to manage the WORKSPACE-level knowledge base instead — shared across every project ' +
+        'in this workspace, not just this one — if this session is part of one.',
       parameters: {
         type: 'object',
         properties: {
           action: { type: 'string', enum: ['create', 'list', 'delete'] },
+          scope: {
+            type: 'string',
+            enum: ['project', 'workspace'],
+            description: 'Which knowledge base to use. Defaults to "project" (this project alone).',
+          },
           name: { type: 'string', description: '(create) Short topic name, e.g. "API conventions" or "deployment".' },
           description: { type: 'string', description: '(create) One sentence describing what belongs in this topic.' },
           topic_id: { type: 'string', description: '(delete) The topic id to remove, along with every record in it.' },
@@ -453,11 +478,17 @@ const BASE_TOOLS = [
         "brand-new session starts with, re-injected into your context automatically (budget-permitting) every " +
         'turn. Writing here does NOT go through the reviewable diff queue like propose_edit — use it for facts ' +
         'genuinely worth keeping forever (a real constraint, a decision and why, a procedure), not routine ' +
-        'task narration.',
+        'task narration. Pass scope: "workspace" to manage the WORKSPACE-level knowledge base instead — shared ' +
+        'across every project in this workspace, not just this one — if this session is part of one.',
       parameters: {
         type: 'object',
         properties: {
           action: { type: 'string', enum: ['add', 'update', 'delete', 'search'] },
+          scope: {
+            type: 'string',
+            enum: ['project', 'workspace'],
+            description: 'Which knowledge base to use. Defaults to "project" (this project alone).',
+          },
           topic_id: { type: 'string', description: '(add) Which topic this belongs to — create one first with memory_topic if needed.' },
           record_id: { type: 'string', description: '(update/delete) The record id to change or remove.' },
           kind: {
@@ -960,7 +991,10 @@ function buildSystemPrompt(rootPath: string, hasRules: boolean, isSubagent = fal
     '  Records you already added are re-injected into your own context automatically, within a budget,',
     "  every turn — you do not need to search for them just to \"remember\" they exist. Writing here",
     '  does not go through the reviewable diff queue the way propose_edit does — use it for things',
-    '  genuinely worth keeping forever, not routine narration of what you just did.',
+    '  genuinely worth keeping forever, not routine narration of what you just did. If this project is',
+    '  part of a workspace with other projects in it, pass scope: "workspace" to either tool to manage',
+    '  the workspace-wide knowledge base instead — shared across every project in that workspace, not',
+    '  just this one; the default scope ("project") only ever affects this project.',
     '- log_lesson records an "if X then Y" behavioral lesson that applies across every project, not',
     '  just this one — for a mistake you want to avoid repeating anywhere, not a project-specific fact.',
     '- If PROJECT.md or SCRATCH.md exist in the project root, their contents are injected into your',
@@ -1113,6 +1147,16 @@ export class AgentSession {
   private modelOverride: string | null = null;
   /** This project's durable knowledge base — recreated by setRoot() when the workspace's folder changes. */
   private contextStore: ContextStore;
+  /**
+   * This session's PARENT workspace's own knowledge base/meta-file/sibling-
+   * project listing — undefined for a subagent whose parent didn't pass one
+   * through (should not normally happen; see runSubagent) or, in principle,
+   * for an AgentSession built outside the normal Project/WorkspaceManager
+   * path. When present, injected into every turn alongside the project-level
+   * context (see send()), and memory_topic/memory_record's optional `scope`
+   * argument routes to `contextStore` here instead of the project's own.
+   */
+  private workspaceContext?: WorkspaceContext;
   /** Lessons matched against the user's own message at the start of send(), injected once on the first turn. */
   private matchedLessons: Array<{ trigger: string; behavior: string }> = [];
   /** Real dollar cost incurred by THIS send() call alone (main-loop turns plus any compaction summaries it triggers) — reset at the top of every send(). */
@@ -1127,7 +1171,8 @@ export class AgentSession {
     cb: AgentCallbacks,
     rulesDir: string | null,
     isSubagent = false,
-    agentLabel?: string
+    agentLabel?: string,
+    workspaceContext?: WorkspaceContext
   ) {
     this.rootPath = rootPath;
     this.cb = cb;
@@ -1136,13 +1181,14 @@ export class AgentSession {
     this.agentLabel = agentLabel ?? (isSubagent ? 'Subagent' : 'Agent');
     this.tools = isSubagent ? SUBAGENT_TOOLS : TOOLS;
     this.rules = new RuleSet(rulesDir);
-    this.contextStore = new ContextStore(rootPath);
+    this.contextStore = new ContextStore({ kind: 'project', rootPath });
+    this.workspaceContext = workspaceContext;
     this.messages.push({ role: 'system', content: buildSystemPrompt(rootPath, this.rules.enabled, isSubagent) });
   }
 
   setRoot(rootPath: string) {
     this.rootPath = rootPath;
-    this.contextStore = new ContextStore(rootPath);
+    this.contextStore = new ContextStore({ kind: 'project', rootPath });
     // Keep the prompt's stated root in step with the workspace it describes.
     if (this.messages[0]?.role === 'system') {
       this.messages[0] = {
@@ -1359,6 +1405,22 @@ export class AgentSession {
   }
 
   /**
+   * Resolves memory_topic/memory_record's optional `scope` argument
+   * ('project', the default, or 'workspace') to the actual ContextStore to
+   * act on. Falls back to the project's own store — with a distinct label so
+   * the model isn't told it wrote to a workspace store that doesn't actually
+   * exist for this session — if 'workspace' is requested but this session
+   * has no workspaceContext (e.g. an older subagent path, or a session not
+   * nested in any workspace).
+   */
+  private resolveMemoryScope(args: Record<string, unknown>): { store: ContextStore; label: string } {
+    if (args.scope === 'workspace' && this.workspaceContext) {
+      return { store: this.workspaceContext.contextStore, label: 'workspace' };
+    }
+    return { store: this.contextStore, label: 'project' };
+  }
+
+  /**
    * Lyria (and OpenRouter's other audio-output models) reject a plain
    * non-streaming chat/completions call for audio output ("Audio output
    * requires stream: true") — the audio comes back as base64 chunks spread
@@ -1540,7 +1602,8 @@ export class AgentSession {
       },
       this.rulesDir,
       true,
-      `Subagent: ${label}`
+      `Subagent: ${label}`,
+      this.workspaceContext
     );
     if (model) sub.setModelOverride(model);
 
@@ -1751,28 +1814,29 @@ export class AgentSession {
     if (name === 'memory_topic') {
       const action = String(args.action ?? '');
       const actId = nextId('act');
+      const { store, label: scopeLabel } = this.resolveMemoryScope(args);
 
       if (action === 'create') {
         const topicName = String(args.name ?? '').trim();
         if (!topicName) return 'ERROR: memory_topic create requires a "name".';
-        const topic = await this.contextStore.createTopic(topicName, String(args.description ?? '').trim());
-        this.trackActivity({ id: actId, kind: 'thinking', detail: `Memory: created topic "${topic.name}"`, status: 'done' });
+        const topic = await store.createTopic(topicName, String(args.description ?? '').trim());
+        this.trackActivity({ id: actId, kind: 'thinking', detail: `Memory: created ${scopeLabel} topic "${topic.name}"`, status: 'done' });
         return `Topic created: id=${topic.id}, name="${topic.name}".`;
       }
       if (action === 'list') {
-        const topics = await this.contextStore.listTopics();
-        this.trackActivity({ id: actId, kind: 'thinking', detail: 'Memory: listed topics', status: 'done' });
-        if (!topics.length) return 'No topics exist yet in this project\'s knowledge base.';
+        const topics = await store.listTopics();
+        this.trackActivity({ id: actId, kind: 'thinking', detail: `Memory: listed ${scopeLabel} topics`, status: 'done' });
+        if (!topics.length) return `No topics exist yet in this ${scopeLabel}'s knowledge base.`;
         return untrusted(topics.map((t) => `${t.id}: ${t.name} — ${t.description || '(no description)'}`).join('\n'));
       }
       if (action === 'delete') {
         const topicId = String(args.topic_id ?? '').trim();
         if (!topicId) return 'ERROR: memory_topic delete requires a "topic_id".';
-        const ok = await this.contextStore.deleteTopic(topicId);
+        const ok = await store.deleteTopic(topicId);
         this.trackActivity({
           id: actId,
           kind: 'thinking',
-          detail: `Memory: ${ok ? 'deleted' : 'tried to delete (not found)'} topic ${topicId}`,
+          detail: `Memory: ${ok ? 'deleted' : 'tried to delete (not found)'} ${scopeLabel} topic ${topicId}`,
           status: ok ? 'done' : 'error',
         });
         return ok ? `Topic ${topicId} and its records deleted.` : `ERROR: no topic with id "${topicId}".`;
@@ -1783,6 +1847,7 @@ export class AgentSession {
     if (name === 'memory_record') {
       const action = String(args.action ?? '');
       const actId = nextId('act');
+      const { store, label: scopeLabel } = this.resolveMemoryScope(args);
 
       if (action === 'add') {
         const kind = String(args.kind ?? '') as RecordKind;
@@ -1792,7 +1857,7 @@ export class AgentSession {
         const title = String(args.title ?? '').trim();
         const content = String(args.content ?? '').trim();
         if (!title || !content) return 'ERROR: memory_record add requires both "title" and "content".';
-        const result = await this.contextStore.addRecord({
+        const result = await store.addRecord({
           topicId: String(args.topic_id ?? '').trim(),
           kind,
           title,
@@ -1803,13 +1868,13 @@ export class AgentSession {
           supersedes: typeof args.supersedes === 'string' ? args.supersedes : undefined,
         });
         if ('error' in result) return `ERROR: ${result.error}`;
-        this.trackActivity({ id: actId, kind: 'thinking', detail: `Memory: added record "${result.title}"`, status: 'done' });
+        this.trackActivity({ id: actId, kind: 'thinking', detail: `Memory: added ${scopeLabel} record "${result.title}"`, status: 'done' });
         return `Record added: id=${result.id}.`;
       }
       if (action === 'update') {
         const recordId = String(args.record_id ?? '').trim();
         if (!recordId) return 'ERROR: memory_record update requires a "record_id".';
-        const result = await this.contextStore.updateRecord(recordId, {
+        const result = await store.updateRecord(recordId, {
           title: typeof args.title === 'string' ? args.title : undefined,
           content: typeof args.content === 'string' ? args.content : undefined,
           tags: Array.isArray(args.tags) ? args.tags.map(String) : undefined,
@@ -1817,25 +1882,25 @@ export class AgentSession {
           mandatory: typeof args.mandatory === 'boolean' ? args.mandatory : undefined,
         });
         if ('error' in result) return `ERROR: ${result.error}`;
-        this.trackActivity({ id: actId, kind: 'thinking', detail: `Memory: updated record "${result.title}"`, status: 'done' });
+        this.trackActivity({ id: actId, kind: 'thinking', detail: `Memory: updated ${scopeLabel} record "${result.title}"`, status: 'done' });
         return `Record ${recordId} updated.`;
       }
       if (action === 'delete') {
         const recordId = String(args.record_id ?? '').trim();
         if (!recordId) return 'ERROR: memory_record delete requires a "record_id".';
-        const ok = await this.contextStore.deleteRecord(recordId);
+        const ok = await store.deleteRecord(recordId);
         this.trackActivity({
           id: actId,
           kind: 'thinking',
-          detail: `Memory: ${ok ? 'deleted' : 'tried to delete (not found)'} record ${recordId}`,
+          detail: `Memory: ${ok ? 'deleted' : 'tried to delete (not found)'} ${scopeLabel} record ${recordId}`,
           status: ok ? 'done' : 'error',
         });
         return ok ? `Record ${recordId} deleted.` : `ERROR: no record with id "${recordId}".`;
       }
       if (action === 'search') {
         const query = String(args.query ?? '').trim();
-        const results = await this.contextStore.search(query, typeof args.topic_id === 'string' ? args.topic_id : undefined);
-        this.trackActivity({ id: actId, kind: 'thinking', detail: `Memory: searched "${query}"`, status: 'done' });
+        const results = await store.search(query, typeof args.topic_id === 'string' ? args.topic_id : undefined);
+        this.trackActivity({ id: actId, kind: 'thinking', detail: `Memory: searched ${scopeLabel} "${query}"`, status: 'done' });
         if (!results.length) return `No matching records for "${query}".`;
         return untrusted(
           results.map((r) => `${r.id} [${r.kind}, priority ${r.priority}${r.mandatory ? ', mandatory' : ''}] ${r.title}: ${r.content}`).join('\n')
@@ -2731,6 +2796,39 @@ export class AgentSession {
             kind: 'thinking',
             detail: `Loaded ${contextPackage.included} knowledge-base record${contextPackage.included === 1 ? '' : 's'}${contextPackage.omitted ? ` (${contextPackage.omitted} omitted, over budget)` : ''}`,
             status: 'done',
+          });
+        }
+      }
+
+      // This session's PARENT workspace's own notes/knowledge base/sibling
+      // projects — read fresh every turn for the same reason as the
+      // project-level equivalents above. Absent entirely for an AgentSession
+      // with no workspaceContext (should not normally happen; see the
+      // WorkspaceContext doc comment).
+      if (this.workspaceContext) {
+        const metaFile = this.workspaceContext.getMetaFile().trim();
+        if (metaFile) {
+          wireMessages.push({
+            role: 'system',
+            content: `Workspace notes (shared across every project in this workspace, not just this one):\n${metaFile}`,
+          });
+        }
+
+        const wsContextPackage = await this.workspaceContext.contextStore.resolveForPrompt(CONTEXT_CHAR_BUDGET);
+        if (wsContextPackage.text) {
+          wireMessages.push({
+            role: 'system',
+            content:
+              `Workspace knowledge base (${wsContextPackage.included} of ${wsContextPackage.included + wsContextPackage.omitted} records — ` +
+              `shared across every project in this workspace; pass scope: "workspace" to memory_record/memory_topic to manage it):\n${wsContextPackage.text}`,
+          });
+        }
+
+        const siblings = this.workspaceContext.listSiblingProjects().trim();
+        if (siblings) {
+          wireMessages.push({
+            role: 'system',
+            content: `Other projects in this same workspace (you are not working in these — for awareness only):\n${siblings}`,
           });
         }
       }

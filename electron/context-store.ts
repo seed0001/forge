@@ -53,19 +53,34 @@ function empty(): ContextStoreData {
   return { topics: [], records: [], relationships: [] };
 }
 
-function fileForRoot(rootPath: string): string {
-  return path.join(app.getPath('userData'), 'context', `${hashRoot(rootPath)}.json`);
+/**
+ * A ContextStore is keyed either by a project's root folder (hashed, as
+ * before) or by a workspace's own id (workspaces have no folder to hash).
+ * The two live under distinct sub-namespaces on disk so a project id and a
+ * workspace id can never collide even if their raw strings happened to match.
+ */
+export type ContextScope = { kind: 'project'; rootPath: string } | { kind: 'workspace'; id: string };
+
+function cacheKeyFor(scope: ContextScope): string {
+  return scope.kind === 'project' ? `project:${hashRoot(scope.rootPath)}` : `workspace:${scope.id}`;
 }
 
-/** Keyed by resolved root path, so every ContextStore instance for the same project (primary session, its subagents) shares one in-memory copy. */
+function fileForScope(scope: ContextScope): string {
+  const sub =
+    scope.kind === 'project' ? path.join('project', `${hashRoot(scope.rootPath)}.json`) : path.join('workspace', `${scope.id}.json`);
+  return path.join(app.getPath('userData'), 'context', sub);
+}
+
+/** Keyed by cacheKeyFor(scope), so every ContextStore instance for the same project/workspace (primary session, its subagents) shares one in-memory copy. */
 const cache = new Map<string, ContextStoreData>();
 
-async function load(rootPath: string): Promise<ContextStoreData> {
-  const cached = cache.get(rootPath);
+async function load(scope: ContextScope): Promise<ContextStoreData> {
+  const key = cacheKeyFor(scope);
+  const cached = cache.get(key);
   if (cached) return cached;
   let data: ContextStoreData;
   try {
-    const raw = await fs.readFile(fileForRoot(rootPath), 'utf8');
+    const raw = await fs.readFile(fileForScope(scope), 'utf8');
     const parsed = JSON.parse(raw) as Partial<ContextStoreData>;
     data = {
       topics: Array.isArray(parsed.topics) ? parsed.topics : [],
@@ -75,14 +90,14 @@ async function load(rootPath: string): Promise<ContextStoreData> {
   } catch {
     data = empty();
   }
-  cache.set(rootPath, data);
+  cache.set(key, data);
   return data;
 }
 
-async function persist(rootPath: string, data: ContextStoreData): Promise<void> {
-  cache.set(rootPath, data);
+async function persist(scope: ContextScope, data: ContextStoreData): Promise<void> {
+  cache.set(cacheKeyFor(scope), data);
   try {
-    const file = fileForRoot(rootPath);
+    const file = fileForScope(scope);
     await fs.mkdir(path.dirname(file), { recursive: true });
     await fs.writeFile(file, JSON.stringify(data, null, 2), 'utf8');
   } catch {
@@ -102,30 +117,30 @@ function liveRecords(data: ContextStoreData): ContextRecord[] {
 }
 
 export class ContextStore {
-  constructor(private rootPath: string) {}
+  constructor(private scope: ContextScope) {}
 
   async listTopics(): Promise<ContextTopic[]> {
-    return (await load(this.rootPath)).topics;
+    return (await load(this.scope)).topics;
   }
 
   async createTopic(name: string, description: string): Promise<ContextTopic> {
-    const data = await load(this.rootPath);
+    const data = await load(this.scope);
     const existing = data.topics.find((t) => t.name.toLowerCase() === name.toLowerCase());
     if (existing) return existing;
     const topic: ContextTopic = { id: nextId('topic'), name, description, createdAt: Date.now() };
     data.topics.push(topic);
-    await persist(this.rootPath, data);
+    await persist(this.scope, data);
     return topic;
   }
 
   async deleteTopic(topicId: string): Promise<boolean> {
-    const data = await load(this.rootPath);
+    const data = await load(this.scope);
     const before = data.topics.length;
     data.topics = data.topics.filter((t) => t.id !== topicId);
     data.records = data.records.filter((r) => r.topicId !== topicId);
     const remainingIds = new Set(data.records.map((r) => r.id));
     data.relationships = data.relationships.filter((rel) => remainingIds.has(rel.fromId) && remainingIds.has(rel.toId));
-    await persist(this.rootPath, data);
+    await persist(this.scope, data);
     return data.topics.length < before;
   }
 
@@ -139,7 +154,7 @@ export class ContextStore {
     mandatory?: boolean;
     supersedes?: string;
   }): Promise<ContextRecord | { error: string }> {
-    const data = await load(this.rootPath);
+    const data = await load(this.scope);
     if (!data.topics.some((t) => t.id === input.topicId)) {
       return { error: `No topic with id "${input.topicId}". Create one first with memory_topic.` };
     }
@@ -161,7 +176,7 @@ export class ContextStore {
       updatedAt: now,
     };
     data.records.push(record);
-    await persist(this.rootPath, data);
+    await persist(this.scope, data);
     return record;
   }
 
@@ -169,7 +184,7 @@ export class ContextStore {
     id: string,
     patch: Partial<Pick<ContextRecord, 'title' | 'content' | 'tags' | 'priority' | 'mandatory'>>
   ): Promise<ContextRecord | { error: string }> {
-    const data = await load(this.rootPath);
+    const data = await load(this.scope);
     const record = data.records.find((r) => r.id === id);
     if (!record) return { error: `No record with id "${id}".` };
     if (patch.title !== undefined) record.title = patch.title;
@@ -178,22 +193,22 @@ export class ContextStore {
     if (patch.priority !== undefined) record.priority = Math.min(10, Math.max(0, patch.priority));
     if (patch.mandatory !== undefined) record.mandatory = patch.mandatory;
     record.updatedAt = Date.now();
-    await persist(this.rootPath, data);
+    await persist(this.scope, data);
     return record;
   }
 
   async deleteRecord(id: string): Promise<boolean> {
-    const data = await load(this.rootPath);
+    const data = await load(this.scope);
     const before = data.records.length;
     data.records = data.records.filter((r) => r.id !== id);
     data.relationships = data.relationships.filter((rel) => rel.fromId !== id && rel.toId !== id);
-    await persist(this.rootPath, data);
+    await persist(this.scope, data);
     return data.records.length < before;
   }
 
   /** Free-text search across title/content/tags. Superseded records never surface — only the latest version of a fact should. */
   async search(query: string, topicId?: string): Promise<ContextRecord[]> {
-    const data = await load(this.rootPath);
+    const data = await load(this.scope);
     const q = query.trim().toLowerCase();
     return liveRecords(data)
       .filter((r) => !topicId || r.topicId === topicId)
@@ -216,7 +231,7 @@ export class ContextStore {
    * is deliberately cheap: an in-memory read, no disk I/O once cached.
    */
   async resolveForPrompt(charBudget: number): Promise<{ text: string | null; included: number; omitted: number }> {
-    const data = await load(this.rootPath);
+    const data = await load(this.scope);
     const live = liveRecords(data);
     const mandatory = live.filter((r) => r.mandatory);
     const optional = live.filter((r) => !r.mandatory).sort((a, b) => b.priority - a.priority);

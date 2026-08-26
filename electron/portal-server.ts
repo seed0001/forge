@@ -1,7 +1,7 @@
 import http from 'node:http';
 import path from 'node:path';
 import { WebSocketServer, type WebSocket } from 'ws';
-import type { Workspace } from './workspace';
+import type { Project } from './project';
 import type { ChatMessage } from './ipc-channels';
 import { readFileBinaryDetailed } from './fs-service';
 
@@ -26,11 +26,11 @@ export interface PortalHandle {
   close: () => void;
 }
 
-export function startPortalServer(getWorkspace: () => Workspace | null, port: number): PortalHandle {
+export function startPortalServer(getProject: () => Project | null, port: number): PortalHandle {
   const clients = new Set<WebSocket>();
 
   const server = http.createServer((req, res) => {
-    void handleRequest(req, res, getWorkspace).catch((err) => {
+    void handleRequest(req, res, getProject).catch((err) => {
       console.error('[portal] request failed:', err);
       if (!res.headersSent) res.writeHead(500);
       res.end('Internal error');
@@ -51,7 +51,7 @@ export function startPortalServer(getWorkspace: () => Workspace | null, port: nu
         return;
       }
       if (data?.type === 'text' && typeof data.text === 'string' && data.text.trim()) {
-        void getWorkspace()?.sendToAgent(data.text.trim(), undefined, 'portal');
+        void getProject()?.sendToAgent(data.text.trim(), undefined, 'portal');
       }
     });
   });
@@ -74,7 +74,7 @@ export function startPortalServer(getWorkspace: () => Workspace | null, port: nu
 async function handleRequest(
   req: http.IncomingMessage,
   res: http.ServerResponse,
-  getWorkspace: () => Workspace | null
+  getProject: () => Project | null
 ) {
   const url = req.url ?? '/';
 
@@ -85,14 +85,14 @@ async function handleRequest(
   }
 
   if (req.method === 'GET' && url === '/api/history') {
-    const ws = getWorkspace();
+    const ws = getProject();
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify(ws?.chat ?? []));
     return;
   }
 
   if (req.method === 'GET' && url.startsWith('/api/media')) {
-    const ws = getWorkspace();
+    const ws = getProject();
     const rootPath = ws?.rootPath;
     const reqUrl = new URL(url, 'http://localhost');
     const rawPath = reqUrl.searchParams.get('path');

@@ -8,7 +8,7 @@ import type {
   Checkpoint,
   ChatMessage,
   ChatImage,
-  WorkspaceSummary,
+  ProjectSummary,
   SessionSummary,
   Autonomy,
   CommandApproval,
@@ -66,7 +66,7 @@ export type CenterView = 'chat' | 'editor' | 'terminal' | 'roadmap' | 'scheduler
 export type SidebarView = 'sessions' | 'files';
 
 export interface WorkspaceView {
-  summary: WorkspaceSummary;
+  summary: ProjectSummary;
   center: CenterView;
   sidebar: SidebarView;
   sessions: SessionSummary[];
@@ -232,7 +232,7 @@ interface ForgeState {
   setClipsFolder: () => Promise<boolean>;
 }
 
-function emptyView(summary: WorkspaceSummary): WorkspaceView {
+function emptyView(summary: ProjectSummary): WorkspaceView {
   return {
     summary,
     center: 'chat',

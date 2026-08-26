@@ -6,8 +6,10 @@ import type {
   Checkpoint,
   ChatMessage,
   ChatImage,
+  ProjectSummary,
+  ProjectHydration,
   WorkspaceSummary,
-  WorkspaceHydration,
+  WorkspaceType,
   SessionSummary,
   Autonomy,
   CommandApproval,
@@ -35,18 +37,35 @@ type Unsubscribe = () => void;
 
 export interface ForgeApi {
   workspaces: {
-    list: () => Promise<WorkspaceSummary[]>;
-    create: () => Promise<WorkspaceSummary>;
-    close: (id: string) => Promise<WorkspaceSummary[]>;
-    setRoot: (id: string) => Promise<WorkspaceSummary | null>;
-    hydrate: (id: string) => Promise<WorkspaceHydration | null>;
-    markSeen: (id: string) => Promise<WorkspaceSummary | null>;
-    setAutonomy: (id: string, level: Autonomy) => Promise<WorkspaceSummary | null>;
-    setKind: (id: string, kind: WorkspaceKind) => Promise<WorkspaceSummary | null>;
-    setClipsFolder: (id: string) => Promise<WorkspaceSummary | null>;
+    // Renderer-facing "workspace" = one tab = one Project, exactly as before
+    // the workspace/project split — `id` here is a PROJECT id. See
+    // ipc-channels.ts's ProjectSummary/WorkspaceSummary doc comments.
+    list: () => Promise<ProjectSummary[]>;
+    create: (type?: WorkspaceType) => Promise<ProjectSummary>;
+    close: (id: string) => Promise<ProjectSummary[]>;
+    setRoot: (id: string) => Promise<ProjectSummary | null>;
+    hydrate: (id: string) => Promise<ProjectHydration | null>;
+    markSeen: (id: string) => Promise<ProjectSummary | null>;
+    setAutonomy: (id: string, level: Autonomy) => Promise<ProjectSummary | null>;
+    setKind: (id: string, kind: WorkspaceKind) => Promise<ProjectSummary | null>;
+    setClipsFolder: (id: string) => Promise<ProjectSummary | null>;
     setActive: (id: string) => Promise<boolean>;
     getInitialActive: () => Promise<string | null>;
-    onUpdated: (cb: (summary: WorkspaceSummary) => void) => Unsubscribe;
+    onUpdated: (cb: (summary: ProjectSummary) => void) => Unsubscribe;
+  };
+  /**
+   * The real, new top-level Workspace surface — a renameable, typed group of
+   * Projects. Not yet used by any UI control (the sidebar tree / splash /
+   * type-picker are a later phase), but fully implemented over IPC.
+   */
+  workspaceTree: {
+    list: () => Promise<WorkspaceSummary[]>;
+    rename: (workspaceId: string, label: string) => Promise<WorkspaceSummary | null>;
+    setMeta: (workspaceId: string, text: string) => Promise<WorkspaceSummary | null>;
+    addProject: (workspaceId: string) => Promise<WorkspaceSummary | null>;
+    listProjects: (workspaceId: string) => Promise<ProjectSummary[]>;
+    removeProject: (workspaceId: string, projectId: string) => Promise<WorkspaceSummary | null>;
+    setActiveProject: (workspaceId: string, projectId: string) => Promise<boolean>;
   };
   sessions: {
     list: (id: string) => Promise<SessionSummary[]>;
@@ -57,7 +76,7 @@ export interface ForgeApi {
     ) => Promise<{
       chat: ChatMessage[];
       activity: ActivityEvent[];
-      summary: WorkspaceSummary;
+      summary: ProjectSummary;
       roadmap: RoadmapItem[];
     } | null>;
     remove: (id: string, sessionId: string) => Promise<SessionSummary[]>;

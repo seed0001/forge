@@ -1,38 +1,67 @@
 /**
- * Remembers which workspace tabs were open across app restarts — which root
- * folders (or blanks), in what order, with what kind, and which one was
- * active — so relaunching Forge reopens the same tab strip instead of
- * always starting with one fresh workspace. Per-workspace chat itself is
- * already persisted separately (session-store.ts, keyed by root folder);
- * this is just the index of which of those to reopen.
+ * Remembers which workspaces (and which projects inside each) were open
+ * across app restarts — labels, types, meta-file text, which root folders
+ * (or blanks) with what kind, in what order, and which project/workspace was
+ * active — so relaunching Forge reopens the same tab strip instead of always
+ * starting with one fresh workspace. Per-project chat itself is already
+ * persisted separately (session-store.ts, keyed by root folder); this is
+ * just the index of which of those to reopen and how they're grouped.
+ *
+ * Ids are NOT persisted here (same as before the workspace/project split —
+ * they were never stable across restarts either): WorkspaceManager mints
+ * fresh workspace and project ids on every launch, restored into this same
+ * shape (label/type/metaFile/projects/activeProjectIndex).
  */
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { app } from 'electron';
-import type { WorkspaceKind } from './ipc-channels';
+import type { WorkspaceKind, WorkspaceType } from './ipc-channels';
 
-export interface WorkspaceIndexEntry {
+export interface WorkspaceIndexProjectEntry {
   rootPath: string | null;
   kind: WorkspaceKind | null;
 }
 
+export interface WorkspaceIndexEntry {
+  label: string;
+  type: WorkspaceType;
+  metaFile: string;
+  projects: WorkspaceIndexProjectEntry[];
+  activeProjectIndex: number;
+}
+
 export interface WorkspaceIndex {
-  entries: WorkspaceIndexEntry[];
-  activeIndex: number;
+  workspaces: WorkspaceIndexEntry[];
+  activeWorkspaceIndex: number;
 }
 
 function indexFile(): string {
   return path.join(app.getPath('userData'), 'workspaces.json');
 }
 
+function isProjectEntry(v: unknown): v is WorkspaceIndexProjectEntry {
+  return !!v && typeof v === 'object';
+}
+
 export async function loadWorkspaceIndex(): Promise<WorkspaceIndex> {
   try {
     const raw = await fs.readFile(indexFile(), 'utf8');
     const parsed = JSON.parse(raw) as Partial<WorkspaceIndex>;
-    const entries = Array.isArray(parsed.entries) ? parsed.entries : [];
-    return { entries, activeIndex: typeof parsed.activeIndex === 'number' ? parsed.activeIndex : 0 };
+    const workspaces = Array.isArray(parsed.workspaces)
+      ? parsed.workspaces.map((w) => ({
+          label: typeof w.label === 'string' ? w.label : 'Workspace',
+          type: (w.type as WorkspaceType) ?? 'coding',
+          metaFile: typeof w.metaFile === 'string' ? w.metaFile : '',
+          projects: Array.isArray(w.projects) ? w.projects.filter(isProjectEntry) : [],
+          activeProjectIndex: typeof w.activeProjectIndex === 'number' ? w.activeProjectIndex : 0,
+        }))
+      : [];
+    return {
+      workspaces,
+      activeWorkspaceIndex: typeof parsed.activeWorkspaceIndex === 'number' ? parsed.activeWorkspaceIndex : 0,
+    };
   } catch {
-    return { entries: [], activeIndex: 0 };
+    return { workspaces: [], activeWorkspaceIndex: 0 };
   }
 }
 

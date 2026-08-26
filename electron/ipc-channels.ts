@@ -8,6 +8,21 @@ export const IPC = {
   wsSetAutonomy: 'workspace:set-autonomy',
   wsUpdated: 'workspace:updated',
 
+  // Real Workspace-level (the new top-level container) CRUD — not yet wired
+  // into any UI control (the sidebar tree / splash / type picker are a later
+  // phase), but fully implemented and callable over IPC. The channels above
+  // (wsList/wsCreate/wsClose/wsSetRoot/wsHydrate/wsMarkSeen/wsSetAutonomy/
+  // wsSetKind/wsSetClipsFolder/wsSetActive/wsGetInitialActive) keep their
+  // existing renderer-facing meaning: one tab per Project, each Workspace
+  // auto-created with exactly one Project under it for now.
+  wsTreeList: 'workspace:tree-list',
+  wsRename: 'workspace:rename',
+  wsSetMeta: 'workspace:set-meta',
+  projectAdd: 'project:add',
+  projectList: 'project:list',
+  projectRemove: 'project:remove',
+  projectSetActive: 'project:set-active',
+
   sessList: 'session:list',
   sessNew: 'session:new',
   sessSelect: 'session:select',
@@ -111,10 +126,26 @@ export const IPC = {
   focusQuestionAnswer: 'focus:question-answer',
 } as const;
 
-export type WorkspaceStatus = 'idle' | 'running' | 'review';
+export type ProjectStatus = 'idle' | 'running' | 'review';
 
 /** null means "not chosen yet" — drives the Coding/Browsing chooser screen. */
 export type WorkspaceKind = 'coding' | 'browsing';
+
+/**
+ * A Workspace's type — required at creation, not changeable after (a fine
+ * simplification for now). Orthogonal to a Project's `kind` above: `kind`
+ * still drives the existing Coding/Browsing chooser at the PROJECT level;
+ * `type` is a broader label on the WORKSPACE (the new top-level container)
+ * that a later UI phase will use to pick which sidebar/tools a workspace shows.
+ */
+export type WorkspaceType = 'coding' | 'research' | 'music' | 'movie';
+
+export const WORKSPACE_TYPES: { id: WorkspaceType; label: string }[] = [
+  { id: 'coding', label: 'Coding' },
+  { id: 'research', label: 'Research' },
+  { id: 'music', label: 'Music' },
+  { id: 'movie', label: 'Movie' },
+];
 
 /** Live navigation state of a Browsing workspace's embedded browser. */
 export interface BrowserNavState {
@@ -158,27 +189,53 @@ export const DEFAULT_PERMISSION_OVERRIDES: PermissionOverrides = {
   webfetch: null,
 };
 
-export interface WorkspaceSummary {
+/**
+ * A Project — one folder/rootPath, owning its own sessions/terminal/diffs/
+ * context knowledge-base/scheduler/focus-agents. This is what the renderer
+ * has always called a "workspace" (one tab in the TabStrip); the name
+ * changed when a new, higher-level Workspace (see WorkspaceSummary below)
+ * was inserted above it, but the shape and behavior here are unchanged.
+ */
+export interface ProjectSummary {
   id: string;
   name: string;
   rootPath: string | null;
-  status: WorkspaceStatus;
+  status: ProjectStatus;
   pendingDiffCount: number;
-  /** True when the agent finished while the user was on another workspace. */
+  /** True when the agent finished while the user was on another project. */
   unseenCompletion: boolean;
   activeSessionId: string | null;
   autonomy: Autonomy;
-  /** Every session in this workspace whose agent is currently working — each session runs independently, so more than one can be live at once. */
+  /** Every session in this project whose agent is currently working — each session runs independently, so more than one can be live at once. */
   runningSessionIds: string[];
   /** null until the Operator picks Coding or Browsing from the chooser screen. */
   kind: WorkspaceKind | null;
-  /** Where a Browsing workspace saves markdown clips — separate from rootPath, set the first time "Save as Markdown" is used, never touches sessions/chat. */
+  /** Where a Browsing project saves markdown clips — separate from rootPath, set the first time "Save as Markdown" is used, never touches sessions/chat. */
   clipsFolder: string | null;
 }
 
 /**
+ * A Workspace — the new top-level container above Project: a renameable,
+ * typed group of Projects (plus a workspace-wide meta text and knowledge
+ * base — see electron/workspace.ts). The renderer's TabStrip today still
+ * shows one tab per Project (see ProjectSummary) rather than per Workspace;
+ * this shape backs the newer workspace-level IPC surface (electron/
+ * workspace-manager.ts's WorkspaceManager) that a later UI phase will
+ * surface as a real sidebar tree.
+ */
+export interface WorkspaceSummary {
+  id: string;
+  label: string;
+  type: WorkspaceType;
+  /** Free-text workspace-wide notes, injected into every project's agent turns — see electron/workspace.ts. */
+  metaFile: string;
+  activeProjectId: string | null;
+  projects: ProjectSummary[];
+}
+
+/**
  * A bash or webfetch-category action waiting on the Operator's yes/no/always
- * because its category resolved to 'ask' (see workspace.ts's resolvePermission).
+ * because its category resolved to 'ask' (see project.ts's resolvePermission).
  * `command` doubles as a plain description for a non-shell action (e.g. a
  * web_search query) when category is 'webfetch' — the renderer titles the
  * card differently per category, but the shape is the same either way.
@@ -511,9 +568,9 @@ export const SECRET_SENTINEL = '••••••••';
 export const MAX_TOOL_CALLS_DEFAULT = 24;
 export const MAX_TOOL_CALLS_LIMIT = 1000;
 
-/** Everything the renderer needs to display a workspace it has switched to. */
-export interface WorkspaceHydration {
-  summary: WorkspaceSummary;
+/** Everything the renderer needs to display a project (tab) it has switched to. */
+export interface ProjectHydration {
+  summary: ProjectSummary;
   sessions: SessionSummary[];
   tree: FileNode[];
   chat: ChatMessage[];

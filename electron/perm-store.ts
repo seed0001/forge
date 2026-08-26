@@ -73,7 +73,7 @@ export function savePermissionOverrides(overrides: PermissionOverrides): void {
 /**
  * Returns the in-memory cache if it has been seeded, otherwise falls through
  * to loadPermissionOverrides. This is the hot-path accessor used by
- * workspace.ts's resolvePermission — never reads the file after the first call.
+ * project.ts's resolvePermission — never reads the file after the first call.
  */
 export function getCachedPermissionOverrides(): PermissionOverrides {
   return ensureLoaded().overrides;

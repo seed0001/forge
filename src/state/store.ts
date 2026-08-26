@@ -325,7 +325,11 @@ export const useForge = create<ForgeState>((set, get) => {
         void forge.portal.getStatus().then((status) => set({ portalStatus: status }));
       }
 
-      const list = await forge.workspaces.list();
+      // getInitialActive reports which tab was focused before the app last
+      // closed (see electron/workspace-index-store.ts) — only meaningful on
+      // this very first load, when activeId isn't set yet; a later re-run of
+      // init() already has a real activeId and this fallback is simply unused.
+      const [list, initialActive] = await Promise.all([forge.workspaces.list(), forge.workspaces.getInitialActive()]);
       set((s) => {
         const workspaces: Record<string, WorkspaceView> = {};
         for (const summary of list) {
@@ -334,10 +338,11 @@ export const useForge = create<ForgeState>((set, get) => {
           const existing = s.workspaces[summary.id];
           workspaces[summary.id] = existing ? { ...existing, summary } : emptyView(summary);
         }
+        const fallback = (initialActive && workspaces[initialActive] ? initialActive : list[0]?.id) ?? null;
         return {
           workspaces,
           order: list.map((w) => w.id),
-          activeId: s.activeId && workspaces[s.activeId] ? s.activeId : list[0]?.id ?? null,
+          activeId: s.activeId && workspaces[s.activeId] ? s.activeId : fallback,
         };
       });
 
@@ -486,6 +491,7 @@ export const useForge = create<ForgeState>((set, get) => {
         order: [...s.order, summary.id],
         activeId: summary.id,
       }));
+      void forge.workspaces.setActive(summary.id);
     },
 
     closeWorkspace: async (id) => {
@@ -503,6 +509,7 @@ export const useForge = create<ForgeState>((set, get) => {
 
     selectWorkspace: async (id) => {
       set({ activeId: id });
+      void forge.workspaces.setActive(id);
       const view = get().workspaces[id];
       if (!view) return;
 

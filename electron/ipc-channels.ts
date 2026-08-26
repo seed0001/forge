@@ -41,6 +41,8 @@ export const IPC = {
 
   wsSetKind: 'workspace:set-kind',
   wsSetClipsFolder: 'workspace:set-clips-folder',
+  wsSetActive: 'workspace:set-active',
+  wsGetInitialActive: 'workspace:get-initial-active',
 
   browserNavigate: 'browser:navigate',
   browserBack: 'browser:back',

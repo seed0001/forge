@@ -29,6 +29,8 @@ contextBridge.exposeInMainWorld('forge', {
       ipcRenderer.invoke(IPC.wsSetAutonomy, id, level),
     setKind: (id: string, kind: WorkspaceKind) => ipcRenderer.invoke(IPC.wsSetKind, id, kind),
     setClipsFolder: (id: string) => ipcRenderer.invoke(IPC.wsSetClipsFolder, id),
+    setActive: (id: string) => ipcRenderer.invoke(IPC.wsSetActive, id),
+    getInitialActive: () => ipcRenderer.invoke(IPC.wsGetInitialActive),
     onUpdated: (cb: (summary: unknown) => void) => on(IPC.wsUpdated, cb),
   },
   sessions: {

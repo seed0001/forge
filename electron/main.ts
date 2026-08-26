@@ -5,6 +5,7 @@ import { fileURLToPath } from 'node:url';
 import { spawn } from 'node:child_process';
 
 import { loadEnv, setEnvValue } from './env';
+import { loadWorkspaceIndex, saveWorkspaceIndex } from './workspace-index-store';
 import { transcribe } from './transcribe';
 import { synthesizeSpeech, listVoices as listTtsVoices } from './tts-service';
 import { startPortalServer, type PortalHandle } from './portal-server';
@@ -82,6 +83,8 @@ function send(channel: string, ...args: unknown[]) {
  */
 let portal: PortalHandle | null = null;
 let portalWorkspaceId: string | null = null;
+/** Which workspace tab was focused last — tracked so it can be persisted and restored across restarts, and reported to the renderer's first load via IPC.wsGetInitialActive. */
+let activeWorkspaceId: string | null = null;
 let portalTunnelProc: ReturnType<typeof spawn> | null = null;
 /** Current tunnel state — polled by the renderer's Portal control on mount via IPC.portalGetStatus, pushed live via IPC.portalStatus. Stays 'disabled' until the Operator explicitly enables it in Settings. */
 let portalStatus: import('./ipc-channels').PortalStatus = { state: 'disabled' };
@@ -97,6 +100,17 @@ function setPortalStatus(next: typeof portalStatus) {
 app.on('before-quit', () => {
   portalTunnelProc?.kill();
 });
+
+/** Writes the current tab order/roots/kinds and active tab to disk — called after any mutation that should be remembered for next launch. */
+async function persistWorkspaceIndex(): Promise<void> {
+  const list = manager.list();
+  const entries = list.map((w) => ({ rootPath: w.rootPath, kind: w.kind }));
+  const activeIndex = Math.max(
+    0,
+    list.findIndex((w) => w.id === activeWorkspaceId)
+  );
+  await saveWorkspaceIndex({ entries, activeIndex });
+}
 
 const manager = new WorkspaceManager({
   terminal: (workspaceId, evt) => send(IPC.termData, workspaceId, evt),
@@ -252,7 +266,7 @@ function createWindow() {
   loadContent(w);
 }
 
-app.whenReady().then(() => {
+app.whenReady().then(async () => {
   // Only what the app actually uses: the mic for voice input, and clipboard
   // writes for the "Copy" button on code blocks. Electron consults both the
   // async request handler and the sync check handler depending on the API and
@@ -263,31 +277,58 @@ app.whenReady().then(() => {
   });
   session.defaultSession.setPermissionCheckHandler((_wc, permission) => ALLOWED.has(permission));
 
-  // In dev, default to the project's own folder so there's something real on
-  // screen immediately. Packaged, that folder is inside the read-only asar and
-  // isn't a real project anyway — start with no root and let the user pick one.
-  const first = manager.create(app.isPackaged ? null : path.join(__dirname, '..'));
-  void first.restoreSessions();
+  // Reopen every workspace tab that was open last time, in the same order,
+  // pointed at the same folders (or blank), with the same Coding/Browsing
+  // kind so a reopened project skips straight back to its chat instead of
+  // landing on the chooser screen again. A fresh install (no index yet)
+  // falls back to today's default: in dev, the project's own folder so
+  // there's something real on screen immediately; packaged, that folder is
+  // inside the read-only asar and isn't a real project anyway, so start
+  // with one blank workspace and let the user pick one.
+  const index = await loadWorkspaceIndex();
+  const restoreEntries =
+    index.entries.length > 0
+      ? index.entries
+      : [{ rootPath: app.isPackaged ? null : path.join(__dirname, '..'), kind: null }];
+  const restored = restoreEntries.map((entry) => {
+    const ws = manager.create(entry.rootPath);
+    ws.kind = entry.kind;
+    void ws.restoreSessions();
+    return ws;
+  });
+
+  const activeIdx = Math.min(Math.max(index.activeIndex, 0), restored.length - 1);
+  activeWorkspaceId = restored[activeIdx]?.id ?? restored[0]?.id ?? null;
 
   // Remembers which workspace the portal would mirror once enabled — the
   // server and tunnel themselves only ever start in response to the
   // Operator's own click in Settings (see enablePortal), never here.
-  portalWorkspaceId = first.id;
+  portalWorkspaceId = activeWorkspaceId;
 
   createWindow();
   initUpdater((status) => send(IPC.updateStatus, status));
 
   ipcMain.handle(IPC.wsList, async () => manager.list().map((w) => w.summary()));
 
+  ipcMain.handle(IPC.wsGetInitialActive, async () => activeWorkspaceId);
+
+  ipcMain.handle(IPC.wsSetActive, async (_e, workspaceId: string) => {
+    activeWorkspaceId = workspaceId;
+    void persistWorkspaceIndex();
+    return true;
+  });
+
   ipcMain.handle(IPC.wsCreate, async () => {
     const ws = manager.create(null);
     ws.newSession();
+    void persistWorkspaceIndex();
     return ws.summary();
   });
 
   ipcMain.handle(IPC.wsClose, async (_e, workspaceId: string) => {
     browserViewManager.forgetWorkspace(workspaceId);
     manager.close(workspaceId);
+    void persistWorkspaceIndex();
     return manager.list().map((w) => w.summary());
   });
 
@@ -309,6 +350,7 @@ app.whenReady().then(() => {
     const ws = manager.get(workspaceId);
     if (!ws) return null;
     ws.setKind(kind);
+    void persistWorkspaceIndex();
     return ws.summary();
   });
 
@@ -339,6 +381,7 @@ app.whenReady().then(() => {
     await ws.setRoot(result.filePaths[0]);
     send(IPC.wsUpdated, ws.summary());
     send(IPC.sessUpdated, workspaceId, ws.listSessions());
+    void persistWorkspaceIndex();
     return ws.summary();
   });
 

@@ -44,6 +44,8 @@ export interface ForgeApi {
     setAutonomy: (id: string, level: Autonomy) => Promise<WorkspaceSummary | null>;
     setKind: (id: string, kind: WorkspaceKind) => Promise<WorkspaceSummary | null>;
     setClipsFolder: (id: string) => Promise<WorkspaceSummary | null>;
+    setActive: (id: string) => Promise<boolean>;
+    getInitialActive: () => Promise<string | null>;
     onUpdated: (cb: (summary: WorkspaceSummary) => void) => Unsubscribe;
   };
   sessions: {

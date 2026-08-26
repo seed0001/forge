@@ -78,6 +78,11 @@ export const IPC = {
 
   settingsGet: 'settings:get',
   settingsSet: 'settings:set',
+
+  permsGet: 'perms:get',
+  permsSet: 'perms:set',
+  permsGetAllowlist: 'perms:get-allowlist',
+  permsSetAllowlist: 'perms:set-allowlist',
 } as const;
 
 export type WorkspaceStatus = 'idle' | 'running' | 'review';
@@ -103,6 +108,30 @@ export interface BrowserNavState {
  */
 export type Autonomy = 'manual' | 'balanced' | 'auto';
 
+/** Which permission categories the agent's actions fall into. */
+export type PermissionCategory = 'bash' | 'edit' | 'webfetch';
+
+/**
+ * How a category is resolved for the current turn:
+ * - 'allow': the action proceeds without extra prompting (subject to other autonomy rules).
+ * - 'ask': the action is held for the Operator's explicit approval.
+ * - 'deny': the action is rejected with an error.
+ */
+export type PermissionLevel = 'allow' | 'ask' | 'deny';
+
+/**
+ * Permission overrides stored in forge-perms.json. A null value means "inherit
+ * from the autonomy level's default mapping" — see workspace.ts's
+ * resolvePermission for the exact fallback table.
+ */
+export type PermissionOverrides = Record<PermissionCategory, PermissionLevel | null>;
+
+export const DEFAULT_PERMISSION_OVERRIDES: PermissionOverrides = {
+  bash: null,
+  edit: null,
+  webfetch: null,
+};
+
 export interface WorkspaceSummary {
   id: string;
   name: string;
@@ -121,13 +150,23 @@ export interface WorkspaceSummary {
   clipsFolder: string | null;
 }
 
-/** A run_command call waiting on the Operator's yes/no at Manual autonomy. */
+/**
+ * A bash or webfetch-category action waiting on the Operator's yes/no/always
+ * because its category resolved to 'ask' (see workspace.ts's resolvePermission).
+ * `command` doubles as a plain description for a non-shell action (e.g. a
+ * web_search query) when category is 'webfetch' — the renderer titles the
+ * card differently per category, but the shape is the same either way.
+ */
 export interface CommandApproval {
   requestId: string;
   command: string;
+  category: PermissionCategory;
   /** Which session raised it — a background session's approval card should only surface while that session is the one being viewed. */
   sessionId: string;
 }
+
+/** What the Operator can choose on a CommandApproval card. 'always' also allows the rest of that category for the remainder of the session — see workspace.ts's SessionRuntime.alwaysAllowed. */
+export type ApprovalDecision = 'approved' | 'denied' | 'always';
 
 /**
  * A run_command call from a SUBAGENT waiting on the Operator, structurally

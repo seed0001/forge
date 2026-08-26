@@ -6,6 +6,7 @@ import { writeFile } from './fs-service';
 import { isAuditLogPath } from './audit-service';
 import { slugify, type ExtractedPage } from './page-extract';
 import { oneOffCompletion } from './chat-provider';
+import { getCachedPermissionOverrides, getCachedBashAllowlist } from './perm-store';
 import {
   loadSessions,
   saveSessions,
@@ -27,7 +28,34 @@ import type {
   RoadmapItem,
   RoadmapItemStatus,
   SubagentCommandApproval,
+  PermissionCategory,
+  PermissionLevel,
+  ApprovalDecision,
 } from './ipc-channels';
+
+/**
+ * Default resolution for each permission category at each autonomy level —
+ * chosen to match Forge's pre-existing Manual/Balanced/Auto behavior exactly
+ * when no override is set: Manual gates commands, Manual/Balanced hold edits
+ * for review, Auto writes edits straight through. webfetch was previously
+ * ungated at every level, so it defaults to 'allow' everywhere too — only an
+ * explicit override changes that.
+ */
+const AUTONOMY_PERMISSION_DEFAULTS: Record<PermissionCategory, Record<Autonomy, PermissionLevel>> = {
+  bash: { manual: 'ask', balanced: 'allow', auto: 'allow' },
+  edit: { manual: 'ask', balanced: 'ask', auto: 'allow' },
+  webfetch: { manual: 'allow', balanced: 'allow', auto: 'allow' },
+};
+
+/**
+ * How a category resolves for the current turn: an explicit Operator
+ * override (set in Settings) always wins; otherwise it falls back to the
+ * table above, keyed by the workspace's own autonomy level.
+ */
+export function resolvePermission(category: PermissionCategory, autonomy: Autonomy): PermissionLevel {
+  const override = getCachedPermissionOverrides()[category];
+  return override ?? AUTONOMY_PERMISSION_DEFAULTS[category][autonomy];
+}
 
 export interface WorkspaceEmit {
   terminal: (workspaceId: string, evt: TermDataEvent) => void;
@@ -39,8 +67,14 @@ export interface WorkspaceEmit {
   diffUpdated: (workspaceId: string, diff: PendingDiff) => void;
   /** The session list changed — new session, rename, or a saved update. */
   sessions: (workspaceId: string) => void;
-  /** A run_command call is waiting on the Operator at Manual autonomy. */
-  commandApproval: (workspaceId: string, sessionId: string, requestId: string, command: string) => void;
+  /** A bash or webfetch-category action is waiting on the Operator because its category resolved to 'ask'. */
+  commandApproval: (
+    workspaceId: string,
+    sessionId: string,
+    requestId: string,
+    command: string,
+    category: PermissionCategory
+  ) => void;
   /** A subagent's run_command call is waiting on the Operator — see requestSubagentApproval. */
   subagentCommandApproval: (workspaceId: string, req: SubagentCommandApproval) => void;
   /** A session's whole roadmap, sent fresh on every change (propose/decide/edit/push-back/status). */
@@ -68,7 +102,15 @@ interface SessionRuntime {
   agent: AgentSession | null;
   running: boolean;
   runStartedAt: number | null;
-  pendingApprovals: Map<string, (approved: boolean) => void>;
+  /** Tagged with the category it was raised for, so resolveApproval knows what 'always' should apply to. */
+  pendingApprovals: Map<string, { resolve: (approved: boolean) => void; category: PermissionCategory }>;
+  /**
+   * Categories the Operator has answered "always allow" for, this session
+   * only — in-memory, never persisted, cleared the moment this runtime is
+   * gone (session deleted, workspace closed, app restarted). Checked before
+   * ever raising a new approval for that category on this session again.
+   */
+  alwaysAllowed: Set<PermissionCategory>;
   /** This session's OWN shell for agent-run commands — never shared with another session's concurrent command. */
   terminal: TerminalSession;
   activeRoadmapItemId: string | null;
@@ -151,6 +193,7 @@ export class Workspace {
         running: false,
         runStartedAt: null,
         pendingApprovals: new Map(),
+        alwaysAllowed: new Set(),
         terminal: new TerminalSession(this.rootPath ?? process.cwd()),
         activeRoadmapItemId: null,
         roadmapTurnSeq: 0,
@@ -233,7 +276,7 @@ export class Workspace {
   deleteSession(sessionId: string) {
     const rt = this.runtimes.get(sessionId);
     rt?.agent?.stop();
-    for (const [, resolve] of rt?.pendingApprovals ?? []) resolve(false);
+    for (const [, entry] of rt?.pendingApprovals ?? []) entry.resolve(false);
     this.flushSubagentApprovalsFor(sessionId);
     this.runtimes.delete(sessionId);
 
@@ -363,22 +406,32 @@ export class Workspace {
     }
   }
 
+  /**
+   * True if the Operator has already answered "always allow" for this
+   * category on this session — lets a caller skip raising a new approval
+   * entirely rather than prompt again just to have it auto-answered.
+   */
+  isAlwaysAllowed(sessionId: string, category: PermissionCategory): boolean {
+    return this.runtime(sessionId).alwaysAllowed.has(category);
+  }
+
   /** Blocks until the Operator decides, or resolves false if that session's run is stopped first. */
-  requestApproval(sessionId: string, command: string): Promise<boolean> {
+  requestApproval(sessionId: string, command: string, category: PermissionCategory): Promise<boolean> {
     const requestId = nextId('appr');
-    this.emit.commandApproval(this.id, sessionId, requestId, command);
+    this.emit.commandApproval(this.id, sessionId, requestId, command, category);
     return new Promise((resolve) => {
-      this.runtime(sessionId).pendingApprovals.set(requestId, resolve);
+      this.runtime(sessionId).pendingApprovals.set(requestId, { resolve, category });
     });
   }
 
   /** requestId is globally unique, so no need to know which session it belongs to. */
-  resolveApproval(requestId: string, approved: boolean) {
+  resolveApproval(requestId: string, decision: ApprovalDecision) {
     for (const rt of this.runtimes.values()) {
-      const resolve = rt.pendingApprovals.get(requestId);
-      if (resolve) {
+      const entry = rt.pendingApprovals.get(requestId);
+      if (entry) {
         rt.pendingApprovals.delete(requestId);
-        resolve(approved);
+        if (decision === 'always') rt.alwaysAllowed.add(entry.category);
+        entry.resolve(decision !== 'denied');
         return;
       }
     }
@@ -737,8 +790,10 @@ export class Workspace {
         },
         runShell: (requestId, command) =>
           rt.terminal.run(requestId, 'agent', command, (evt) => this.recordTerminal(evt)),
-        getAutonomy: () => this.autonomy,
-        requestCommandApproval: (command) => this.requestApproval(sessionId, command),
+        getPermission: (category) => resolvePermission(category, this.autonomy),
+        requestActionApproval: (category, description) =>
+          this.isAlwaysAllowed(sessionId, category) ? Promise.resolve(true) : this.requestApproval(sessionId, description, category),
+        getBashAllowlist: () => getCachedBashAllowlist(),
         requestSubagentCommandApproval: (command, label) => this.requestSubagentApproval(sessionId, command, label),
         applyEditAuto: (diff) => this.applyEditAuto(diff),
       }, rulesDir);
@@ -787,7 +842,7 @@ export class Workspace {
     rt?.agent?.stop();
     // A command stuck waiting on the Operator must not hang forever once the run itself is dead.
     if (rt) {
-      for (const [, resolve] of rt.pendingApprovals) resolve(false);
+      for (const [, entry] of rt.pendingApprovals) entry.resolve(false);
       rt.pendingApprovals.clear();
     }
     this.flushSubagentApprovalsFor(sessionId);

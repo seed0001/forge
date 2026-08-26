@@ -193,15 +193,22 @@ export function ChatView() {
               <div className="card approval">
                 <div className="card-top">
                   <IconBolt className="icon-sm" style={{ color: 'var(--fg-3)' }} />
-                  <span className="card-title">Waiting for your approval to run a command</span>
+                  <span className="card-title">
+                    {view.pendingApproval.category === 'bash'
+                      ? 'Waiting for your approval to run a command'
+                      : 'Waiting for your approval for a network/media action'}
+                  </span>
                 </div>
                 <code className="approval-cmd">{view.pendingApproval.command}</code>
                 <div className="approval-actions">
-                  <button className="mini reject" onClick={() => decideApproval(false)}>
+                  <button className="mini reject" onClick={() => decideApproval('denied')}>
                     <IconX className="icon-xs" />
                     Deny
                   </button>
-                  <button className="mini accept" onClick={() => decideApproval(true)}>
+                  <button className="mini flat" onClick={() => decideApproval('always')} title="Allow this and skip prompting for the rest of this session">
+                    Always allow
+                  </button>
+                  <button className="mini accept" onClick={() => decideApproval('approved')}>
                     <IconCheck className="icon-xs" />
                     Approve
                   </button>

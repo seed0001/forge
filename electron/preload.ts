@@ -1,6 +1,6 @@
 import { contextBridge, ipcRenderer } from 'electron';
 import { IPC } from './ipc-channels';
-import type { ProviderSettings, ChatProvider, WorkspaceKind } from './ipc-channels';
+import type { ProviderSettings, ChatProvider, WorkspaceKind, PermissionOverrides, ApprovalDecision } from './ipc-channels';
 
 /** Subscribe helper: events are broadcast for every workspace, tagged with its id. */
 function on<T extends unknown[]>(channel: string, cb: (...args: T) => void) {
@@ -48,8 +48,8 @@ contextBridge.exposeInMainWorld('forge', {
     stop: (id: string) => ipcRenderer.invoke(IPC.agentStop, id),
     onActivity: (cb: (workspaceId: string, sessionId: string, evt: unknown) => void) => on(IPC.agentActivity, cb),
     onMessage: (cb: (workspaceId: string, sessionId: string, msg: unknown) => void) => on(IPC.agentMessage, cb),
-    decideApproval: (id: string, requestId: string, approved: boolean) =>
-      ipcRenderer.invoke(IPC.cmdApprovalDecide, id, requestId, approved),
+    decideApproval: (id: string, requestId: string, decision: ApprovalDecision) =>
+      ipcRenderer.invoke(IPC.cmdApprovalDecide, id, requestId, decision),
     onApprovalRequest: (cb: (workspaceId: string, req: unknown) => void) => on(IPC.cmdApprovalRequest, cb),
     decideSubagentApproval: (id: string, requestId: string, approved: boolean) =>
       ipcRenderer.invoke(IPC.subagentCmdApprovalDecide, id, requestId, approved),
@@ -116,5 +116,11 @@ contextBridge.exposeInMainWorld('forge', {
   settings: {
     get: () => ipcRenderer.invoke(IPC.settingsGet),
     set: (values: Partial<ProviderSettings>) => ipcRenderer.invoke(IPC.settingsSet, values),
+  },
+  perms: {
+    get: () => ipcRenderer.invoke(IPC.permsGet),
+    set: (overrides: Partial<PermissionOverrides>) => ipcRenderer.invoke(IPC.permsSet, overrides),
+    getAllowlist: () => ipcRenderer.invoke(IPC.permsGetAllowlist),
+    setAllowlist: (patterns: string[]) => ipcRenderer.invoke(IPC.permsSetAllowlist, patterns),
   },
 });

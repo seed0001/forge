@@ -642,6 +642,15 @@ input, textarea { font: inherit; color: inherit; }
   max-width: 180px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 .chip.amber { background: var(--amber-bg); color: var(--amber); }
+.allowlist-pattern {
+  display: inline-flex; align-items: center; gap: var(--s2); height: 26px; padding: 0 var(--s1) 0 var(--s3);
+  border-radius: var(--r-pill); background: var(--bg-hover); color: var(--fg-2); font-size: var(--t-xs);
+}
+.allowlist-pattern button {
+  display: flex; align-items: center; justify-content: center; width: 20px; height: 20px;
+  border-radius: 50%; color: var(--fg-3);
+}
+.allowlist-pattern button:hover { background: var(--red-bg); color: var(--red); }
 .micbtn {
   width: 28px; height: 28px; border-radius: 50%; flex: none;
   display: flex; align-items: center; justify-content: center;
@@ -769,6 +778,7 @@ input, textarea { font: inherit; color: inherit; }
 .settings-section-blurb { font-size: var(--t-sm); color: var(--fg-3); margin: var(--s1) 0 var(--s4); line-height: 1.5; }
 .settings-field { display: block; margin-bottom: var(--s3); }
 .settings-field-label { display: block; font-size: var(--t-xs); font-weight: 600; color: var(--fg-2); margin-bottom: var(--s1); }
+.settings-field-hint { display: block; font-size: var(--t-xs); color: var(--fg-3); margin-top: var(--s1); line-height: 1.4; }
 .settings-input-wrap { position: relative; }
 .settings-input {
   width: 100%; height: 34px; padding: 0 var(--s8) 0 var(--s3);

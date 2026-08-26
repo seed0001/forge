@@ -21,6 +21,10 @@ import type {
   RoadmapItemStatus,
   WorkspaceKind,
   BrowserNavState,
+  PermissionOverrides,
+  PermissionCategory,
+  PermissionLevel,
+  ApprovalDecision,
 } from '../../electron/ipc-channels';
 
 export interface OpenFile {
@@ -106,6 +110,10 @@ interface ForgeState {
   providerSettings: ProviderSettings | null;
   settingsSaving: boolean;
 
+  /** Permission category overrides and the bash allowlist, app-wide. Loaded lazily alongside providerSettings. */
+  permOverrides: PermissionOverrides | null;
+  bashAllowlist: string[];
+
   init: () => Promise<void>;
   newWorkspace: () => Promise<void>;
   closeWorkspace: (id: string) => Promise<void>;
@@ -113,7 +121,7 @@ interface ForgeState {
   pickFolder: (id: string) => Promise<void>;
   setAutonomy: (level: Autonomy) => Promise<void>;
   setWorkspaceKind: (kind: WorkspaceKind) => Promise<void>;
-  decideApproval: (approved: boolean) => Promise<void>;
+  decideApproval: (decision: ApprovalDecision) => Promise<void>;
   decideSubagentApproval: (requestId: string, approved: boolean) => Promise<void>;
 
   setCenter: (view: CenterView) => void;
@@ -158,6 +166,10 @@ interface ForgeState {
   openSettings: () => void;
   closeSettings: () => void;
   saveSettings: (values: Partial<ProviderSettings>) => Promise<boolean>;
+
+  setPermOverride: (category: PermissionCategory, level: PermissionLevel | null) => Promise<void>;
+  addAllowlistPattern: (pattern: string) => Promise<void>;
+  removeAllowlistPattern: (pattern: string) => Promise<void>;
 
   browserSetBounds: (bounds: { x: number; y: number; width: number; height: number }) => Promise<void>;
   browserDetach: () => Promise<void>;
@@ -245,6 +257,9 @@ export const useForge = create<ForgeState>((set, get) => {
     settingsOpen: false,
     providerSettings: null,
     settingsSaving: false,
+
+    permOverrides: null,
+    bashAllowlist: [],
 
     init: async () => {
       void forge.models
@@ -469,13 +484,13 @@ export const useForge = create<ForgeState>((set, get) => {
       await forge.workspaces.setKind(id, kind);
     },
 
-    decideApproval: async (approved) => {
+    decideApproval: async (decision) => {
       const id = get().activeId;
       const view = activeView();
       const req = view?.pendingApproval;
       if (!id || !req) return;
       patch(id, (v) => ({ ...v, pendingApproval: null }));
-      await forge.agent.decideApproval(id, req.requestId, approved);
+      await forge.agent.decideApproval(id, req.requestId, decision);
     },
 
     decideSubagentApproval: async (requestId, approved) => {
@@ -764,6 +779,8 @@ export const useForge = create<ForgeState>((set, get) => {
       // Loaded fresh on every open rather than cached at init — the .env file
       // is also editable by hand, so a stale renderer copy could clobber it.
       void forge.settings.get().then((providerSettings) => set({ providerSettings }));
+      void forge.perms.get().then((permOverrides) => set({ permOverrides }));
+      void forge.perms.getAllowlist().then((bashAllowlist) => set({ bashAllowlist }));
     },
 
     closeSettings: () => set({ settingsOpen: false }),
@@ -776,6 +793,27 @@ export const useForge = create<ForgeState>((set, get) => {
         providerSettings: s.providerSettings ? { ...s.providerSettings, ...values } : s.providerSettings,
       }));
       return ok;
+    },
+
+    setPermOverride: async (category, level) => {
+      set((s) => ({
+        permOverrides: s.permOverrides ? { ...s.permOverrides, [category]: level } : s.permOverrides,
+      }));
+      await forge.perms.set({ [category]: level });
+    },
+
+    addAllowlistPattern: async (pattern) => {
+      const trimmed = pattern.trim();
+      if (!trimmed) return;
+      const next = [...new Set([...get().bashAllowlist, trimmed])];
+      set({ bashAllowlist: next });
+      await forge.perms.setAllowlist(next);
+    },
+
+    removeAllowlistPattern: async (pattern) => {
+      const next = get().bashAllowlist.filter((p) => p !== pattern);
+      set({ bashAllowlist: next });
+      await forge.perms.setAllowlist(next);
     },
 
     browserSetBounds: async (bounds) => {

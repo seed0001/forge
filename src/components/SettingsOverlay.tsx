@@ -5,8 +5,27 @@ import {
   MAX_TOOL_CALLS_LIMIT,
   SECRET_SENTINEL,
   type ProviderSettings,
+  type PermissionCategory,
+  type PermissionLevel,
 } from '../../electron/ipc-channels';
 import { IconCheck, IconEye, IconEyeOff, IconGear, IconX } from './icons';
+
+const PERMISSION_CATEGORIES: { id: PermissionCategory; label: string; blurb: string }[] = [
+  { id: 'bash', label: 'Shell commands', blurb: 'run_command — anything the agent executes in the terminal.' },
+  { id: 'edit', label: 'File edits', blurb: 'propose_edit — anything the agent writes to a file.' },
+  {
+    id: 'webfetch',
+    label: 'Network & media',
+    blurb: 'web_search, generate_image, analyze_image, generate_music — anything that leaves the machine.',
+  },
+];
+
+const PERMISSION_LEVEL_OPTIONS: { value: PermissionLevel | ''; label: string }[] = [
+  { value: '', label: 'Inherit from autonomy level' },
+  { value: 'allow', label: 'Always allow' },
+  { value: 'ask', label: 'Always ask' },
+  { value: 'deny', label: 'Always deny' },
+];
 
 interface FieldDef {
   key: keyof ProviderSettings;
@@ -101,6 +120,13 @@ export function SettingsOverlay() {
   const saving = useForge((s) => s.settingsSaving);
   const closeSettings = useForge((s) => s.closeSettings);
   const saveSettings = useForge((s) => s.saveSettings);
+
+  const permOverrides = useForge((s) => s.permOverrides);
+  const bashAllowlist = useForge((s) => s.bashAllowlist);
+  const setPermOverride = useForge((s) => s.setPermOverride);
+  const addAllowlistPattern = useForge((s) => s.addAllowlistPattern);
+  const removeAllowlistPattern = useForge((s) => s.removeAllowlistPattern);
+  const [allowlistDraft, setAllowlistDraft] = useState('');
 
   const [draft, setDraft] = useState<ProviderSettings>(EMPTY);
   const [revealed, setRevealed] = useState<Set<string>>(new Set());
@@ -232,6 +258,79 @@ export function SettingsOverlay() {
               })}
             </div>
           ))
+        )}
+
+        {permOverrides && (
+          <div className="settings-section">
+            <div className="settings-section-head">
+              <div className="row" style={{ gap: 'var(--s2)' }}>
+                <span className="settings-dot" style={{ background: 'var(--fg-3)' }} />
+                <span className="settings-section-name">Permissions</span>
+              </div>
+            </div>
+            <div className="settings-section-blurb">
+              Overrides the autonomy slider for one category at a time. Left on "Inherit," a category follows
+              whatever Manual/Balanced/Auto already does.
+            </div>
+
+            {PERMISSION_CATEGORIES.map((cat) => (
+              <label key={cat.id} className="settings-field">
+                <span className="settings-field-label">{cat.label}</span>
+                <div className="settings-input-wrap">
+                  <select
+                    className="settings-input"
+                    value={permOverrides[cat.id] ?? ''}
+                    onChange={(e) => setPermOverride(cat.id, (e.target.value || null) as PermissionLevel | null)}
+                  >
+                    {PERMISSION_LEVEL_OPTIONS.map((opt) => (
+                      <option key={opt.value} value={opt.value}>
+                        {opt.label}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+                <span className="settings-field-hint">{cat.blurb}</span>
+              </label>
+            ))}
+
+            <label className="settings-field">
+              <span className="settings-field-label">Bash allowlist</span>
+              <div className="settings-input-wrap">
+                <input
+                  className="settings-input mono"
+                  type="text"
+                  placeholder='e.g. "git status*" — end with * for a prefix match'
+                  value={allowlistDraft}
+                  spellCheck={false}
+                  autoComplete="off"
+                  onChange={(e) => setAllowlistDraft(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter' && allowlistDraft.trim()) {
+                      e.preventDefault();
+                      void addAllowlistPattern(allowlistDraft);
+                      setAllowlistDraft('');
+                    }
+                  }}
+                />
+              </div>
+              <span className="settings-field-hint">
+                When "Shell commands" is set to Always ask (or inherits Manual), a command matching one of these
+                patterns — and containing no chaining characters like ; &amp;&amp; | or $() — runs without prompting.
+              </span>
+            </label>
+            {bashAllowlist.length > 0 && (
+              <div className="row" style={{ gap: 'var(--s1)', flexWrap: 'wrap', marginTop: 'var(--s1)' }}>
+                {bashAllowlist.map((pattern) => (
+                  <span key={pattern} className="allowlist-pattern mono">
+                    {pattern}
+                    <button type="button" onClick={() => removeAllowlistPattern(pattern)} title="Remove">
+                      <IconX className="icon-xs" />
+                    </button>
+                  </span>
+                ))}
+              </div>
+            )}
+          </div>
         )}
       </div>
 

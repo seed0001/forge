@@ -20,6 +20,8 @@ import type {
   RoadmapItemStatus,
   WorkspaceKind,
   BrowserNavState,
+  PermissionOverrides,
+  ApprovalDecision,
 } from '../../electron/ipc-channels';
 
 type Unsubscribe = () => void;
@@ -69,7 +71,7 @@ export interface ForgeApi {
     stop: (id: string) => Promise<boolean>;
     onActivity: (cb: (workspaceId: string, sessionId: string, evt: ActivityEvent) => void) => Unsubscribe;
     onMessage: (cb: (workspaceId: string, sessionId: string, msg: ChatMessage) => void) => Unsubscribe;
-    decideApproval: (id: string, requestId: string, approved: boolean) => Promise<boolean>;
+    decideApproval: (id: string, requestId: string, decision: ApprovalDecision) => Promise<boolean>;
     onApprovalRequest: (cb: (workspaceId: string, req: CommandApproval) => void) => Unsubscribe;
     decideSubagentApproval: (id: string, requestId: string, approved: boolean) => Promise<boolean>;
     onSubagentApprovalRequest: (cb: (workspaceId: string, req: SubagentCommandApproval) => void) => Unsubscribe;
@@ -130,6 +132,12 @@ export interface ForgeApi {
   settings: {
     get: () => Promise<ProviderSettings>;
     set: (values: Partial<ProviderSettings>) => Promise<boolean>;
+  };
+  perms: {
+    get: () => Promise<PermissionOverrides>;
+    set: (overrides: Partial<PermissionOverrides>) => Promise<boolean>;
+    getAllowlist: () => Promise<string[]>;
+    setAllowlist: (patterns: string[]) => Promise<boolean>;
   };
 }
 

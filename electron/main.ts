@@ -13,6 +13,8 @@ import type {
   ChatProvider,
   RoadmapItemStatus,
   WorkspaceKind,
+  PermissionOverrides,
+  ApprovalDecision,
 } from './ipc-channels';
 import * as fsService from './fs-service';
 import { WorkspaceManager } from './workspace-manager';
@@ -20,6 +22,7 @@ import { saveAttachment, attachmentDirFor, readImageAsDataUrl } from './attachme
 import { listCatalogModels } from './models-service';
 import { initUpdater, checkForUpdates, downloadUpdate, installUpdate } from './updater';
 import { BrowserViewManager } from './browser-view-manager';
+import { loadPermissionOverrides, savePermissionOverrides, loadBashAllowlist, saveBashAllowlist } from './perm-store';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -55,6 +58,10 @@ if (overrideRules && fs.existsSync(overrideRules)) {
 }
 console.log(`[forge] ruleset: ${process.env.RULES_DIR || '(none found)'}`);
 
+// Seed the permission overrides cache so workspace.ts's resolvePermission
+// never needs to do a synchronous file read on the hot path.
+loadPermissionOverrides();
+
 let win: BrowserWindow | null = null;
 
 function send(channel: string, ...args: unknown[]) {
@@ -75,8 +82,8 @@ const manager = new WorkspaceManager({
     const ws = manager.get(workspaceId);
     if (ws) send(IPC.sessUpdated, workspaceId, ws.listSessions());
   },
-  commandApproval: (workspaceId, sessionId, requestId, command) =>
-    send(IPC.cmdApprovalRequest, workspaceId, { requestId, command, sessionId }),
+  commandApproval: (workspaceId, sessionId, requestId, command, category) =>
+    send(IPC.cmdApprovalRequest, workspaceId, { requestId, command, sessionId, category }),
   subagentCommandApproval: (workspaceId, req) => send(IPC.subagentCmdApprovalRequest, workspaceId, req),
   roadmapUpdated: (workspaceId, sessionId, items) => send(IPC.roadmapUpdated, workspaceId, sessionId, items),
 });
@@ -192,8 +199,8 @@ app.whenReady().then(() => {
     return ws.summary();
   });
 
-  ipcMain.handle(IPC.cmdApprovalDecide, async (_e, workspaceId: string, requestId: string, approved: boolean) => {
-    manager.get(workspaceId)?.resolveApproval(requestId, approved);
+  ipcMain.handle(IPC.cmdApprovalDecide, async (_e, workspaceId: string, requestId: string, decision: ApprovalDecision) => {
+    manager.get(workspaceId)?.resolveApproval(requestId, decision);
     return true;
   });
 
@@ -510,6 +517,33 @@ app.whenReady().then(() => {
     return true;
   });
 
+  // ── Permission overrides ──────────────────────────────────────────────
+
+  ipcMain.handle(IPC.permsGet, async (): Promise<PermissionOverrides> => {
+    return loadPermissionOverrides();
+  });
+
+  ipcMain.handle(IPC.permsSet, async (_e, overrides: Partial<PermissionOverrides>) => {
+    const current = loadPermissionOverrides();
+    const next: PermissionOverrides = {
+      bash: overrides.bash !== undefined ? overrides.bash : current.bash,
+      edit: overrides.edit !== undefined ? overrides.edit : current.edit,
+      webfetch: overrides.webfetch !== undefined ? overrides.webfetch : current.webfetch,
+    };
+    savePermissionOverrides(next);
+    return true;
+  });
+
+  ipcMain.handle(IPC.permsGetAllowlist, async (): Promise<string[]> => {
+    return loadBashAllowlist();
+  });
+
+  ipcMain.handle(IPC.permsSetAllowlist, async (_e, patterns: string[]) => {
+    saveBashAllowlist(Array.isArray(patterns) ? patterns.filter((p) => typeof p === 'string') : []);
+    return true;
+  });
+
+  // ── Update ────────────────────────────────────────────────────────────
   // Every step below runs only in direct response to one of these three IPC
   // calls — nothing in electron/updater.ts checks, downloads, or installs on
   // its own. See its top comment for why.

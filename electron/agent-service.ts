@@ -13,6 +13,17 @@ import { matchesAllowlist, isShellChained } from './perm-store';
 import { buildGuardrailNote, containsForeignScript, stripLeakedTags, looksCollapsed } from './guardrails';
 import { ContextStore, type RecordKind } from './context-store';
 import { addLesson, listLessons, matchLessons } from './learnings-store';
+import {
+  globSearch,
+  grepSearch,
+  htmlToText,
+  searchGithubRepos,
+  searchNpmPackages,
+  searchHackerNews,
+  fetchRssFeed,
+  classifyTier,
+  resolveModelRef,
+} from './dev-tools';
 import type {
   ActivityEvent,
   TermDataEvent,
@@ -114,6 +125,8 @@ export interface AgentCallbacks {
   getBashAllowlist: () => string[];
   /** When 'edit' resolves to 'allow': writes a proposed edit straight to disk instead of queuing it for review. */
   applyEditAuto: (diff: PendingDiff) => Promise<void>;
+  /** This session's cumulative real dollar cost so far (main thread, subagents, title, compaction) — read fresh by the cost_summary tool. */
+  getSessionCostUsd: () => number;
 }
 
 const OPENROUTER_IMAGES_URL = 'https://openrouter.ai/api/v1/images';
@@ -186,6 +199,9 @@ const RETRY_BASE_DELAY_MS = 1000;
 /** No provider response at all within this long is treated as a stalled connection, same as a network error. */
 const REQUEST_TIMEOUT_MS = 90_000;
 
+/** How many times a single task will force-compact and retry after a context-length-exceeded response before giving up and showing the error. */
+const MAX_CONTEXT_RECOVERY_ATTEMPTS = 2;
+
 /**
  * Rough character budget for the project knowledge base injected into every
  * turn (see context-store.ts's resolveForPrompt) — no real tokenizer is
@@ -203,6 +219,21 @@ function isTransientNetError(err: unknown): boolean {
 /** Rate-limited or a transient provider-side failure — both are worth retrying; anything else (4xx) is not. */
 function isRetryableStatus(status: number): boolean {
   return status === 429 || status === 500 || status === 502 || status === 503 || status === 504;
+}
+
+/**
+ * Recognizes a provider's "you sent too many tokens" error by message text
+ * rather than status code — wording and even the status code itself vary by
+ * provider/model (seen as a plain 400 from at least one). This is what makes
+ * a mid-conversation switch to a smaller-context model recoverable: the
+ * existing history was fine for the old model and is only too big for the
+ * new one, so compacting harder and retrying the SAME turn fixes it instead
+ * of just failing the task outright.
+ */
+function isContextLengthError(bodyText: string): boolean {
+  return /context_length_exceeded|context length|maximum context|too many (input )?tokens|input too long|reduce the length of the messages/i.test(
+    bodyText
+  );
 }
 
 /**
@@ -455,6 +486,149 @@ const BASE_TOOLS = [
       },
     },
   },
+  {
+    type: 'function',
+    function: {
+      name: 'glob',
+      description:
+        'Find files by name pattern (e.g. "src/**/*.ts", "*.md") anywhere under the project root, newest-' +
+        'modified first. Faster and broader than repeatedly calling list_files when you know roughly what a ' +
+        'file is named but not where it lives.',
+      parameters: {
+        type: 'object',
+        properties: {
+          pattern: { type: 'string', description: 'Glob pattern, relative to the project root. Supports **, *, ?, and {a,b,c}.' },
+        },
+        required: ['pattern'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'grep',
+      description:
+        'Search file CONTENTS for a regular expression across the project, returning matching file/line/text. ' +
+        'Use this to find where something is actually used, not just where a file with a similar name lives.',
+      parameters: {
+        type: 'object',
+        properties: {
+          pattern: { type: 'string', description: 'A regular expression (JavaScript flavor).' },
+          include: { type: 'string', description: 'Optional glob to restrict which files are searched, e.g. "*.ts".' },
+          case_sensitive: { type: 'boolean', description: 'Defaults to false.' },
+        },
+        required: ['pattern'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'edit_file',
+      description:
+        'Propose a targeted change to a file by exact string replacement, instead of resending the whole file ' +
+        'like propose_edit requires. old_string must appear EXACTLY ONCE in the file (unless replace_all is ' +
+        'true) — if it is not unique, include more surrounding context to disambiguate. Goes through the exact ' +
+        'same reviewable-diff and permission handling as propose_edit; it is a more convenient way to CALL that ' +
+        'same machinery for a small change, not a different write path.',
+      parameters: {
+        type: 'object',
+        properties: {
+          path: { type: 'string' },
+          old_string: { type: 'string', description: 'The exact existing text to replace.' },
+          new_string: { type: 'string', description: 'The text to replace it with.' },
+          replace_all: { type: 'boolean', description: 'Replace every occurrence instead of requiring exactly one. Defaults to false.' },
+        },
+        required: ['path', 'old_string', 'new_string'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'webfetch',
+      description:
+        'Fetch a specific, already-known URL and return its text content (HTML converted to plain text) plus ' +
+        'the outgoing links found on it. Unlike web_search, this does not search the web — you must already ' +
+        'have the URL (e.g. from a web_search result). Falls under the same network permission as web_search.',
+      parameters: {
+        type: 'object',
+        properties: { url: { type: 'string', description: 'A full http(s) URL.' } },
+        required: ['url'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'search_dev_sources',
+      description:
+        'Search a specific developer-focused source directly: GitHub repositories, the npm registry, Hacker ' +
+        'News stories, or an RSS/Atom feed you already have the URL for. More targeted than web_search when you ' +
+        'specifically want a repo, a package, discussion of a topic on HN, or a blog/changelog feed.',
+      parameters: {
+        type: 'object',
+        properties: {
+          source: { type: 'string', enum: ['github_repos', 'npm_packages', 'hacker_news', 'rss'] },
+          query: { type: 'string', description: 'Required for github_repos/npm_packages/hacker_news.' },
+          url: { type: 'string', description: 'Required for rss — the feed URL.' },
+        },
+        required: ['source'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'list_models',
+      description:
+        "Browse this workspace's currently configured provider's live model catalog — id, pricing, context " +
+        'length, and free/paid status. Optionally filter by a name/id substring and/or a maximum price per ' +
+        'million prompt tokens, e.g. to find something cheap for a simple delegated subagent task.',
+      parameters: {
+        type: 'object',
+        properties: {
+          query: { type: 'string', description: 'Optional case-insensitive substring to filter by id or name.' },
+          max_price_per_million: { type: 'number', description: 'Optional: only show models at or under this USD price per million prompt tokens.' },
+          tier: { type: 'string', enum: ['free', 'economy', 'balanced', 'premium'], description: 'Optional: only show models in this price tier.' },
+        },
+        required: [],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'current_model',
+      description: 'Report the model and provider actually being used for this conversation right now.',
+      parameters: { type: 'object', properties: {}, required: [] },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'set_model',
+      description:
+        "Switch THIS conversation to a different model for the rest of the session — the Operator's global " +
+        'default in Settings is untouched. Accepts a fuzzy name (e.g. "sonnet", "gpt-4o-mini") as well as an ' +
+        "exact id; if the name matches more than one model you'll get a list to choose from instead of a guess.",
+      parameters: {
+        type: 'object',
+        properties: { model: { type: 'string', description: 'An exact model id, or a name/substring to resolve.' } },
+        required: ['model'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'cost_summary',
+      description:
+        "Report this session's running totals: total dollar cost across every completion so far, and how much " +
+        'of that this current task alone has spent.',
+      parameters: { type: 'object', properties: {}, required: [] },
+    },
+  },
 ] as const;
 
 const SPAWN_TOOL = {
@@ -560,7 +734,7 @@ interface WebResult {
 }
 
 /** Tavily is built for LLM agents: no HTML scraping, results come back as clean text. */
-async function tavilySearch(query: string): Promise<WebResult[]> {
+async function tavilySearch(query: string): Promise<{ results: WebResult[]; answer: string | null }> {
   const key = process.env.SEARCH_API;
   if (!key) {
     throw new Error('No SEARCH_API set. Add a Tavily key to forge/.env (get one at app.tavily.com) and restart.');
@@ -569,14 +743,20 @@ async function tavilySearch(query: string): Promise<WebResult[]> {
   const res = await fetch('https://api.tavily.com/search', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ api_key: key, query, max_results: 6, search_depth: 'basic' }),
+    // include_answer asks Tavily to synthesize a short direct answer from the
+    // results, not just return the raw list — free on their end, and often
+    // saves the model a whole extra reasoning step over the same snippets.
+    body: JSON.stringify({ api_key: key, query, max_results: 6, search_depth: 'basic', include_answer: true }),
   });
   if (!res.ok) {
     const detail = await res.text();
     throw new Error(`Tavily request failed (${res.status}): ${detail.slice(0, 300)}`);
   }
-  const data = (await res.json()) as { results?: { title: string; url: string; content: string }[] };
-  return (data.results ?? []).map((r) => ({ title: r.title, url: r.url, snippet: r.content }));
+  const data = (await res.json()) as { results?: { title: string; url: string; content: string }[]; answer?: string };
+  return {
+    results: (data.results ?? []).map((r) => ({ title: r.title, url: r.url, snippet: r.content })),
+    answer: data.answer?.trim() || null,
+  };
 }
 
 /**
@@ -667,6 +847,23 @@ function buildSystemPrompt(rootPath: string, hasRules: boolean, isSubagent = fal
     '- If PROJECT.md or SCRATCH.md exist in the project root, their contents are injected into your',
     '  context automatically every turn — you do not need to read_file them just to see what they say,',
     '  only to edit them.',
+    '- glob finds files by name pattern across the whole project; grep searches file CONTENTS by regular',
+    '  expression. Prefer these over a manual walk with list_files/read_file when you know what you are',
+    '  looking for but not exactly where it lives.',
+    '- edit_file proposes a small, exact-string-replacement change without resending the whole file the',
+    '  way propose_edit requires — same reviewable-diff and permission handling underneath, just a more',
+    '  convenient way to call it for a small change. old_string must be unique in the file (or pass',
+    '  replace_all).',
+    '- webfetch reads one URL you already know (e.g. from a web_search result) and returns its text —',
+    '  it does not search, it fetches. search_dev_sources searches GitHub repos, npm packages, Hacker',
+    '  News, or a specific RSS/Atom feed directly, when that is more targeted than a general web_search.',
+    '  Both share web_search\'s network permission.',
+    '- list_models, current_model, and set_model let you inspect and, for THIS conversation only, switch',
+    '  which model you are running on (e.g. something cheaper for a simple stretch of work) — the',
+    "  Operator's own default in Settings is never touched by this.",
+    '- cost_summary reports this session\'s running dollar total and how much the CURRENT task has spent.',
+    '  If the Operator has set a per-task spend limit in Settings, you will also get an automatic warning',
+    '  once a task crosses it, and it will be stopped outright if it runs well past that despite the warning.',
     ...(isSubagent
       ? []
       : [
@@ -782,6 +979,12 @@ export class AgentSession {
   private contextStore: ContextStore;
   /** Lessons matched against the user's own message at the start of send(), injected once on the first turn. */
   private matchedLessons: Array<{ trigger: string; behavior: string }> = [];
+  /** Real dollar cost incurred by THIS send() call alone (main-loop turns plus any compaction summaries it triggers) — reset at the top of every send(). */
+  private taskCostUsd = 0;
+  /** True once the per-task cost warning has fired this task, so it nags once rather than every subsequent turn. */
+  private costWarningIssued = false;
+  /** How many times THIS task has already force-compacted and retried after a context-length-exceeded response. */
+  private contextRecoveryAttempts = 0;
 
   constructor(rootPath: string, cb: AgentCallbacks, rulesDir: string | null, isSubagent = false) {
     this.rootPath = rootPath;
@@ -942,6 +1145,51 @@ export class AgentSession {
       }
     }
     return null;
+  }
+
+  /**
+   * The actual propose_edit machinery — diff computation, permission
+   * resolution, and either auto-apply or queuing for review. Shared by
+   * propose_edit (whole-file replace) and edit_file (exact-string replace),
+   * which only differ in how they arrive at `newContent`; everything after
+   * that point is identical, including the AUDIT.md special-case.
+   */
+  private async proposeEditInternal(rel: string, abs: string, newContent: string): Promise<string> {
+    const base = await readFileDetailed(this.rootPath, abs);
+    if (!base.ok && base.reason !== 'missing') {
+      // Never diff against a failed read: the whole file would look like an
+      // addition and accepting it would destroy the real contents.
+      this.trackActivity({ id: nextId('act'), kind: 'propose', detail: `Could not read ${rel} to edit it`, status: 'error' });
+      return `ERROR: refusing to propose an edit to ${rel} — ${base.detail}.`;
+    }
+    const oldContent = base.ok ? base.content : '';
+    const hunks = computeHunks(rel, oldContent, newContent);
+    const { added, removed } = countChanges(hunks);
+    const diff: PendingDiff = { id: nextId('diff'), path: abs, baseContent: oldContent, hunks, decisions: {}, added, removed };
+
+    const isAuditLog = isAuditLogPath(this.rootPath, abs);
+    const editPerm = this.cb.getPermission('edit');
+
+    if (editPerm === 'deny') {
+      this.trackActivity({ id: nextId('act'), kind: 'propose', detail: `Blocked: edits are denied (${rel})`, status: 'error' });
+      return `ERROR: file edits are disabled for this workspace (the "edit" permission is set to deny). Ask the Operator to change it in Settings if this is unexpected.`;
+    }
+
+    if (editPerm === 'allow' && !isAuditLog) {
+      await this.cb.applyEditAuto(diff);
+      this.trackActivity({ id: nextId('act'), kind: 'propose', detail: `Auto-applied edit to ${rel}`, status: 'done', added, removed });
+      return `Change to ${rel} (+${added} -${removed}) written to disk immediately — the "edit" permission is set to allow, so this skipped review.`;
+    }
+
+    if (editPerm === 'allow' && isAuditLog) {
+      this.trackActivity({ id: nextId('act'), kind: 'propose', detail: `Proposed edit to ${rel}`, status: 'done', added, removed });
+      this.cb.onDiffProposed(diff);
+      return `Change proposed for ${rel} (+${added} -${removed}). This is the workspace's own audit trail, so it is held for the Operator's review even though the "edit" permission is set to allow — not yet applied.`;
+    }
+
+    this.trackActivity({ id: nextId('act'), kind: 'propose', detail: `Proposed edit to ${rel}`, status: 'done', added, removed });
+    this.cb.onDiffProposed(diff);
+    return `Change proposed for ${rel} (+${added} -${removed}). Waiting on user review; not yet applied.`;
   }
 
   /**
@@ -1141,6 +1389,7 @@ export class AgentSession {
             : Promise.resolve(true),
         getBashAllowlist: this.cb.getBashAllowlist,
         applyEditAuto: this.cb.applyEditAuto,
+        getSessionCostUsd: this.cb.getSessionCostUsd,
       },
       this.rulesDir,
       true
@@ -1204,82 +1453,31 @@ export class AgentSession {
     if (name === 'propose_edit') {
       const rel = String(args.path);
       const abs = path.resolve(this.rootPath, rel);
-      const newContent = String(args.new_content ?? '');
+      return this.proposeEditInternal(rel, abs, String(args.new_content ?? ''));
+    }
+
+    if (name === 'edit_file') {
+      const rel = String(args.path ?? '').trim();
+      if (!rel) return 'ERROR: edit_file requires a "path".';
+      const oldString = String(args.old_string ?? '');
+      const newString = String(args.new_string ?? '');
+      if (!oldString) return 'ERROR: edit_file requires a non-empty "old_string".';
+      const replaceAll = args.replace_all === true;
+      const abs = path.resolve(this.rootPath, rel);
 
       const base = await readFileDetailed(this.rootPath, abs);
-      if (!base.ok && base.reason !== 'missing') {
-        // Never diff against a failed read: the whole file would look like an
-        // addition and accepting it would destroy the real contents.
-        this.trackActivity({
-          id: nextId('act'),
-          kind: 'propose',
-          detail: `Could not read ${rel} to edit it`,
-          status: 'error',
-        });
-        return `ERROR: refusing to propose an edit to ${rel} — ${base.detail}.`;
+      if (!base.ok) {
+        return `ERROR: could not read ${rel} to edit it — ${base.reason === 'missing' ? 'it does not exist.' : base.detail}`;
       }
-      const oldContent = base.ok ? base.content : '';
-      const hunks = computeHunks(rel, oldContent, newContent);
-      const { added, removed } = countChanges(hunks);
-      const diff: PendingDiff = {
-        id: nextId('diff'),
-        path: abs,
-        baseContent: oldContent,
-        hunks,
-        decisions: {},
-        added,
-        removed,
-      };
-
-      const isAuditLog = isAuditLogPath(this.rootPath, abs);
-      const editPerm = this.cb.getPermission('edit');
-
-      if (editPerm === 'deny') {
-        this.trackActivity({
-          id: nextId('act'),
-          kind: 'propose',
-          detail: `Blocked: edits are denied (${rel})`,
-          status: 'error',
-        });
-        return `ERROR: file edits are disabled for this workspace (the "edit" permission is set to deny). Ask the Operator to change it in Settings if this is unexpected.`;
+      const occurrences = base.content.split(oldString).length - 1;
+      if (occurrences === 0) {
+        return `ERROR: old_string was not found in ${rel}. It must match the file's current contents exactly — read the file first if you are unsure.`;
       }
-
-      if (editPerm === 'allow' && !isAuditLog) {
-        await this.cb.applyEditAuto(diff);
-        this.trackActivity({
-          id: nextId('act'),
-          kind: 'propose',
-          detail: `Auto-applied edit to ${rel}`,
-          status: 'done',
-          added,
-          removed,
-        });
-        return `Change to ${rel} (+${added} -${removed}) written to disk immediately — the "edit" permission is set to allow, so this skipped review.`;
+      if (occurrences > 1 && !replaceAll) {
+        return `ERROR: old_string appears ${occurrences} times in ${rel}, not once. Include more surrounding context to make it unique, or pass replace_all: true.`;
       }
-
-      if (editPerm === 'allow' && isAuditLog) {
-        this.trackActivity({
-          id: nextId('act'),
-          kind: 'propose',
-          detail: `Proposed edit to ${rel}`,
-          status: 'done',
-          added,
-          removed,
-        });
-        this.cb.onDiffProposed(diff);
-        return `Change proposed for ${rel} (+${added} -${removed}). This is the workspace's own audit trail, so it is held for the Operator's review even though the "edit" permission is set to allow — not yet applied.`;
-      }
-
-      this.trackActivity({
-        id: nextId('act'),
-        kind: 'propose',
-        detail: `Proposed edit to ${rel}`,
-        status: 'done',
-        added,
-        removed,
-      });
-      this.cb.onDiffProposed(diff);
-      return `Change proposed for ${rel} (+${added} -${removed}). Waiting on user review; not yet applied.`;
+      const newContent = replaceAll ? base.content.split(oldString).join(newString) : base.content.replace(oldString, newString);
+      return this.proposeEditInternal(rel, abs, newContent);
     }
 
     if (name === 'spawn_subagent') {
@@ -1439,6 +1637,182 @@ export class AgentSession {
       return `ERROR: unknown log_lesson action "${action}". Use add or list.`;
     }
 
+    if (name === 'glob') {
+      const pattern = String(args.pattern ?? '').trim();
+      if (!pattern) return 'ERROR: glob requires a "pattern".';
+      const actId = nextId('act');
+      this.trackActivity({ id: actId, kind: 'search', detail: `Glob "${pattern}"`, status: 'active' });
+      try {
+        const files = await globSearch(this.rootPath, pattern);
+        this.trackActivity({ id: actId, kind: 'search', detail: `Glob "${pattern}"`, status: files.length ? 'done' : 'skipped' });
+        if (!files.length) return `No files matched "${pattern}".`;
+        return untrusted(files.join('\n'));
+      } catch (err) {
+        this.trackActivity({ id: actId, kind: 'search', detail: `Glob "${pattern}"`, status: 'error' });
+        return `ERROR: glob search failed — ${String(err)}`;
+      }
+    }
+
+    if (name === 'grep') {
+      const patternStr = String(args.pattern ?? '').trim();
+      if (!patternStr) return 'ERROR: grep requires a "pattern".';
+      const actId = nextId('act');
+      this.trackActivity({ id: actId, kind: 'search', detail: `Grep "${patternStr}"`, status: 'active' });
+      let regex: RegExp;
+      try {
+        regex = new RegExp(patternStr, args.case_sensitive === true ? '' : 'i');
+      } catch (err) {
+        this.trackActivity({ id: actId, kind: 'search', detail: `Grep "${patternStr}"`, status: 'error' });
+        return `ERROR: "${patternStr}" is not a valid regular expression — ${String(err)}`;
+      }
+      try {
+        const include = typeof args.include === 'string' && args.include.trim() ? args.include.trim() : undefined;
+        const { matches, filesScanned, truncated } = await grepSearch(this.rootPath, regex, include);
+        this.trackActivity({ id: actId, kind: 'search', detail: `Grep "${patternStr}"`, status: matches.length ? 'done' : 'skipped' });
+        if (!matches.length) return `No matches for "${patternStr}" across ${filesScanned} file(s) searched.`;
+        const body = matches.map((m) => `${m.file}:${m.line}: ${m.text}`).join('\n');
+        return untrusted(`${matches.length} match(es) across ${filesScanned} file(s)${truncated ? ' (truncated)' : ''}:\n${body}`);
+      } catch (err) {
+        this.trackActivity({ id: actId, kind: 'search', detail: `Grep "${patternStr}"`, status: 'error' });
+        return `ERROR: grep failed — ${String(err)}`;
+      }
+    }
+
+    if (name === 'webfetch') {
+      const url = String(args.url ?? '').trim();
+      if (!url || !/^https?:\/\//i.test(url)) return 'ERROR: webfetch requires a full http(s) "url".';
+      const gate = await this.checkWebfetchGate(`webfetch: ${url}`);
+      if (gate) return gate;
+
+      const actId = nextId('act');
+      this.trackActivity({ id: actId, kind: 'search', detail: `Fetched ${url}`, status: 'active' });
+      try {
+        const resp = await fetch(url, { headers: { 'User-Agent': 'Mozilla/5.0 (compatible; Forge)' } });
+        if (!resp.ok) {
+          this.trackActivity({ id: actId, kind: 'search', detail: `Fetched ${url}`, status: 'error' });
+          return `ERROR: fetch failed (${resp.status}) for ${url}.`;
+        }
+        const contentType = resp.headers.get('content-type') ?? '';
+        const raw = await resp.text();
+        const { text, links } = contentType.includes('html') ? htmlToText(raw) : { text: raw, links: [] as string[] };
+        await audit(this.rootPath, 'search', `webfetch: ${url}`, `${text.length} chars`);
+        this.trackActivity({ id: actId, kind: 'search', detail: `Fetched ${url}`, status: 'done' });
+        const clipped = text.length > 8000 ? `${text.slice(0, 8000)}\n…(truncated)` : text;
+        const linksPart = links.length ? `\n\nLinks found:\n${links.join('\n')}` : '';
+        return `Content of ${url}:\n${untrusted(`${clipped}${linksPart}`)}`;
+      } catch (err) {
+        this.trackActivity({ id: actId, kind: 'search', detail: `Fetched ${url}`, status: 'error' });
+        return `ERROR: webfetch failed — ${String(err)}`;
+      }
+    }
+
+    if (name === 'search_dev_sources') {
+      const source = String(args.source ?? '');
+      const gate = await this.checkWebfetchGate(`search_dev_sources (${source})`);
+      if (gate) return gate;
+
+      const actId = nextId('act');
+      try {
+        let results: { title: string; url: string; detail: string }[];
+        let label: string;
+        if (source === 'github_repos') {
+          const query = String(args.query ?? '').trim();
+          if (!query) return 'ERROR: search_dev_sources github_repos requires a "query".';
+          label = `GitHub search "${query}"`;
+          this.trackActivity({ id: actId, kind: 'search', detail: label, status: 'active' });
+          results = await searchGithubRepos(query);
+        } else if (source === 'npm_packages') {
+          const query = String(args.query ?? '').trim();
+          if (!query) return 'ERROR: search_dev_sources npm_packages requires a "query".';
+          label = `npm search "${query}"`;
+          this.trackActivity({ id: actId, kind: 'search', detail: label, status: 'active' });
+          results = await searchNpmPackages(query);
+        } else if (source === 'hacker_news') {
+          const query = String(args.query ?? '').trim();
+          if (!query) return 'ERROR: search_dev_sources hacker_news requires a "query".';
+          label = `Hacker News search "${query}"`;
+          this.trackActivity({ id: actId, kind: 'search', detail: label, status: 'active' });
+          results = await searchHackerNews(query);
+        } else if (source === 'rss') {
+          const url = String(args.url ?? '').trim();
+          if (!url) return 'ERROR: search_dev_sources rss requires a "url".';
+          label = `RSS fetch ${url}`;
+          this.trackActivity({ id: actId, kind: 'search', detail: label, status: 'active' });
+          results = await fetchRssFeed(url);
+        } else {
+          return `ERROR: unknown source "${source}". Use github_repos, npm_packages, hacker_news, or rss.`;
+        }
+        this.trackActivity({ id: actId, kind: 'search', detail: label, status: results.length ? 'done' : 'skipped' });
+        if (!results.length) return 'No results found.';
+        const body = results.map((r, i) => `${i + 1}. ${r.title}\n   ${r.url}\n   ${r.detail}`).join('\n\n');
+        return untrusted(body);
+      } catch (err) {
+        this.trackActivity({ id: actId, kind: 'search', detail: `search_dev_sources (${source})`, status: 'error' });
+        return `ERROR: search_dev_sources failed — ${String(err)}`;
+      }
+    }
+
+    if (name === 'list_models') {
+      const actId = nextId('act');
+      try {
+        let models = await listCatalogModels();
+        const query = typeof args.query === 'string' ? args.query.trim().toLowerCase() : '';
+        if (query) models = models.filter((m) => m.id.toLowerCase().includes(query) || m.name.toLowerCase().includes(query));
+        if (typeof args.max_price_per_million === 'number') {
+          const maxPerToken = args.max_price_per_million / 1_000_000;
+          models = models.filter((m) => m.promptPrice <= maxPerToken);
+        }
+        if (typeof args.tier === 'string') {
+          models = models.filter((m) => classifyTier(m) === args.tier);
+        }
+        this.trackActivity({ id: actId, kind: 'search', detail: 'Listed model catalog', status: models.length ? 'done' : 'skipped' });
+        if (!models.length) return 'No models match those filters.';
+        const body = models
+          .slice(0, 60)
+          .map((m) => `${m.id} [${classifyTier(m)}] — $${(m.promptPrice * 1_000_000).toFixed(2)}/M prompt tokens, ${m.contextLength.toLocaleString()} ctx`)
+          .join('\n');
+        return untrusted(body);
+      } catch (err) {
+        this.trackActivity({ id: actId, kind: 'search', detail: 'Listed model catalog', status: 'error' });
+        return `ERROR: could not fetch the model catalog — ${String(err)}`;
+      }
+    }
+
+    if (name === 'current_model') {
+      const cfg = resolveChatProvider();
+      const model = this.modelOverride ?? cfg?.model ?? '(none configured)';
+      return `Currently using ${model} via ${cfg ? PROVIDER_LABEL[cfg.provider] : '(no provider configured)'}.`;
+    }
+
+    if (name === 'set_model') {
+      const query = String(args.model ?? '').trim();
+      if (!query) return 'ERROR: set_model requires a "model".';
+      const actId = nextId('act');
+      try {
+        const cfg = resolveChatProvider();
+        if (!cfg) return 'ERROR: no provider is configured — nothing to switch a model on.';
+        const models = (await listCatalogModels()).filter((m) => m.provider === cfg.provider);
+        const { exact, candidates } = resolveModelRef(query, models);
+        if (!exact) {
+          if (!candidates.length) return `ERROR: no model matching "${query}" found in ${cfg.provider}'s catalog.`;
+          return `"${query}" is ambiguous — matches: ${candidates.slice(0, 10).map((m) => m.id).join(', ')}. Use an exact id.`;
+        }
+        this.setModelOverride(exact.id);
+        this.trackActivity({ id: actId, kind: 'thinking', detail: `Switched this session to ${exact.id}`, status: 'done' });
+        return `Switched to ${exact.id} for the rest of this session.`;
+      } catch (err) {
+        return `ERROR: could not switch model — ${String(err)}`;
+      }
+    }
+
+    if (name === 'cost_summary') {
+      const sessionCostUsd = this.cb.getSessionCostUsd();
+      return (
+        `This session has cost $${sessionCostUsd.toFixed(4)} total across every completion so far. ` +
+        `This current task alone has cost $${this.taskCostUsd.toFixed(4)}.`
+      );
+    }
+
     if (name === 'web_search') {
       const query = String(args.query ?? '').trim();
       if (!query) return 'ERROR: no search query given.';
@@ -1448,7 +1822,7 @@ export class AgentSession {
       const actId = nextId('act');
       this.trackActivity({ id: actId, kind: 'search', detail: `Searched "${query}"`, status: 'active' });
       try {
-        const results = await tavilySearch(query);
+        const { results, answer } = await tavilySearch(query);
         this.trackActivity({
           id: actId,
           kind: 'search',
@@ -1456,9 +1830,10 @@ export class AgentSession {
           status: results.length ? 'done' : 'skipped',
         });
         await audit(this.rootPath, 'search', `web_search: "${query}"`, `${results.length} results`);
-        if (!results.length) return `No results found for "${query}".`;
+        if (!results.length && !answer) return `No results found for "${query}".`;
         const body = results.map((r, i) => `${i + 1}. ${r.title}\n   ${r.url}\n   ${r.snippet}`).join('\n\n');
-        return `Search results for "${query}":\n${untrusted(body)}`;
+        const answerPart = answer ? `Summarized answer: ${answer}\n\n` : '';
+        return `Search results for "${query}":\n${untrusted(`${answerPart}${body}`)}`;
       } catch (err) {
         this.trackActivity({ id: actId, kind: 'search', detail: `Searched "${query}"`, status: 'error' });
         return `ERROR: web search failed — ${String(err)}`;
@@ -1770,7 +2145,10 @@ export class AgentSession {
       });
       if (!resp.ok) return null;
       const data = await resp.json();
-      if (typeof data.usage?.cost === 'number') this.cb.onCost(data.usage.cost);
+      if (typeof data.usage?.cost === 'number') {
+        this.cb.onCost(data.usage.cost);
+        this.taskCostUsd += data.usage.cost;
+      }
       const text = data.choices?.[0]?.message?.content?.trim();
       return text || null;
     } catch {
@@ -1918,7 +2296,9 @@ export class AgentSession {
     model: string,
     wireMessages: Record<string, unknown>[],
     thinkId: string
-  ): Promise<{ kind: 'ok'; data: any } | { kind: 'aborted' } | { kind: 'failed'; message: string }> {
+  ): Promise<
+    { kind: 'ok'; data: any } | { kind: 'aborted' } | { kind: 'failed'; message: string; contextExceeded?: boolean }
+  > {
     for (let attempt = 1; attempt <= MAX_FETCH_ATTEMPTS; attempt++) {
       if (this.aborted) return { kind: 'aborted' };
       this.controller = new AbortController();
@@ -1980,7 +2360,11 @@ export class AgentSession {
           continue;
         }
         const text = await resp.text();
-        return { kind: 'failed', message: `${PROVIDER_LABEL[cfg.provider]} error (${resp.status}): ${text.slice(0, 500)}` };
+        return {
+          kind: 'failed',
+          message: `${PROVIDER_LABEL[cfg.provider]} error (${resp.status}): ${text.slice(0, 500)}`,
+          contextExceeded: isContextLengthError(text),
+        };
       }
 
       return { kind: 'ok', data: await resp.json() };
@@ -2001,6 +2385,9 @@ export class AgentSession {
     this.lastToolBatchSignature = null;
     this.identicalBatchStreak = 0;
     this.failedOverThisTurn = false;
+    this.taskCostUsd = 0;
+    this.costWarningIssued = false;
+    this.contextRecoveryAttempts = 0;
     this.matchedLessons = await matchLessons(userText);
     this.cb.onStatus(true);
     await this.engageRules(userText);
@@ -2131,6 +2518,30 @@ export class AgentSession {
         return;
       }
       if (attempt.kind === 'failed') {
+        // A context-length-exceeded response is recoverable: the existing
+        // conversation may simply be too big for whatever model is active
+        // right now (e.g. the Operator just switched to one with a smaller
+        // window) rather than a real failure. Force a compaction pass —
+        // bypassing the normal 70% threshold, since the failed request IS
+        // the proof this no longer fits — and retry the same turn with the
+        // now-smaller history, capped so a conversation that genuinely can't
+        // shrink any further doesn't retry forever.
+        if (attempt.contextExceeded && this.contextRecoveryAttempts < MAX_CONTEXT_RECOVERY_ATTEMPTS) {
+          this.contextRecoveryAttempts++;
+          const windowForRecovery = await contextWindowForModel(activeModel, cfg.provider);
+          const beforeLen = this.messages.length;
+          await this.compactIfNeeded(windowForRecovery, windowForRecovery, cfg);
+          if (this.messages.length < beforeLen) {
+            this.trackActivity({
+              id: nextId('act'),
+              kind: 'compact',
+              detail: `Context limit hit on ${activeModel} — compacted the conversation and retrying (${this.contextRecoveryAttempts}/${MAX_CONTEXT_RECOVERY_ATTEMPTS})`,
+              status: 'done',
+            });
+            continue;
+          }
+          // Nothing left to compact (already down to a minimal tail) — no further automatic recovery is possible.
+        }
         this.trackActivity({ id: thinkId, kind: 'thinking', detail: 'Thinking… failed', status: 'error' });
         this.flushMessage(attempt.message);
         this.cb.onStatus(false);
@@ -2154,7 +2565,42 @@ export class AgentSession {
       }
       if (typeof data.usage?.cost === 'number') {
         this.cb.onCost(data.usage.cost);
+        this.taskCostUsd += data.usage.cost;
       }
+
+      // Per-task spend guard — Operator-configurable in Settings, blank means
+      // no limit. A soft ephemeral warning once the task crosses the budget,
+      // a hard stop only once it's clearly run well past it (2x) despite that
+      // warning, so a task that's one tool call from finishing isn't cut off
+      // right at the line.
+      const maxCostPerTask = Number.parseFloat(process.env.MAX_COST_PER_TASK_USD || '');
+      if (Number.isFinite(maxCostPerTask) && maxCostPerTask > 0) {
+        if (this.taskCostUsd >= maxCostPerTask * 2) {
+          this.trackActivity({
+            id: nextId('act'),
+            kind: 'stopped',
+            detail: `Stopped: task spend ($${this.taskCostUsd.toFixed(2)}) is well past the $${maxCostPerTask.toFixed(2)} per-task limit`,
+            status: 'error',
+          });
+          this.flushMessage(
+            `This task has spent $${this.taskCostUsd.toFixed(2)}, well past the $${maxCostPerTask.toFixed(2)} per-task ` +
+              "budget set in Settings, so I stopped rather than keep going. Let me know how you'd like to proceed."
+          );
+          this.cb.onStatus(false);
+          return;
+        }
+        if (!this.costWarningIssued && this.taskCostUsd >= maxCostPerTask) {
+          this.costWarningIssued = true;
+          this.pendingGuardrailNote = [
+            this.pendingGuardrailNote,
+            `Cost check: this task has already spent $${this.taskCostUsd.toFixed(2)}, at or past the ` +
+              `$${maxCostPerTask.toFixed(2)} per-task budget. Wrap up now unless finishing properly needs one or two more steps.`,
+          ]
+            .filter(Boolean)
+            .join(' ');
+        }
+      }
+
       const choice = data.choices?.[0];
       const message: Message = choice?.message ?? { role: 'assistant', content: '(no response)' };
       this.messages.push(message);

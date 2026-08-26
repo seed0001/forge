@@ -796,6 +796,7 @@ export class Workspace {
         getBashAllowlist: () => getCachedBashAllowlist(),
         requestSubagentCommandApproval: (command, label) => this.requestSubagentApproval(sessionId, command, label),
         applyEditAuto: (diff) => this.applyEditAuto(diff),
+        getSessionCostUsd: () => findSession()?.costUsd ?? 0,
       }, rulesDir);
       const session = findSession();
       if (session) rt.agent.restoreHistory(session.messages);

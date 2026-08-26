@@ -100,6 +100,12 @@ const PROVIDERS: ProviderDef[] = [
         secret: false,
         numeric: { min: 1, max: MAX_TOOL_CALLS_LIMIT },
       },
+      {
+        key: 'MAX_COST_PER_TASK_USD',
+        label: 'Max spend per task ($)',
+        placeholder: 'No limit',
+        secret: false,
+      },
     ],
   },
 ];
@@ -112,6 +118,7 @@ const EMPTY: ProviderSettings = {
   TRANSCRIBE_BASE_URL: '',
   TRANSCRIBE_MODEL: '',
   MAX_TOOL_CALLS: '',
+  MAX_COST_PER_TASK_USD: '',
 };
 
 export function SettingsOverlay() {

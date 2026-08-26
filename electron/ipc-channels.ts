@@ -360,6 +360,8 @@ export interface ProviderSettings {
   TRANSCRIBE_BASE_URL: string;
   TRANSCRIBE_MODEL: string;
   MAX_TOOL_CALLS: string;
+  /** Blank means no limit. A soft warning fires once a task's own spend crosses this; a hard stop fires past 2x it. */
+  MAX_COST_PER_TASK_USD: string;
 }
 
 export const SETTINGS_KEYS = [
@@ -370,6 +372,7 @@ export const SETTINGS_KEYS = [
   'TRANSCRIBE_BASE_URL',
   'TRANSCRIBE_MODEL',
   'MAX_TOOL_CALLS',
+  'MAX_COST_PER_TASK_USD',
 ] as const satisfies readonly (keyof ProviderSettings)[];
 
 /**

@@ -77,7 +77,8 @@ function textOf(content: Message['content']): string {
 export interface AgentCallbacks {
   onActivity: (evt: ActivityEvent) => void;
   onTerminal: (evt: TermDataEvent) => void;
-  onMessage: (text: string, images?: ChatImage[]) => void;
+  /** `note` marks an interim "about to do X" statement flushed alongside a batch of tool calls, distinct from a turn's real final reply. */
+  onMessage: (text: string, images?: ChatImage[], note?: boolean) => void;
   onStatus: (running: boolean) => void;
   onDiffProposed: (diff: PendingDiff) => void;
   /** propose_roadmap fires this — a whole new checklist for the Operator to review, fire-and-forget like onDiffProposed. */
@@ -1026,6 +1027,19 @@ function buildSystemPrompt(rootPath: string, hasRules: boolean, isSubagent = fal
         'to add it in.'
       : 'STYLE: keep the final reply short — a few sentences on what you found or did, and anything ' +
         'now waiting on the user. Put the detail in the work, not the summary.',
+    ...(isSubagent
+      ? []
+      : [
+          '',
+          'THINKING OUT LOUD: the Operator cannot see your reasoning, only your tool calls and replies —',
+          'so whenever you send a batch of tool calls, also write 1-2 plain-text sentences alongside it',
+          'saying what you are about to do and why. This is shown immediately, before those calls run, as',
+          'a live status the Operator can act on: stop you and redirect if you are headed the wrong way.',
+          'Write it once per batch, not once per individual call within it. Skip it only for a single',
+          'trivial lookup (e.g. one read_file or list_files) where there is nothing worth explaining.',
+          "Say what you're about to do, not what you already did — that belongs in the next note or the",
+          'final reply instead.',
+        ]),
   ].join('\n');
 }
 
@@ -2296,7 +2310,7 @@ export class AgentSession {
     try {
       const resp = await fetch(cfg.url, {
         method: 'POST',
-        headers: { Authorization: `Bearer ${cfg.apiKey}`, ...chatHeaders(cfg.provider) },
+        headers: chatHeaders(cfg.provider, cfg.apiKey),
         body: JSON.stringify({
           model: cfg.model,
           messages: [{ role: 'user', content: prompt }],
@@ -2345,7 +2359,7 @@ export class AgentSession {
     try {
       const resp = await fetch(cfg.url, {
         method: 'POST',
-        headers: { Authorization: `Bearer ${cfg.apiKey}`, ...chatHeaders(cfg.provider) },
+        headers: chatHeaders(cfg.provider, cfg.apiKey),
         body: JSON.stringify({
           model: cfg.model,
           messages: [{ role: 'user', content: prompt }],
@@ -2490,6 +2504,19 @@ export class AgentSession {
     this.cb.onMessage(stripLeakedTags(text), images);
   }
 
+  /**
+   * Surfaces the model's own brief statement of intent — text sent alongside
+   * a batch of tool calls, not the turn's final reply — as a lightweight
+   * interim chat message, visible to the Operator before those calls run.
+   * Never called for subagents: nothing is watching a subagent run live, so
+   * its STYLE guidance already asks for one complete report instead.
+   */
+  private flushNote(text: string) {
+    const stripped = stripLeakedTags(text).trim();
+    if (!stripped) return;
+    this.cb.onMessage(stripped, undefined, true);
+  }
+
   private sleep(ms: number): Promise<void> {
     return new Promise((resolve) => setTimeout(resolve, ms));
   }
@@ -2524,7 +2551,7 @@ export class AgentSession {
         resp = await fetch(cfg.url, {
           method: 'POST',
           signal: this.controller.signal,
-          headers: { Authorization: `Bearer ${cfg.apiKey}`, ...chatHeaders(cfg.provider) },
+          headers: chatHeaders(cfg.provider, cfg.apiKey),
           body: JSON.stringify({
             model,
             messages: wireMessages,
@@ -2839,6 +2866,11 @@ export class AgentSession {
       }
 
       if (hasToolCalls) {
+        // Surface the model's own stated intent BEFORE the calls it accompanies
+        // run, not after — the whole point is giving the Operator a chance to
+        // read where this is headed and stop it while it's still relevant.
+        if (replyText && !this.isSubagent) this.flushNote(replyText);
+
         const parsedArgs = (call: ToolCall): Record<string, unknown> => {
           try {
             return JSON.parse(call.function.arguments || '{}');

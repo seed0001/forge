@@ -1,3 +1,4 @@
+import { CHAT_PROVIDERS, DEFAULT_LLAMACPP_BASE_URL, DEFAULT_OLLAMA_BASE_URL } from './ipc-channels';
 import type { CatalogModel, ChatProvider } from './ipc-channels';
 
 const OPENROUTER_MODELS_URL = 'https://openrouter.ai/api/v1/models';
@@ -94,9 +95,40 @@ async function fetchFairRouterModels(): Promise<CatalogModel[]> {
     .map((m) => toModel(m, 'fairrouter'));
 }
 
+/**
+ * Ollama and llama.cpp's servers both expose the same OpenAI-compatible
+ * GET {baseUrl}/models shape — Ollama lists whatever's been `ollama pull`ed,
+ * llama.cpp typically lists just the one model it was launched with. Neither
+ * reports pricing or context length the way OpenRouter/FairRouter do, so
+ * every entry comes back free (accurate — it's your own hardware) with an
+ * unknown context length; contextWindowForModel's name-pattern estimate
+ * covers that gap the same way it already does for an unrecognized model id.
+ */
+function fetchLocalModels(provider: ChatProvider, baseUrlEnvKey: string, defaultBaseUrl: string) {
+  return async (): Promise<CatalogModel[]> => {
+    const baseUrl = (process.env[baseUrlEnvKey] || defaultBaseUrl).replace(/\/+$/, '');
+    const apiKeyEnvKey = provider === 'ollama' ? 'OLLAMA_API_KEY' : 'LLAMACPP_API_KEY';
+    const apiKey = process.env[apiKeyEnvKey];
+    const res = await fetch(`${baseUrl}/models`, {
+      headers: apiKey ? { Authorization: `Bearer ${apiKey}` } : {},
+    });
+    if (!res.ok) {
+      throw new Error(`${PROVIDER_LABEL[provider]} models request failed (${res.status}) — is it running at ${baseUrl}?`);
+    }
+    const data = (await res.json()) as { data?: RawModel[] };
+    return (data.data ?? []).map((m) => toModel(m, provider));
+  };
+}
+
+const PROVIDER_LABEL: Record<ChatProvider, string> = Object.fromEntries(
+  CHAT_PROVIDERS.map((p) => [p.id, p.label])
+) as Record<ChatProvider, string>;
+
 const FETCHERS: Record<ChatProvider, () => Promise<CatalogModel[]>> = {
   openrouter: fetchOpenRouterModels,
   fairrouter: fetchFairRouterModels,
+  ollama: fetchLocalModels('ollama', 'OLLAMA_BASE_URL', DEFAULT_OLLAMA_BASE_URL),
+  llamacpp: fetchLocalModels('llamacpp', 'LLAMACPP_BASE_URL', DEFAULT_LLAMACPP_BASE_URL),
 };
 
 async function listProviderModels(provider: ChatProvider, forceRefresh: boolean): Promise<CatalogModel[]> {
@@ -120,17 +152,15 @@ async function listProviderModels(provider: ChatProvider, forceRefresh: boolean)
 }
 
 /**
- * Cached list of every model both configured providers currently serve,
- * merged into one catalog and sorted by name. A provider whose fetch fails
- * (e.g. FairRouter unreachable) does not block the other's models from
- * showing — its error is only surfaced if BOTH providers come back empty.
- * `forceRefresh` bypasses the cache — used by the selector's manual refresh.
+ * Cached list of every model every provider currently serves, merged into
+ * one catalog and sorted by name. A provider whose fetch fails (unreachable,
+ * unconfigured, or — for Ollama/llama.cpp — simply not running right now)
+ * does not block the others' models from showing — its error is only
+ * surfaced if EVERY provider comes back empty. `forceRefresh` bypasses the
+ * cache — used by the selector's manual refresh.
  */
 export async function listCatalogModels(forceRefresh = false): Promise<CatalogModel[]> {
-  const results = await Promise.allSettled([
-    listProviderModels('openrouter', forceRefresh),
-    listProviderModels('fairrouter', forceRefresh),
-  ]);
+  const results = await Promise.allSettled(CHAT_PROVIDERS.map((p) => listProviderModels(p.id, forceRefresh)));
 
   const models = results.flatMap((r) => (r.status === 'fulfilled' ? r.value : []));
   if (!models.length) {

@@ -7,7 +7,8 @@ import { spawn } from 'node:child_process';
 import { loadEnv, setEnvValue } from './env';
 import { transcribe } from './transcribe';
 import { startPortalServer, type PortalHandle } from './portal-server';
-import { IPC, SETTINGS_KEYS, SECRET_SETTINGS_KEYS, SECRET_SENTINEL, MAX_TOOL_CALLS_LIMIT } from './ipc-channels';
+import { activeProviderId } from './chat-provider';
+import { IPC, SETTINGS_KEYS, SECRET_SETTINGS_KEYS, SECRET_SENTINEL, MAX_TOOL_CALLS_LIMIT, MODEL_ENV_KEY } from './ipc-channels';
 import type {
   WorkspaceHydration,
   ChatImage,
@@ -563,13 +564,13 @@ app.whenReady().then(() => {
   // Model Selector renders that as "Select model" rather than silently
   // implying some particular vendor's model is already chosen.
   ipcMain.handle(IPC.modelsGetCurrent, async (): Promise<{ provider: ChatProvider; model: string }> => {
-    const provider: ChatProvider = process.env.PROVIDER === 'fairrouter' ? 'fairrouter' : 'openrouter';
-    const model = (provider === 'fairrouter' ? process.env.FAIRROUTER_MODEL : process.env.OPENROUTER_MODEL) || '';
+    const provider = activeProviderId();
+    const model = process.env[MODEL_ENV_KEY[provider]] || '';
     return { provider, model };
   });
 
   ipcMain.handle(IPC.modelsSetCurrent, async (_e, modelId: string, provider: ChatProvider) => {
-    const modelKey = provider === 'fairrouter' ? 'FAIRROUTER_MODEL' : 'OPENROUTER_MODEL';
+    const modelKey = MODEL_ENV_KEY[provider];
     process.env.PROVIDER = provider;
     process.env[modelKey] = modelId;
     setEnvValue(envFile, 'PROVIDER', provider);
@@ -583,7 +584,7 @@ app.whenReady().then(() => {
   ipcMain.handle(IPC.providerSet, async (_e, provider: ChatProvider): Promise<{ provider: ChatProvider; model: string }> => {
     process.env.PROVIDER = provider;
     setEnvValue(envFile, 'PROVIDER', provider);
-    const model = (provider === 'fairrouter' ? process.env.FAIRROUTER_MODEL : process.env.OPENROUTER_MODEL) || '';
+    const model = process.env[MODEL_ENV_KEY[provider]] || '';
     return { provider, model };
   });
 

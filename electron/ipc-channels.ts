@@ -232,6 +232,13 @@ export interface ChatMessage {
   role: 'user' | 'assistant';
   text: string;
   images?: ChatImage[];
+  /**
+   * Set on an interim "here's what I'm about to do" note flushed alongside a
+   * batch of tool calls, as opposed to the turn's real final reply — lets the
+   * UI show it as a lighter, transient-looking status rather than a normal
+   * closing message.
+   */
+  note?: boolean;
 }
 
 export interface FileNode {
@@ -322,18 +329,34 @@ export interface RoadmapItem {
 }
 
 /** Which chat-completion backend a model/request belongs to. */
-export type ChatProvider = 'openrouter' | 'fairrouter';
+export type ChatProvider = 'openrouter' | 'fairrouter' | 'ollama' | 'llamacpp';
 
 /**
  * Chat providers available in the provider/model pickers, in display order.
- * To add another (e.g. a local Ollama or llama.cpp runtime), extend this
- * list, the ChatProvider union above, models-service.ts's per-provider
- * fetcher, and agent-service.ts's resolveChatProvider.
+ * To add another, extend this list, the ChatProvider union above, the
+ * per-provider maps just below, and models-service.ts's per-provider fetcher.
  */
 export const CHAT_PROVIDERS: { id: ChatProvider; label: string }[] = [
   { id: 'openrouter', label: 'OpenRouter' },
   { id: 'fairrouter', label: 'FairRouter' },
+  { id: 'ollama', label: 'Ollama' },
+  { id: 'llamacpp', label: 'llama.cpp' },
 ];
+
+/** Local runtimes on the machine's own hardware — no API key required, no per-token cost. */
+export const LOCAL_CHAT_PROVIDERS = new Set<ChatProvider>(['ollama', 'llamacpp']);
+
+/** Per-provider env var holding which model is currently selected for it — each provider remembers its own last pick independently. */
+export const MODEL_ENV_KEY: Record<ChatProvider, string> = {
+  openrouter: 'OPENROUTER_MODEL',
+  fairrouter: 'FAIRROUTER_MODEL',
+  ollama: 'OLLAMA_MODEL',
+  llamacpp: 'LLAMACPP_MODEL',
+};
+
+/** Every OpenAI-compatible endpoint's model listing lives at {baseUrl}/models, {baseUrl}/chat/completions. */
+export const DEFAULT_OLLAMA_BASE_URL = 'http://localhost:11434/v1';
+export const DEFAULT_LLAMACPP_BASE_URL = 'http://localhost:8080/v1';
 
 /** One entry from a provider's model catalog (OpenRouter or FairRouter — both OpenAI-shaped). */
 export interface CatalogModel {
@@ -386,6 +409,10 @@ export type PortalStatus =
 export interface ProviderSettings {
   OPENROUTER_API_KEY: string;
   FAIRROUTER_API_KEY: string;
+  OLLAMA_BASE_URL: string;
+  OLLAMA_API_KEY: string;
+  LLAMACPP_BASE_URL: string;
+  LLAMACPP_API_KEY: string;
   SEARCH_API: string;
   TRANSCRIBE_API_KEY: string;
   TRANSCRIBE_BASE_URL: string;
@@ -398,6 +425,10 @@ export interface ProviderSettings {
 export const SETTINGS_KEYS = [
   'OPENROUTER_API_KEY',
   'FAIRROUTER_API_KEY',
+  'OLLAMA_BASE_URL',
+  'OLLAMA_API_KEY',
+  'LLAMACPP_BASE_URL',
+  'LLAMACPP_API_KEY',
   'SEARCH_API',
   'TRANSCRIBE_API_KEY',
   'TRANSCRIBE_BASE_URL',
@@ -417,6 +448,8 @@ export const SETTINGS_KEYS = [
 export const SECRET_SETTINGS_KEYS = [
   'OPENROUTER_API_KEY',
   'FAIRROUTER_API_KEY',
+  'OLLAMA_API_KEY',
+  'LLAMACPP_API_KEY',
   'SEARCH_API',
   'TRANSCRIBE_API_KEY',
 ] as const satisfies readonly (keyof ProviderSettings)[];

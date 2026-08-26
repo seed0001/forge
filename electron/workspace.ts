@@ -1033,9 +1033,9 @@ export class Workspace {
           this.emit.activity(this.id, sessionId, evt);
         },
         onTerminal: (evt) => this.recordTerminal(evt),
-        onMessage: (text, images) => {
-          lastReply = text;
-          const msg: ChatMessage = { role: 'assistant', text, images };
+        onMessage: (text, images, note) => {
+          if (!note) lastReply = text; // Interim notes never overwrite the real last reply the focus loop reports back.
+          const msg: ChatMessage = { role: 'assistant', text, images, note };
           const session = findSession();
           session?.chat.push(msg);
           this.emit.message(this.id, sessionId, msg);
@@ -1135,15 +1135,16 @@ export class Workspace {
           this.emit.activity(this.id, sessionId, evt);
         },
         onTerminal: (evt) => this.recordTerminal(evt),
-        onMessage: (text, images) => {
-          const msg: ChatMessage = { role: 'assistant', text, images };
+        onMessage: (text, images, note) => {
+          const msg: ChatMessage = { role: 'assistant', text, images, note };
           const session = findSession();
           session?.chat.push(msg);
           this.emit.message(this.id, sessionId, msg);
+          if (note) return; // An interim status note, not a real reply — no titling, no completion bookkeeping.
 
           // Name the session from its actual content, once, after the first
           // real exchange — never blocking the reply the user is reading.
-          const isFirstReply = session && session.chat.filter((m) => m.role === 'assistant').length === 1;
+          const isFirstReply = session && session.chat.filter((m) => m.role === 'assistant' && !m.note).length === 1;
           if (session && isFirstReply && !session.titled) {
             const sid = session.id;
             void rt.agent!.generateTitle().then((title) => {

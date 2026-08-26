@@ -413,6 +413,8 @@ input, textarea { font: inherit; color: inherit; }
 /* ── Chat image attachments ───────────────────────────────────────────── */
 .chat-images { display: flex; flex-wrap: wrap; gap: var(--s2); max-width: 78%; }
 .turn.agent .chat-images { max-width: 100%; margin-top: var(--s2); }
+/* An interim "about to do X" note, not a real final reply — reads as a lighter, transient status. */
+.turn.agent.note .md { color: var(--fg-2); font-style: italic; }
 .chat-image {
   width: 160px; height: 160px; object-fit: cover;
   border-radius: var(--r-md); border: 1px solid var(--line-strong);

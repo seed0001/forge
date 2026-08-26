@@ -1,6 +1,8 @@
 import { useEffect, useState } from 'react';
 import { useForge } from '../state/store';
 import {
+  DEFAULT_LLAMACPP_BASE_URL,
+  DEFAULT_OLLAMA_BASE_URL,
   MAX_TOOL_CALLS_DEFAULT,
   MAX_TOOL_CALLS_LIMIT,
   SECRET_SENTINEL,
@@ -32,6 +34,8 @@ interface FieldDef {
   label: string;
   placeholder: string;
   secret: boolean;
+  /** Must this be filled before the section counts as "configured" (its status dot)? Defaults to the field's `secret` value — set false for an optional credential, e.g. a local runtime's API key. */
+  required?: boolean;
   numeric?: { min: number; max: number };
 }
 
@@ -62,6 +66,40 @@ const PROVIDERS: ProviderDef[] = [
     linkLabel: 'fairrouter.ai',
     linkHref: 'https://fairrouter.ai',
     fields: [{ key: 'FAIRROUTER_API_KEY', label: 'API key', placeholder: 'Bearer token…', secret: true }],
+  },
+  {
+    id: 'ollama',
+    name: 'Ollama',
+    blurb: 'A local Ollama install — no API key needed. Requires an OpenAI-compatible endpoint (Ollama serves one at /v1 by default).',
+    linkLabel: 'ollama.com',
+    linkHref: 'https://ollama.com',
+    fields: [
+      { key: 'OLLAMA_BASE_URL', label: 'Base URL', placeholder: DEFAULT_OLLAMA_BASE_URL, secret: false },
+      {
+        key: 'OLLAMA_API_KEY',
+        label: 'API key (optional)',
+        placeholder: 'Only if the endpoint requires one',
+        secret: true,
+        required: false,
+      },
+    ],
+  },
+  {
+    id: 'llamacpp',
+    name: 'llama.cpp',
+    blurb: 'A local llama.cpp server (llama-server) — no API key needed. It exposes an OpenAI-compatible endpoint on its own port.',
+    linkLabel: 'github.com/ggml-org/llama.cpp',
+    linkHref: 'https://github.com/ggml-org/llama.cpp',
+    fields: [
+      { key: 'LLAMACPP_BASE_URL', label: 'Base URL', placeholder: DEFAULT_LLAMACPP_BASE_URL, secret: false },
+      {
+        key: 'LLAMACPP_API_KEY',
+        label: 'API key (optional)',
+        placeholder: 'Only if the endpoint requires one',
+        secret: true,
+        required: false,
+      },
+    ],
   },
   {
     id: 'search',
@@ -113,6 +151,10 @@ const PROVIDERS: ProviderDef[] = [
 const EMPTY: ProviderSettings = {
   OPENROUTER_API_KEY: '',
   FAIRROUTER_API_KEY: '',
+  OLLAMA_BASE_URL: '',
+  OLLAMA_API_KEY: '',
+  LLAMACPP_BASE_URL: '',
+  LLAMACPP_API_KEY: '',
   SEARCH_API: '',
   TRANSCRIBE_API_KEY: '',
   TRANSCRIBE_BASE_URL: '',
@@ -200,7 +242,7 @@ export function SettingsOverlay() {
                     className="settings-dot"
                     style={{
                       background: provider.fields
-                        .filter((f) => f.secret)
+                        .filter((f) => f.required ?? f.secret)
                         .every((f) => draft[f.key].trim())
                         ? 'var(--green)'
                         : 'var(--fg-3)',

@@ -154,7 +154,7 @@ export function ChatView() {
                 {!!m.text && <div className="bubble">{m.text}</div>}
               </div>
             ) : (
-              <div className="turn agent" key={i}>
+              <div className={`turn agent${m.note ? ' note' : ''}`} key={i}>
                 <Markdown>{m.text}</Markdown>
                 {!!m.images?.length && (
                   <div className="chat-images">

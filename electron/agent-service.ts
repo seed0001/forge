@@ -34,8 +34,11 @@ import type {
   RoadmapItem,
   PermissionCategory,
   PermissionLevel,
+  FocusMessage,
+  FocusAgentSummary,
 } from './ipc-channels';
 import { MAX_TOOL_CALLS_DEFAULT, MAX_TOOL_CALLS_LIMIT } from './ipc-channels';
+import type { BugReportInput } from './bug-store';
 
 type Role = 'system' | 'user' | 'assistant' | 'tool';
 
@@ -127,6 +130,27 @@ export interface AgentCallbacks {
   applyEditAuto: (diff: PendingDiff) => Promise<void>;
   /** This session's cumulative real dollar cost so far (main thread, subagents, title, compaction) — read fresh by the cost_summary tool. */
   getSessionCostUsd: () => number;
+  /** Posts to the workspace's shared cross-agent message board. `from` is the calling agent's own label (this.agentLabel), not something the model supplies. */
+  postToBoard: (from: string, text: string, inReplyTo?: string) => FocusMessage;
+  /** Reads recent board messages, optionally only those after a given message id. */
+  readBoard: (sinceId?: string, limit?: number) => FocusMessage[];
+  /**
+   * Posts a question to the board (tagged needsAnswer) and blocks until the
+   * Operator answers directly or another agent's post_message replies with a
+   * matching in_reply_to, or the timeout elapses — resolving null in that
+   * case rather than hanging forever. See workspace.ts's requestFocusAnswer.
+   */
+  askAndWait: (from: string, question: string, timeoutMinutes?: number) => Promise<string | null>;
+  /** Writes a structured bug report under the project's bugs/ folder and returns its relative path. */
+  fileBugReport: (report: BugReportInput) => Promise<string>;
+  /**
+   * spawn_focus_agent fires this — unlike runSubagent, this returns immediately
+   * with the new agent's summary; the agent itself keeps running in the
+   * background (see workspace.ts's startFocusAgent/runFocusLoop). Only present
+   * on the primary session's callbacks — a subagent's tools never include
+   * spawn_focus_agent, so this would never be called from one.
+   */
+  startFocusAgent?: (task: string, label: string, budgetMinutes?: number) => FocusAgentSummary;
 }
 
 const OPENROUTER_IMAGES_URL = 'https://openrouter.ai/api/v1/images';
@@ -629,7 +653,100 @@ const BASE_TOOLS = [
       parameters: { type: 'object', properties: {}, required: [] },
     },
   },
+  {
+    type: 'function',
+    function: {
+      name: 'post_message',
+      description:
+        'Post a message to this workspace\'s shared cross-agent message board — visible to the primary agent, ' +
+        'any subagents, and any background Focus agents. Use it to coordinate work or share a finding. Pass ' +
+        'in_reply_to with another message\'s id to answer a question raised via ask_and_wait.',
+      parameters: {
+        type: 'object',
+        properties: {
+          text: { type: 'string' },
+          in_reply_to: { type: 'string', description: 'Optional id of the message this replies to or answers.' },
+        },
+        required: ['text'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'read_board',
+      description: 'Read recent messages from the shared cross-agent message board.',
+      parameters: {
+        type: 'object',
+        properties: {
+          since_id: { type: 'string', description: 'Only return messages posted after this message id.' },
+          limit: { type: 'number', description: 'Max messages to return. Default 50.' },
+        },
+        required: [],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'ask_and_wait',
+      description:
+        'Post a question to the message board and PAUSE — this call does not return — until the Operator or ' +
+        'another agent answers it, or the timeout elapses. Only use this when you genuinely cannot make ' +
+        'progress without an answer; it blocks your own turn until resolved or timed out.',
+      parameters: {
+        type: 'object',
+        properties: {
+          question: { type: 'string' },
+          timeout_minutes: { type: 'number', description: 'How long to wait before giving up. Default 10, max 60.' },
+        },
+        required: ['question'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'file_bug_report',
+      description: "File a structured bug report as a markdown file under the project's bugs/ folder.",
+      parameters: {
+        type: 'object',
+        properties: {
+          title: { type: 'string' },
+          description: { type: 'string' },
+          severity: { type: 'string', description: 'e.g. low, medium, high, critical.' },
+          steps_to_reproduce: { type: 'string' },
+          expected: { type: 'string' },
+          actual: { type: 'string' },
+        },
+        required: ['title', 'description'],
+      },
+    },
+  },
 ] as const;
+
+const SPAWN_FOCUS_TOOL = {
+  type: 'function',
+  function: {
+    name: 'spawn_focus_agent',
+    description:
+      'Start a background Focus agent: an independent agent with its own context that keeps working, ' +
+      'unattended, for up to a given time budget — unlike spawn_subagent, this call returns IMMEDIATELY and ' +
+      'the Focus agent keeps running in its own session after your turn ends. It shares the same read/write/' +
+      'run/search tools as a subagent, plus the message board (post_message/read_board) and ask_and_wait, so ' +
+      'it can coordinate with you or other agents while it works. Check on it later via the board or by ' +
+      'looking at its session.',
+    parameters: {
+      type: 'object',
+      properties: {
+        task: { type: 'string', description: 'A complete, self-contained brief — same requirements as spawn_subagent.' },
+        label: { type: 'string', description: 'Short human-readable name for this Focus agent, shown in the UI.' },
+        budget_minutes: { type: 'number', description: 'How long this agent may keep working, in minutes. Default 30, max 240.' },
+      },
+      required: ['task', 'label'],
+    },
+  },
+} as const;
 
 const SPAWN_TOOL = {
   type: 'function',
@@ -724,7 +841,7 @@ const COMPLETE_ROADMAP_ITEM_TOOL = {
   },
 } as const;
 
-const TOOLS = [...BASE_TOOLS, SPAWN_TOOL, PROPOSE_ROADMAP_TOOL, COMPLETE_ROADMAP_ITEM_TOOL];
+const TOOLS = [...BASE_TOOLS, SPAWN_TOOL, SPAWN_FOCUS_TOOL, PROPOSE_ROADMAP_TOOL, COMPLETE_ROADMAP_ITEM_TOOL];
 const SUBAGENT_TOOLS = BASE_TOOLS;
 
 interface WebResult {
@@ -932,6 +1049,8 @@ export class AgentSession {
   private rulesDir: string | null;
   private rulesPrimed = false;
   private isSubagent: boolean;
+  /** Display name used as `from` on message-board posts and ask_and_wait questions — "Agent", "Subagent", or a Focus agent's own label. */
+  private agentLabel: string;
   private tools: typeof TOOLS | typeof SUBAGENT_TOOLS;
   /** Subagents currently running, so stop() can cascade to them — they otherwise keep going unsupervised. */
   private activeSubagents = new Set<AgentSession>();
@@ -986,11 +1105,18 @@ export class AgentSession {
   /** How many times THIS task has already force-compacted and retried after a context-length-exceeded response. */
   private contextRecoveryAttempts = 0;
 
-  constructor(rootPath: string, cb: AgentCallbacks, rulesDir: string | null, isSubagent = false) {
+  constructor(
+    rootPath: string,
+    cb: AgentCallbacks,
+    rulesDir: string | null,
+    isSubagent = false,
+    agentLabel?: string
+  ) {
     this.rootPath = rootPath;
     this.cb = cb;
     this.rulesDir = rulesDir;
     this.isSubagent = isSubagent;
+    this.agentLabel = agentLabel ?? (isSubagent ? 'Subagent' : 'Agent');
     this.tools = isSubagent ? SUBAGENT_TOOLS : TOOLS;
     this.rules = new RuleSet(rulesDir);
     this.contextStore = new ContextStore(rootPath);
@@ -1390,9 +1516,14 @@ export class AgentSession {
         getBashAllowlist: this.cb.getBashAllowlist,
         applyEditAuto: this.cb.applyEditAuto,
         getSessionCostUsd: this.cb.getSessionCostUsd,
+        postToBoard: this.cb.postToBoard,
+        readBoard: this.cb.readBoard,
+        askAndWait: this.cb.askAndWait,
+        fileBugReport: this.cb.fileBugReport,
       },
       this.rulesDir,
-      true
+      true,
+      `Subagent: ${label}`
     );
     if (model) sub.setModelOverride(model);
 
@@ -1486,6 +1617,86 @@ export class AgentSession {
       if (this.isSubagent) return 'ERROR: subagents cannot spawn further subagents.';
       const model = typeof args.model === 'string' && args.model.trim() ? args.model.trim() : undefined;
       return this.runSubagent(task, model);
+    }
+
+    if (name === 'spawn_focus_agent') {
+      const task = String(args.task ?? '').trim();
+      const label = String(args.label ?? '').trim();
+      if (!task) return 'ERROR: spawn_focus_agent requires a "task".';
+      if (!label) return 'ERROR: spawn_focus_agent requires a "label".';
+      if (this.isSubagent || !this.cb.startFocusAgent) return 'ERROR: this agent cannot start Focus agents.';
+      const budgetMinutes = typeof args.budget_minutes === 'number' ? args.budget_minutes : undefined;
+      const summary = this.cb.startFocusAgent(task, label, budgetMinutes);
+      this.trackActivity({
+        id: nextId('act'),
+        kind: 'thinking',
+        detail: `Started Focus agent "${label}" (budget ${Math.round(summary.budgetMs / 60000)}m)`,
+        status: 'done',
+      });
+      return (
+        `Focus agent "${label}" started (id: ${summary.id}), running in its own session for up to ` +
+        `${Math.round(summary.budgetMs / 60000)} minute(s). It runs independently — check the message ` +
+        'board or its session for progress; do not wait here for it to finish.'
+      );
+    }
+
+    if (name === 'post_message') {
+      const text = String(args.text ?? '').trim();
+      if (!text) return 'ERROR: post_message requires "text".';
+      const inReplyTo = typeof args.in_reply_to === 'string' && args.in_reply_to.trim() ? args.in_reply_to.trim() : undefined;
+      const msg = this.cb.postToBoard(this.agentLabel, text, inReplyTo);
+      this.trackActivity({ id: nextId('act'), kind: 'thinking', detail: `Posted to board: "${text.slice(0, 60)}"`, status: 'done' });
+      return `Posted (id: ${msg.id}).`;
+    }
+
+    if (name === 'read_board') {
+      const sinceId = typeof args.since_id === 'string' && args.since_id.trim() ? args.since_id.trim() : undefined;
+      const limit = typeof args.limit === 'number' ? args.limit : 50;
+      const messages = this.cb.readBoard(sinceId, limit);
+      if (!messages.length) return 'No messages on the board yet.';
+      return untrusted(
+        messages
+          .map((m) => `[${m.id}] ${m.from}${m.needsAnswer ? ' (asking)' : ''}${m.inReplyTo ? ` (re: ${m.inReplyTo})` : ''}: ${m.text}`)
+          .join('\n')
+      );
+    }
+
+    if (name === 'ask_and_wait') {
+      const question = String(args.question ?? '').trim();
+      if (!question) return 'ERROR: ask_and_wait requires a "question".';
+      const timeoutMinutes = typeof args.timeout_minutes === 'number' ? args.timeout_minutes : undefined;
+      const actId = nextId('act');
+      this.trackActivity({ id: actId, kind: 'thinking', detail: `Waiting for an answer: "${question.slice(0, 60)}"`, status: 'active' });
+      const answer = await this.cb.askAndWait(this.agentLabel, question, timeoutMinutes);
+      this.trackActivity({
+        id: actId,
+        kind: 'thinking',
+        detail: `Waiting for an answer: "${question.slice(0, 60)}"`,
+        status: answer ? 'done' : 'skipped',
+      });
+      return answer
+        ? `Answer received: ${answer}`
+        : 'No answer arrived before the timeout — proceed using your own best judgment, or state clearly that you are blocked.';
+    }
+
+    if (name === 'file_bug_report') {
+      const title = String(args.title ?? '').trim();
+      const description = String(args.description ?? '').trim();
+      if (!title || !description) return 'ERROR: file_bug_report requires "title" and "description".';
+      try {
+        const rel = await this.cb.fileBugReport({
+          title,
+          description,
+          severity: typeof args.severity === 'string' ? args.severity : undefined,
+          steps: typeof args.steps_to_reproduce === 'string' ? args.steps_to_reproduce : undefined,
+          expected: typeof args.expected === 'string' ? args.expected : undefined,
+          actual: typeof args.actual === 'string' ? args.actual : undefined,
+        });
+        this.trackActivity({ id: nextId('act'), kind: 'propose', detail: `Filed bug report: ${rel}`, status: 'done' });
+        return `Bug report filed at ${rel}.`;
+      } catch (err) {
+        return `ERROR: could not file bug report — ${err instanceof Error ? err.message : String(err)}`;
+      }
     }
 
     if (name === 'propose_roadmap') {

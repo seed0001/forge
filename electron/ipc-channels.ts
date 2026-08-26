@@ -83,6 +83,22 @@ export const IPC = {
   permsSet: 'perms:set',
   permsGetAllowlist: 'perms:get-allowlist',
   permsSetAllowlist: 'perms:set-allowlist',
+
+  schedList: 'scheduler:list',
+  schedCreate: 'scheduler:create',
+  schedUpdate: 'scheduler:update',
+  schedDelete: 'scheduler:delete',
+  schedRunNow: 'scheduler:run-now',
+  schedUpdated: 'scheduler:updated',
+
+  focusList: 'focus:list',
+  focusStart: 'focus:start',
+  focusStop: 'focus:stop',
+  focusUpdated: 'focus:updated',
+  focusBoardList: 'focus:board-list',
+  focusBoardUpdated: 'focus:board-updated',
+  focusQuestionRequest: 'focus:question-request',
+  focusQuestionAnswer: 'focus:question-answer',
 } as const;
 
 export type WorkspaceStatus = 'idle' | 'running' | 'review';
@@ -413,4 +429,73 @@ export interface WorkspaceHydration {
   pendingDiffs: PendingDiff[];
   checkpoints: Checkpoint[];
   roadmap: RoadmapItem[];
+  schedules: ScheduledTask[];
+  focusAgents: FocusAgentSummary[];
+  board: FocusMessage[];
+}
+
+/**
+ * A scheduled task fires a fixed prompt into its own dedicated background
+ * session on a cron or interval schedule — see electron/scheduler-store.ts
+ * for the cron matcher and next-run computation, and workspace.ts's
+ * tickScheduler for what actually fires it.
+ */
+export type ScheduleSpec = { kind: 'cron'; expr: string } | { kind: 'interval'; minutes: number };
+
+export interface ScheduledTask {
+  id: string;
+  label: string;
+  prompt: string;
+  schedule: ScheduleSpec;
+  enabled: boolean;
+  createdAt: number;
+  lastRunAt: number | null;
+  /** Truncated report of what happened last time this fired — "started" for a run still in flight, an error, or a skip reason. */
+  lastResult: string | null;
+  nextRunAt: number | null;
+  /** The dedicated session this task's runs are sent into, created lazily on first dispatch — never the Operator's active session, so a firing task can't collide with whatever they're doing. */
+  sessionId: string | null;
+}
+
+/**
+ * One post on a workspace's shared cross-agent message board — the primary
+ * agent, any subagent, and any Focus background agent can all read and post
+ * here via the post_message/read_board tools, which is how they coordinate
+ * without sharing a conversation. `needsAnswer` marks a post made through
+ * ask_and_wait, which pauses the asking agent until a reply arrives whose
+ * `inReplyTo` matches this message's id (or the Operator answers directly).
+ */
+export interface FocusMessage {
+  id: string;
+  from: string;
+  text: string;
+  createdAt: number;
+  inReplyTo?: string;
+  needsAnswer?: boolean;
+}
+
+/** A Focus agent's run_command call waiting on the Operator or a peer agent's post_message reply. */
+export interface FocusQuestion {
+  requestId: string;
+  from: string;
+  question: string;
+}
+
+export type FocusAgentStatus = 'running' | 'done' | 'expired' | 'stopped' | 'error';
+
+/**
+ * A background "Focus" agent — spawned via spawn_focus_agent, it runs
+ * unattended in its own dedicated session for up to `budgetMs`, looping
+ * turns until it either replies with the FOCUS_DONE sentinel or its time
+ * budget runs out. See workspace.ts's runFocusLoop.
+ */
+export interface FocusAgentSummary {
+  id: string;
+  label: string;
+  task: string;
+  sessionId: string;
+  status: FocusAgentStatus;
+  startedAt: number;
+  budgetMs: number;
+  elapsedMs: number;
 }

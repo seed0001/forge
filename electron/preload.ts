@@ -1,6 +1,13 @@
 import { contextBridge, ipcRenderer } from 'electron';
 import { IPC } from './ipc-channels';
-import type { ProviderSettings, ChatProvider, WorkspaceKind, PermissionOverrides, ApprovalDecision } from './ipc-channels';
+import type {
+  ProviderSettings,
+  ChatProvider,
+  WorkspaceKind,
+  PermissionOverrides,
+  ApprovalDecision,
+  ScheduleSpec,
+} from './ipc-channels';
 
 /** Subscribe helper: events are broadcast for every workspace, tagged with its id. */
 function on<T extends unknown[]>(channel: string, cb: (...args: T) => void) {
@@ -122,5 +129,32 @@ contextBridge.exposeInMainWorld('forge', {
     set: (overrides: Partial<PermissionOverrides>) => ipcRenderer.invoke(IPC.permsSet, overrides),
     getAllowlist: () => ipcRenderer.invoke(IPC.permsGetAllowlist),
     setAllowlist: (patterns: string[]) => ipcRenderer.invoke(IPC.permsSetAllowlist, patterns),
+  },
+  scheduler: {
+    list: (id: string) => ipcRenderer.invoke(IPC.schedList, id),
+    create: (id: string, label: string, prompt: string, schedule: ScheduleSpec) =>
+      ipcRenderer.invoke(IPC.schedCreate, id, label, prompt, schedule),
+    update: (
+      id: string,
+      taskId: string,
+      patch: { label?: string; prompt?: string; schedule?: ScheduleSpec; enabled?: boolean }
+    ) => ipcRenderer.invoke(IPC.schedUpdate, id, taskId, patch),
+    remove: (id: string, taskId: string) => ipcRenderer.invoke(IPC.schedDelete, id, taskId),
+    runNow: (id: string, taskId: string) => ipcRenderer.invoke(IPC.schedRunNow, id, taskId),
+    onUpdated: (cb: (workspaceId: string, tasks: unknown) => void) => on(IPC.schedUpdated, cb),
+  },
+  focus: {
+    list: (id: string) => ipcRenderer.invoke(IPC.focusList, id),
+    start: (id: string, task: string, label: string, budgetMinutes?: number) =>
+      ipcRenderer.invoke(IPC.focusStart, id, task, label, budgetMinutes),
+    stop: (id: string, focusId: string) => ipcRenderer.invoke(IPC.focusStop, id, focusId),
+    onUpdated: (cb: (workspaceId: string, agents: unknown) => void) => on(IPC.focusUpdated, cb),
+    board: {
+      list: (id: string) => ipcRenderer.invoke(IPC.focusBoardList, id),
+      answer: (id: string, requestId: string, answer: string) =>
+        ipcRenderer.invoke(IPC.focusQuestionAnswer, id, requestId, answer),
+      onUpdated: (cb: (workspaceId: string, messages: unknown) => void) => on(IPC.focusBoardUpdated, cb),
+      onQuestion: (cb: (workspaceId: string, req: unknown) => void) => on(IPC.focusQuestionRequest, cb),
+    },
   },
 });

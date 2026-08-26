@@ -7,6 +7,9 @@ import { isAuditLogPath } from './audit-service';
 import { slugify, type ExtractedPage } from './page-extract';
 import { oneOffCompletion } from './chat-provider';
 import { getCachedPermissionOverrides, getCachedBashAllowlist } from './perm-store';
+import { loadScheduledTasks, saveScheduledTasks, computeNextRun } from './scheduler-store';
+import { loadFocusBoard, saveFocusBoard } from './focus-board';
+import { fileBugReport as fileBugReportOnDisk, type BugReportInput } from './bug-store';
 import {
   loadSessions,
   saveSessions,
@@ -31,6 +34,11 @@ import type {
   PermissionCategory,
   PermissionLevel,
   ApprovalDecision,
+  ScheduledTask,
+  ScheduleSpec,
+  FocusMessage,
+  FocusAgentSummary,
+  FocusQuestion,
 } from './ipc-channels';
 
 /**
@@ -79,6 +87,14 @@ export interface WorkspaceEmit {
   subagentCommandApproval: (workspaceId: string, req: SubagentCommandApproval) => void;
   /** A session's whole roadmap, sent fresh on every change (propose/decide/edit/push-back/status). */
   roadmapUpdated: (workspaceId: string, sessionId: string, items: RoadmapItem[]) => void;
+  /** This workspace's whole scheduled-task list, sent fresh on every create/update/delete/fire. */
+  schedulerUpdated: (workspaceId: string, tasks: ScheduledTask[]) => void;
+  /** This workspace's whole Focus agent list, sent fresh whenever one starts, finishes, or is stopped. */
+  focusUpdated: (workspaceId: string, agents: FocusAgentSummary[]) => void;
+  /** The shared cross-agent message board, sent fresh on every post. */
+  focusBoardUpdated: (workspaceId: string, messages: FocusMessage[]) => void;
+  /** An ask_and_wait call is waiting on the Operator (or a peer agent's reply) — see requestFocusAnswer. */
+  focusQuestion: (workspaceId: string, req: FocusQuestion) => void;
 }
 
 /**
@@ -118,6 +134,18 @@ interface SessionRuntime {
   pendingRoadmapRestart: RoadmapItem | null;
 }
 
+/** One running (or finished) background Focus agent — see Workspace.startFocusAgent/runFocusLoop. */
+interface FocusAgentRuntime {
+  id: string;
+  label: string;
+  task: string;
+  sessionId: string;
+  agent: AgentSession;
+  status: FocusAgentSummary['status'];
+  startedAt: number;
+  budgetMs: number;
+}
+
 /**
  * A workspace is a self-contained unit of work: its own folder, terminal,
  * and review queue, shared across every session in it (they're all editing
@@ -152,6 +180,20 @@ export class Workspace {
    * its subagents' outstanding approvals too, same as pendingApprovals.
    */
   private pendingSubagentApprovals = new Map<string, { resolve: (approved: boolean) => void; parentSessionId: string }>();
+
+  /** This workspace's scheduled tasks — persisted per rootPath via scheduler-store.ts, ticked by main.ts's global interval. */
+  private schedules: ScheduledTask[] = [];
+  /** Shared cross-agent message board — persisted per rootPath via focus-board.ts. */
+  private board: FocusMessage[] = [];
+  private focusAgents = new Map<string, FocusAgentRuntime>();
+  private focusSeq = 0;
+  /**
+   * Outstanding ask_and_wait calls, keyed by the board message id of the
+   * question itself — a reply's in_reply_to matching one of these keys is
+   * what resolves it, whether that reply comes from the Operator (via
+   * answerFocusQuestion) or another agent's plain post_message call.
+   */
+  private pendingFocusQuestions = new Map<string, { resolve: (answer: string | null) => void }>();
 
   /** Set when the agent finishes while the user is looking at another workspace. */
   unseenCompletion = false;
@@ -212,9 +254,13 @@ export class Workspace {
     // entirely — stop whatever every old session's agent was doing first.
     for (const rt of this.runtimes.values()) rt.agent?.stop();
     this.runtimes.clear();
+    for (const rt of this.focusAgents.values()) rt.agent.stop();
+    this.focusAgents.clear();
     this.sessions = await loadSessions(rootPath);
     this.activeSessionId = this.sessions[0]?.id ?? null;
     if (!this.activeSessionId) this.newSession();
+    this.schedules = await loadScheduledTasks(rootPath);
+    this.board = await loadFocusBoard(rootPath);
   }
 
   /** Sessions newest-first, the order the sidebar lists them in. */
@@ -263,6 +309,53 @@ export class Workspace {
     return summarize(session);
   }
 
+  /**
+   * Same as newSession, but never becomes the active one — used by the
+   * scheduler so a background task's own dedicated session doesn't steal
+   * focus from whatever the Operator is actually looking at.
+   */
+  newBackgroundSession(label: string): SessionSummary {
+    this.sessionSeq += 1;
+    const now = Date.now();
+    const session: Session = {
+      id: `${this.id}-bg${this.sessionSeq}-${now.toString(36)}`,
+      title: label,
+      titled: true, // the caller already named it — skip AI titling
+      createdAt: now,
+      updatedAt: now,
+      chat: [],
+      activity: [],
+      messages: [],
+      roadmap: [],
+    };
+    this.sessions.push(session);
+    void this.persist();
+    this.emit.sessions(this.id);
+    return summarize(session);
+  }
+
+  /**
+   * Sends into a SPECIFIC session regardless of which one is active — for
+   * the scheduler, which must never touch the Operator's current session.
+   * Refuses (returns false) if that session's agent is already mid-turn,
+   * since calling send() again on the same AgentSession before the first
+   * call returns would race on its shared message array; the caller just
+   * tries again next poll.
+   */
+  async sendToSession(sessionId: string, text: string): Promise<boolean> {
+    const session = this.sessions.find((s) => s.id === sessionId);
+    if (!session) return false;
+    if (this.runtimes.get(sessionId)?.running) return false;
+    const msg: ChatMessage = { role: 'user', text };
+    session.chat.push(msg);
+    session.activity = [];
+    session.updatedAt = Date.now();
+    this.emit.message(this.id, sessionId, msg);
+    this.emit.sessions(this.id);
+    void this.ensureAgent(sessionId).send(text);
+    return true;
+  }
+
   selectSession(sessionId: string): boolean {
     const session = this.sessions.find((s) => s.id === sessionId);
     if (!session) return false;
@@ -292,6 +385,8 @@ export class Workspace {
     this.sessions = await loadSessions(this.rootPath);
     this.activeSessionId = this.sessions[0]?.id ?? null;
     if (!this.activeSessionId) this.newSession();
+    this.schedules = this.rootPath ? await loadScheduledTasks(this.rootPath) : [];
+    this.board = this.rootPath ? await loadFocusBoard(this.rootPath) : [];
   }
 
   /** Exports every session that currently has a live agent, not just the active one — a background session's history must persist too. */
@@ -707,6 +802,321 @@ export class Workspace {
     this.emit.activity(this.id, sessionId, evt);
   }
 
+  // ── Scheduler ────────────────────────────────────────────────────────────
+  // A scheduled task fires a fixed prompt into its own dedicated background
+  // session on a cron or interval schedule. main.ts's global interval calls
+  // tickScheduler() on every open workspace periodically; nothing in here
+  // starts a timer of its own.
+
+  listSchedules(): ScheduledTask[] {
+    return this.schedules;
+  }
+
+  private emitSchedules() {
+    this.emit.schedulerUpdated(this.id, this.schedules);
+  }
+
+  private persistSchedules() {
+    return this.rootPath ? saveScheduledTasks(this.rootPath, this.schedules) : Promise.resolve();
+  }
+
+  createSchedule(label: string, prompt: string, schedule: ScheduleSpec): ScheduledTask {
+    const task: ScheduledTask = {
+      id: nextId('sched'),
+      label,
+      prompt,
+      schedule,
+      enabled: true,
+      createdAt: Date.now(),
+      lastRunAt: null,
+      lastResult: null,
+      nextRunAt: computeNextRun(schedule, Date.now()),
+      sessionId: null,
+    };
+    this.schedules.push(task);
+    void this.persistSchedules();
+    this.emitSchedules();
+    return task;
+  }
+
+  updateSchedule(id: string, patch: Partial<Pick<ScheduledTask, 'label' | 'prompt' | 'schedule' | 'enabled'>>) {
+    const task = this.schedules.find((t) => t.id === id);
+    if (!task) return;
+    if (patch.label !== undefined) task.label = patch.label;
+    if (patch.prompt !== undefined) task.prompt = patch.prompt;
+    if (patch.schedule !== undefined) {
+      task.schedule = patch.schedule;
+      task.nextRunAt = computeNextRun(patch.schedule, Date.now());
+    }
+    if (patch.enabled !== undefined) {
+      task.enabled = patch.enabled;
+      // Re-enabling a task that ran out its cron window (nextRunAt gone null) needs a fresh one to ever fire again.
+      if (task.enabled && task.nextRunAt === null) task.nextRunAt = computeNextRun(task.schedule, Date.now());
+    }
+    void this.persistSchedules();
+    this.emitSchedules();
+  }
+
+  deleteSchedule(id: string) {
+    this.schedules = this.schedules.filter((t) => t.id !== id);
+    void this.persistSchedules();
+    this.emitSchedules();
+  }
+
+  runScheduleNow(id: string) {
+    const task = this.schedules.find((t) => t.id === id);
+    if (task) void this.fireSchedule(task);
+  }
+
+  private async fireSchedule(task: ScheduledTask) {
+    if (!task.sessionId || !this.sessions.some((s) => s.id === task.sessionId)) {
+      task.sessionId = this.newBackgroundSession(`Scheduled: ${task.label}`).id;
+    }
+    task.lastRunAt = Date.now();
+    task.lastResult = 'started';
+    void this.persistSchedules();
+    this.emitSchedules();
+    const ok = await this.sendToSession(task.sessionId, task.prompt);
+    task.lastResult = ok ? 'started' : 'skipped — its session was still busy from the last run; will retry next tick';
+    void this.persistSchedules();
+    this.emitSchedules();
+  }
+
+  /** Called periodically by main.ts's global interval — fires every enabled task whose nextRunAt has passed. */
+  tickScheduler() {
+    if (!this.rootPath) return;
+    const now = Date.now();
+    for (const task of this.schedules) {
+      if (!task.enabled || task.nextRunAt === null || task.nextRunAt > now) continue;
+      task.nextRunAt = computeNextRun(task.schedule, now);
+      void this.fireSchedule(task);
+    }
+  }
+
+  // ── Cross-agent message board ───────────────────────────────────────────
+  // Shared by every agent in this workspace — the primary session(s), their
+  // subagents, and any Focus agents — via the post_message/read_board/
+  // ask_and_wait tools. See agent-service.ts's AgentCallbacks for how an
+  // AgentSession reaches these.
+
+  private persistBoard() {
+    return this.rootPath ? saveFocusBoard(this.rootPath, this.board) : Promise.resolve();
+  }
+
+  /**
+   * Records a post and, if it answers an outstanding ask_and_wait (inReplyTo
+   * matches a pending question's own message id), resolves that wait too —
+   * whether the reply came from the Operator (answerFocusQuestion) or another
+   * agent's own post_message call.
+   */
+  postToBoard(from: string, text: string, opts?: { inReplyTo?: string; needsAnswer?: boolean }): FocusMessage {
+    const msg: FocusMessage = {
+      id: nextId('msg'),
+      from,
+      text,
+      createdAt: Date.now(),
+      inReplyTo: opts?.inReplyTo,
+      needsAnswer: opts?.needsAnswer,
+    };
+    this.board.push(msg);
+    if (this.board.length > 500) this.board.shift();
+    void this.persistBoard();
+    this.emit.focusBoardUpdated(this.id, this.board);
+
+    if (opts?.inReplyTo) {
+      const pending = this.pendingFocusQuestions.get(opts.inReplyTo);
+      if (pending) {
+        this.pendingFocusQuestions.delete(opts.inReplyTo);
+        pending.resolve(text);
+      }
+    }
+    return msg;
+  }
+
+  readBoard(sinceId?: string, limit = 50): FocusMessage[] {
+    let list = this.board;
+    if (sinceId) {
+      const idx = list.findIndex((m) => m.id === sinceId);
+      if (idx >= 0) list = list.slice(idx + 1);
+    }
+    return list.slice(-Math.max(1, Math.min(limit, 200)));
+  }
+
+  /**
+   * ask_and_wait's implementation: posts the question (tagged needsAnswer),
+   * notifies the UI, and blocks until postToBoard resolves it (a reply's
+   * inReplyTo matching this question's id) or the timeout elapses — resolving
+   * null in that case, never hanging forever.
+   */
+  requestFocusAnswer(from: string, question: string, timeoutMinutes = 10): Promise<string | null> {
+    const msg = this.postToBoard(from, question, { needsAnswer: true });
+    this.emit.focusQuestion(this.id, { requestId: msg.id, from, question });
+    const timeoutMs = Math.min(Math.max(timeoutMinutes, 1), 60) * 60_000;
+    return new Promise((resolve) => {
+      const timer = setTimeout(() => {
+        if (this.pendingFocusQuestions.delete(msg.id)) resolve(null);
+      }, timeoutMs);
+      this.pendingFocusQuestions.set(msg.id, {
+        resolve: (answer) => {
+          clearTimeout(timer);
+          resolve(answer);
+        },
+      });
+    });
+  }
+
+  /** The Operator answering an ask_and_wait question directly from the UI, rather than another agent replying via post_message. */
+  answerFocusQuestion(requestId: string, answer: string) {
+    const pending = this.pendingFocusQuestions.get(requestId);
+    if (!pending) return;
+    this.pendingFocusQuestions.delete(requestId);
+    this.postToBoard('Operator', answer, { inReplyTo: requestId });
+    pending.resolve(answer);
+  }
+
+  fileBugReport(report: BugReportInput): Promise<string> {
+    if (!this.rootPath) return Promise.reject(new Error('No project folder open.'));
+    return fileBugReportOnDisk(this.rootPath, report);
+  }
+
+  // ── Focus agents ─────────────────────────────────────────────────────────
+  // spawn_focus_agent starts one of these: an independent AgentSession that
+  // keeps looping turns, unattended, in its own dedicated background session
+  // until it either replies with the FOCUS_DONE sentinel or its time budget
+  // runs out. It shares the same tool set as a subagent (SUBAGENT_TOOLS,
+  // which now includes the board/ask_and_wait tools) so it can coordinate
+  // with whoever spawned it or with other Focus agents while it works.
+
+  listFocusAgents(): FocusAgentSummary[] {
+    return [...this.focusAgents.values()].map((f) => ({
+      id: f.id,
+      label: f.label,
+      task: f.task,
+      sessionId: f.sessionId,
+      status: f.status,
+      startedAt: f.startedAt,
+      budgetMs: f.budgetMs,
+      elapsedMs: Date.now() - f.startedAt,
+    }));
+  }
+
+  private emitFocus() {
+    this.emit.focusUpdated(this.id, this.listFocusAgents());
+  }
+
+  stopFocusAgent(id: string) {
+    const rt = this.focusAgents.get(id);
+    if (!rt) return;
+    rt.agent.stop();
+    rt.status = 'stopped';
+    this.emitFocus();
+  }
+
+  startFocusAgent(task: string, label: string, budgetMinutes = 30): FocusAgentSummary {
+    this.focusSeq += 1;
+    const id = `${this.id}-focus${this.focusSeq}-${Date.now().toString(36)}`;
+    const sessionId = this.newBackgroundSession(`Focus: ${label}`).id;
+    const budgetMs = Math.round(Math.min(Math.max(budgetMinutes, 1), 240) * 60_000);
+    const rulesDir = process.env.RULES_DIR?.trim() || null;
+    const findSession = () => this.sessions.find((s) => s.id === sessionId);
+
+    let lastReply = '';
+    const agent = new AgentSession(
+      this.rootPath ?? process.cwd(),
+      {
+        onActivity: (evt) => {
+          const session = findSession();
+          if (session) {
+            session.activity.push(evt);
+            if (session.activity.length > 200) session.activity.shift();
+          }
+          this.emit.activity(this.id, sessionId, evt);
+        },
+        onTerminal: (evt) => this.recordTerminal(evt),
+        onMessage: (text, images) => {
+          lastReply = text;
+          const msg: ChatMessage = { role: 'assistant', text, images };
+          const session = findSession();
+          session?.chat.push(msg);
+          this.emit.message(this.id, sessionId, msg);
+        },
+        onStatus: () => {}, // Focus agents aren't part of any session's running-indicator bracket.
+        onDiffProposed: (diff) => {
+          this.diffs.add(diff);
+          this.emit.diffProposed(this.id, diff);
+          this.emit.status(this.id);
+        },
+        onRoadmapProposed: () => {},
+        onRoadmapItemDone: () => ({ ok: false, error: 'Focus agents cannot work on roadmap items.' }),
+        onUsage: () => {},
+        onCost: (usd) => {
+          const session = findSession();
+          if (!session) return;
+          session.costUsd = (session.costUsd ?? 0) + usd;
+          this.emit.sessions(this.id);
+        },
+        onCompaction: () => {},
+        runShell: (requestId, command) =>
+          this.runtime(sessionId).terminal.run(requestId, 'agent', command, (evt) => this.recordTerminal(evt)),
+        getPermission: (category) => resolvePermission(category, this.autonomy),
+        requestActionApproval: (category, description) => this.requestApproval(sessionId, description, category),
+        getBashAllowlist: () => getCachedBashAllowlist(),
+        requestSubagentCommandApproval: (command, subLabel) => this.requestSubagentApproval(sessionId, command, subLabel),
+        applyEditAuto: (diff) => this.applyEditAuto(diff),
+        getSessionCostUsd: () => findSession()?.costUsd ?? 0,
+        postToBoard: (from, text, inReplyTo) => this.postToBoard(from, text, { inReplyTo }),
+        readBoard: (sinceId, limit) => this.readBoard(sinceId, limit),
+        askAndWait: (from, question, timeoutMinutes) => this.requestFocusAnswer(from, question, timeoutMinutes),
+        fileBugReport: (report) => this.fileBugReport(report),
+      },
+      rulesDir,
+      true,
+      `Focus: ${label}`
+    );
+
+    const rt: FocusAgentRuntime = { id, label, task, sessionId, agent, status: 'running', startedAt: Date.now(), budgetMs };
+    this.focusAgents.set(id, rt);
+    this.emitFocus();
+    void this.runFocusLoop(rt, () => lastReply);
+    return { id, label, task, sessionId, status: 'running', startedAt: rt.startedAt, budgetMs, elapsedMs: 0 };
+  }
+
+  /**
+   * Keeps sending turns to a Focus agent until it declares itself done
+   * (FOCUS_DONE on its own line) or its time budget runs out — this is the
+   * actual "keeps working unattended" mechanism; nothing else advances it.
+   */
+  private async runFocusLoop(rt: FocusAgentRuntime, getLastReply: () => string) {
+    const deadline = rt.startedAt + rt.budgetMs;
+    let prompt =
+      `You are a background Focus agent with a total time budget of ${Math.round(rt.budgetMs / 60000)} ` +
+      'minute(s). No one is watching this run live, so work autonomously toward the task below. You can ' +
+      'coordinate with other agents via post_message/read_board, and use ask_and_wait only if you are ' +
+      'genuinely blocked without an answer. When the task is fully and genuinely complete, end your reply ' +
+      'with the exact line FOCUS_DONE — do not include it before that is true.\n\n' +
+      `Task: ${rt.task}`;
+
+    try {
+      while (rt.status === 'running' && Date.now() < deadline) {
+        await rt.agent.send(prompt);
+        if (rt.status !== 'running') break; // Stopped externally mid-turn.
+        if (getLastReply().includes('FOCUS_DONE')) {
+          rt.status = 'done';
+          break;
+        }
+        const remainingMin = Math.max(0, Math.round((deadline - Date.now()) / 60_000));
+        if (remainingMin <= 0) break;
+        prompt =
+          `You have about ${remainingMin} minute(s) left in your budget. Continue the task, or if it is ` +
+          'genuinely complete, end your reply with FOCUS_DONE.';
+      }
+    } catch {
+      rt.status = 'error';
+    }
+    if (rt.status === 'running') rt.status = Date.now() >= deadline ? 'expired' : 'done';
+    this.emitFocus();
+  }
+
   /** Lazily builds — and only builds once — this session's own isolated AgentSession, restoring its persisted history the first time. */
   private ensureAgent(sessionId: string): AgentSession {
     const rt = this.runtime(sessionId);
@@ -797,7 +1207,12 @@ export class Workspace {
         requestSubagentCommandApproval: (command, label) => this.requestSubagentApproval(sessionId, command, label),
         applyEditAuto: (diff) => this.applyEditAuto(diff),
         getSessionCostUsd: () => findSession()?.costUsd ?? 0,
-      }, rulesDir);
+        postToBoard: (from, text, inReplyTo) => this.postToBoard(from, text, { inReplyTo }),
+        readBoard: (sinceId, limit) => this.readBoard(sinceId, limit),
+        askAndWait: (from, question, timeoutMinutes) => this.requestFocusAnswer(from, question, timeoutMinutes),
+        fileBugReport: (report) => this.fileBugReport(report),
+        startFocusAgent: (task, label, budgetMinutes) => this.startFocusAgent(task, label, budgetMinutes),
+      }, rulesDir, false, findSession()?.title);
       const session = findSession();
       if (session) rt.agent.restoreHistory(session.messages);
     }
@@ -860,6 +1275,7 @@ export class Workspace {
 
   dispose() {
     for (const rt of this.runtimes.values()) rt.agent?.stop();
+    for (const rt of this.focusAgents.values()) rt.agent.stop();
     this.terminal.kill();
   }
 }

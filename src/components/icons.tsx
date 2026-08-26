@@ -164,3 +164,13 @@ export const IconCode = (p: P) => (
 export const IconBookmark = (p: P) => (
   <svg {...stroke(p)}><path d="M6 3.5h12v17l-6-4-6 4v-17z" /></svg>
 );
+export const IconClock = (p: P) => (
+  <svg {...stroke(p)}><circle cx="12" cy="12" r="8.5" /><path d="M12 7v5.5l4 2.5" /></svg>
+);
+export const IconMessages = (p: P) => (
+  <svg {...stroke(p)}>
+    <path d="M3.5 5.5h13v9h-8l-3.5 3v-3H3.5z" />
+    <path d="M9.5 4h11v9h-3.5" />
+  </svg>
+);
+

@@ -15,6 +15,7 @@ import type {
   WorkspaceKind,
   PermissionOverrides,
   ApprovalDecision,
+  ScheduleSpec,
 } from './ipc-channels';
 import * as fsService from './fs-service';
 import { WorkspaceManager } from './workspace-manager';
@@ -86,7 +87,19 @@ const manager = new WorkspaceManager({
     send(IPC.cmdApprovalRequest, workspaceId, { requestId, command, sessionId, category }),
   subagentCommandApproval: (workspaceId, req) => send(IPC.subagentCmdApprovalRequest, workspaceId, req),
   roadmapUpdated: (workspaceId, sessionId, items) => send(IPC.roadmapUpdated, workspaceId, sessionId, items),
+  schedulerUpdated: (workspaceId, tasks) => send(IPC.schedUpdated, workspaceId, tasks),
+  focusUpdated: (workspaceId, agents) => send(IPC.focusUpdated, workspaceId, agents),
+  focusBoardUpdated: (workspaceId, messages) => send(IPC.focusBoardUpdated, workspaceId, messages),
+  focusQuestion: (workspaceId, req) => send(IPC.focusQuestionRequest, workspaceId, req),
 });
+
+// Scheduled tasks are ticked centrally rather than each workspace running its
+// own timer — one interval, checked against every open workspace's own
+// schedule list, is simpler to reason about and impossible to leak a timer
+// from when a workspace closes.
+setInterval(() => {
+  for (const ws of manager.list()) ws.tickScheduler();
+}, 20_000);
 
 const browserViewManager = new BrowserViewManager((workspaceId, state) => send(IPC.browserNavState, workspaceId, state));
 
@@ -262,6 +275,9 @@ app.whenReady().then(() => {
       pendingDiffs: ws.diffs.list(),
       checkpoints: ws.diffs.listCheckpoints(),
       roadmap: ws.roadmap,
+      schedules: ws.listSchedules(),
+      focusAgents: ws.listFocusAgents(),
+      board: ws.readBoard(undefined, 200),
     };
   });
 
@@ -540,6 +556,66 @@ app.whenReady().then(() => {
 
   ipcMain.handle(IPC.permsSetAllowlist, async (_e, patterns: string[]) => {
     saveBashAllowlist(Array.isArray(patterns) ? patterns.filter((p) => typeof p === 'string') : []);
+    return true;
+  });
+
+  // ── Scheduler ─────────────────────────────────────────────────────────
+
+  ipcMain.handle(IPC.schedList, async (_e, workspaceId: string) => {
+    return manager.get(workspaceId)?.listSchedules() ?? [];
+  });
+
+  ipcMain.handle(
+    IPC.schedCreate,
+    async (_e, workspaceId: string, label: string, prompt: string, schedule: ScheduleSpec) => {
+      return manager.get(workspaceId)?.createSchedule(label, prompt, schedule) ?? null;
+    }
+  );
+
+  ipcMain.handle(
+    IPC.schedUpdate,
+    async (
+      _e,
+      workspaceId: string,
+      id: string,
+      patch: { label?: string; prompt?: string; schedule?: ScheduleSpec; enabled?: boolean }
+    ) => {
+      manager.get(workspaceId)?.updateSchedule(id, patch);
+      return true;
+    }
+  );
+
+  ipcMain.handle(IPC.schedDelete, async (_e, workspaceId: string, id: string) => {
+    manager.get(workspaceId)?.deleteSchedule(id);
+    return true;
+  });
+
+  ipcMain.handle(IPC.schedRunNow, async (_e, workspaceId: string, id: string) => {
+    manager.get(workspaceId)?.runScheduleNow(id);
+    return true;
+  });
+
+  // ── Focus agents & message board ─────────────────────────────────────────
+
+  ipcMain.handle(IPC.focusList, async (_e, workspaceId: string) => {
+    return manager.get(workspaceId)?.listFocusAgents() ?? [];
+  });
+
+  ipcMain.handle(IPC.focusStart, async (_e, workspaceId: string, task: string, label: string, budgetMinutes?: number) => {
+    return manager.get(workspaceId)?.startFocusAgent(task, label, budgetMinutes) ?? null;
+  });
+
+  ipcMain.handle(IPC.focusStop, async (_e, workspaceId: string, id: string) => {
+    manager.get(workspaceId)?.stopFocusAgent(id);
+    return true;
+  });
+
+  ipcMain.handle(IPC.focusBoardList, async (_e, workspaceId: string) => {
+    return manager.get(workspaceId)?.readBoard(undefined, 200) ?? [];
+  });
+
+  ipcMain.handle(IPC.focusQuestionAnswer, async (_e, workspaceId: string, requestId: string, answer: string) => {
+    manager.get(workspaceId)?.answerFocusQuestion(requestId, answer);
     return true;
   });
 

@@ -767,6 +767,30 @@ input, textarea { font: inherit; color: inherit; }
 .rm-editor { flex: 1; min-height: 320px; border: 1px solid var(--line); border-radius: var(--r-md); overflow: hidden; }
 .rm-notes { margin-top: var(--s4); padding: var(--s3); border: 1px solid var(--line); border-radius: var(--r-md); background: var(--bg-raised); font-size: var(--t-sm); color: var(--fg-2); white-space: pre-wrap; }
 
+/* ── Scheduler / Focus / Board ────────────────────────────────────────── */
+.sch-wrap { flex-direction: column; }
+.sch-tabs { display: flex; gap: var(--s2); padding: var(--s2) var(--s3); border-bottom: 1px solid var(--line); flex: none; }
+.sch-tabs .seg { display: inline-flex; align-items: center; gap: 6px; }
+.sch-body { flex: 1; min-height: 0; display: flex; }
+.sch-full { flex-direction: column; overflow: auto; padding: var(--s4) var(--s5); gap: var(--s2); }
+.sch-new-btn { width: calc(100% - var(--s2)); justify-content: center; margin-bottom: var(--s2); }
+.sch-field { display: flex; flex-direction: column; gap: 4px; margin-bottom: var(--s4); }
+.sch-field label { font-size: var(--t-xs); color: var(--fg-3); }
+.sch-field input, .sch-field textarea { border: 1px solid var(--line); border-radius: var(--r-md); background: var(--bg-raised); padding: 6px 10px; font-size: var(--t-sm); }
+.sch-field textarea { resize: vertical; }
+.sch-kind-row { display: flex; align-items: center; gap: var(--s2); margin-top: 4px; }
+.sch-kind-row .mini.on { background: var(--bg-active); }
+.sch-meta { display: flex; flex-direction: column; gap: 4px; font-size: var(--t-xs); color: var(--fg-3); margin-top: var(--s3); }
+.sch-answer-input { flex: 1; border: 1px solid var(--line); border-radius: var(--r-md); background: var(--bg-raised); padding: 6px 10px; font-size: var(--t-sm); }
+.sch-questions { flex: none; padding: var(--s3) var(--s5) 0; display: flex; flex-direction: column; gap: var(--s2); }
+.sch-focus-form { flex-direction: row; align-items: center; gap: var(--s2); }
+.sch-focus-item { border: 1px solid var(--line); border-radius: var(--r-md); }
+.sch-msg { border: 1px solid var(--line); border-radius: var(--r-md); background: var(--bg-raised); padding: var(--s3); }
+.sch-msg-head { display: flex; align-items: center; gap: var(--s2); font-size: var(--t-xs); color: var(--fg-3); margin-bottom: 4px; }
+.sch-msg-from { font-weight: 600; color: var(--fg-2); }
+.sch-msg-badge { background: var(--amber); color: #000; border-radius: 999px; padding: 0 6px; font-size: 10px; }
+.sch-msg-text { font-size: var(--t-sm); white-space: pre-wrap; }
+
 /* ── Settings overlay ──────────────────────────────────────────────────── */
 .settings-body { flex: 1; min-height: 0; overflow-y: auto; padding: var(--s6) var(--s5); }
 .settings-section { max-width: 520px; margin: 0 auto var(--s8); }

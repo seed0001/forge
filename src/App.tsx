@@ -6,6 +6,7 @@ import { ChatView } from './components/ChatView';
 import { EditorPanel } from './components/EditorPanel';
 import { TerminalPanel } from './components/TerminalPanel';
 import { RoadmapPanel } from './components/RoadmapPanel';
+import { SchedulerPanel } from './components/SchedulerPanel';
 import { BrowserPanel } from './components/BrowserPanel';
 import { WorkspaceChooser } from './components/WorkspaceChooser';
 import { ReviewOverlay } from './components/ReviewOverlay';
@@ -23,6 +24,7 @@ const CODING_VIEWS = [
   { key: 'editor', label: 'Editor' },
   { key: 'terminal', label: 'Terminal' },
   { key: 'roadmap', label: 'Roadmap' },
+  { key: 'scheduler', label: 'Scheduler' },
 ] as const;
 
 const BROWSING_VIEWS = [
@@ -84,6 +86,7 @@ export default function App() {
                 {center === 'editor' && <EditorPanel />}
                 {center === 'terminal' && <TerminalPanel />}
                 {center === 'roadmap' && <RoadmapPanel />}
+                {center === 'scheduler' && <SchedulerPanel />}
                 {center === 'browser' && <BrowserPanel />}
               </div>
             </div>

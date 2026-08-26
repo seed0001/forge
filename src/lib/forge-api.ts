@@ -22,6 +22,10 @@ import type {
   BrowserNavState,
   PermissionOverrides,
   ApprovalDecision,
+  ScheduleSpec,
+  ScheduledTask,
+  FocusAgentSummary,
+  FocusMessage,
 } from '../../electron/ipc-channels';
 
 type Unsubscribe = () => void;
@@ -138,6 +142,30 @@ export interface ForgeApi {
     set: (overrides: Partial<PermissionOverrides>) => Promise<boolean>;
     getAllowlist: () => Promise<string[]>;
     setAllowlist: (patterns: string[]) => Promise<boolean>;
+  };
+  scheduler: {
+    list: (id: string) => Promise<ScheduledTask[]>;
+    create: (id: string, label: string, prompt: string, schedule: ScheduleSpec) => Promise<ScheduledTask | null>;
+    update: (
+      id: string,
+      taskId: string,
+      patch: { label?: string; prompt?: string; schedule?: ScheduleSpec; enabled?: boolean }
+    ) => Promise<boolean>;
+    remove: (id: string, taskId: string) => Promise<boolean>;
+    runNow: (id: string, taskId: string) => Promise<boolean>;
+    onUpdated: (cb: (workspaceId: string, tasks: ScheduledTask[]) => void) => Unsubscribe;
+  };
+  focus: {
+    list: (id: string) => Promise<FocusAgentSummary[]>;
+    start: (id: string, task: string, label: string, budgetMinutes?: number) => Promise<FocusAgentSummary | null>;
+    stop: (id: string, focusId: string) => Promise<boolean>;
+    onUpdated: (cb: (workspaceId: string, agents: FocusAgentSummary[]) => void) => Unsubscribe;
+    board: {
+      list: (id: string) => Promise<FocusMessage[]>;
+      answer: (id: string, requestId: string, answer: string) => Promise<boolean>;
+      onUpdated: (cb: (workspaceId: string, messages: FocusMessage[]) => void) => Unsubscribe;
+      onQuestion: (cb: (workspaceId: string, req: { requestId: string; from: string; question: string }) => void) => Unsubscribe;
+    };
   };
 }
 

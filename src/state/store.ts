@@ -25,7 +25,18 @@ import type {
   PermissionCategory,
   PermissionLevel,
   ApprovalDecision,
+  ScheduleSpec,
+  ScheduledTask,
+  FocusAgentSummary,
+  FocusMessage,
 } from '../../electron/ipc-channels';
+
+/** A Focus agent's ask_and_wait call waiting on the Operator, keyed by requestId — mirrors pendingSubagentApprovals. */
+export interface PendingFocusQuestion {
+  requestId: string;
+  from: string;
+  question: string;
+}
 
 export interface OpenFile {
   path: string;
@@ -48,7 +59,7 @@ export interface PendingImage {
  * currently looking at, so switching tabs is instant and nothing is missed.
  */
 /** Which surface the centre column is showing. Chat is the primary one. */
-export type CenterView = 'chat' | 'editor' | 'terminal' | 'roadmap' | 'browser';
+export type CenterView = 'chat' | 'editor' | 'terminal' | 'roadmap' | 'scheduler' | 'browser';
 
 /** Which list the sidebar is showing. Sessions is the primary one. */
 export type SidebarView = 'sessions' | 'files';
@@ -83,6 +94,11 @@ export interface WorkspaceView {
   paintTarget: { src: string; name: string } | null;
   /** A Browsing workspace's live nav state — null for a coding workspace, or before any page has loaded. */
   browserNav: BrowserNavState | null;
+  schedules: ScheduledTask[];
+  focusAgents: FocusAgentSummary[];
+  board: FocusMessage[];
+  /** Focus agents' ask_and_wait calls waiting on the Operator, keyed by requestId — deliberately not session-scoped, same reasoning as pendingSubagentApprovals. */
+  pendingFocusQuestions: Record<string, PendingFocusQuestion>;
 }
 
 interface ForgeState {
@@ -163,6 +179,18 @@ interface ForgeState {
   pushBackRoadmapItem: (itemId: string, newDetail: string) => Promise<void>;
   setRoadmapItemStatus: (itemId: string, status: RoadmapItemStatus) => Promise<void>;
 
+  createSchedule: (label: string, prompt: string, schedule: ScheduleSpec) => Promise<void>;
+  updateSchedule: (
+    taskId: string,
+    patch: { label?: string; prompt?: string; schedule?: ScheduleSpec; enabled?: boolean }
+  ) => Promise<void>;
+  deleteSchedule: (taskId: string) => Promise<void>;
+  runScheduleNow: (taskId: string) => Promise<void>;
+
+  startFocusAgent: (task: string, label: string, budgetMinutes?: number) => Promise<void>;
+  stopFocusAgent: (focusId: string) => Promise<void>;
+  answerFocusQuestion: (requestId: string, answer: string) => Promise<void>;
+
   openSettings: () => void;
   closeSettings: () => void;
   saveSettings: (values: Partial<ProviderSettings>) => Promise<boolean>;
@@ -206,6 +234,10 @@ function emptyView(summary: WorkspaceSummary): WorkspaceView {
     composerImages: [],
     paintTarget: null,
     browserNav: null,
+    schedules: [],
+    focusAgents: [],
+    board: [],
+    pendingFocusQuestions: {},
   };
 }
 
@@ -363,6 +395,27 @@ export const useForge = create<ForgeState>((set, get) => {
         patch(workspaceId, (v) => ({ ...v, roadmap: items }));
       });
 
+      forge.scheduler.onUpdated((workspaceId, tasks) => {
+        patch(workspaceId, (v) => ({ ...v, schedules: tasks }));
+      });
+
+      forge.focus.onUpdated((workspaceId, agents) => {
+        patch(workspaceId, (v) => ({ ...v, focusAgents: agents }));
+      });
+
+      forge.focus.board.onUpdated((workspaceId, messages) => {
+        patch(workspaceId, (v) => ({ ...v, board: messages }));
+      });
+
+      // Not session-scoped — same reasoning as the subagent approval card:
+      // a Focus agent has no session tab of its own to be "on".
+      forge.focus.board.onQuestion((workspaceId, req) => {
+        patch(workspaceId, (v) => ({
+          ...v,
+          pendingFocusQuestions: { ...v.pendingFocusQuestions, [req.requestId]: req },
+        }));
+      });
+
       forge.diff.onProposed((workspaceId, diff) => {
         patch(workspaceId, (v) => ({ ...v, pendingDiffs: { ...v.pendingDiffs, [diff.id]: diff } }));
       });
@@ -446,6 +499,9 @@ export const useForge = create<ForgeState>((set, get) => {
         pendingDiffs: Object.fromEntries(data.pendingDiffs.map((d) => [d.id, d])),
         checkpoints: data.checkpoints,
         roadmap: data.roadmap,
+        schedules: data.schedules,
+        focusAgents: data.focusAgents,
+        board: data.board,
         hydrated: true,
       }));
     },
@@ -772,6 +828,53 @@ export const useForge = create<ForgeState>((set, get) => {
       const id = get().activeId;
       if (!id) return;
       await forge.roadmap.setStatus(id, itemId, status);
+    },
+
+    createSchedule: async (label, prompt, schedule) => {
+      const id = get().activeId;
+      if (!id) return;
+      await forge.scheduler.create(id, label, prompt, schedule);
+    },
+
+    updateSchedule: async (taskId, patch) => {
+      const id = get().activeId;
+      if (!id) return;
+      await forge.scheduler.update(id, taskId, patch);
+    },
+
+    deleteSchedule: async (taskId) => {
+      const id = get().activeId;
+      if (!id) return;
+      await forge.scheduler.remove(id, taskId);
+    },
+
+    runScheduleNow: async (taskId) => {
+      const id = get().activeId;
+      if (!id) return;
+      await forge.scheduler.runNow(id, taskId);
+    },
+
+    startFocusAgent: async (task, label, budgetMinutes) => {
+      const id = get().activeId;
+      if (!id) return;
+      await forge.focus.start(id, task, label, budgetMinutes);
+    },
+
+    stopFocusAgent: async (focusId) => {
+      const id = get().activeId;
+      if (!id) return;
+      await forge.focus.stop(id, focusId);
+    },
+
+    answerFocusQuestion: async (requestId, answer) => {
+      const id = get().activeId;
+      if (!id) return;
+      patch(id, (v) => {
+        const next = { ...v.pendingFocusQuestions };
+        delete next[requestId];
+        return { ...v, pendingFocusQuestions: next };
+      });
+      await forge.focus.board.answer(id, requestId, answer);
     },
 
     openSettings: () => {

@@ -1,10 +1,12 @@
-import { app, BrowserWindow, dialog, ipcMain, session, shell } from 'electron';
+import { app, BrowserWindow, dialog, ipcMain, session, shell, Notification } from 'electron';
 import path from 'node:path';
 import fs from 'node:fs';
 import { fileURLToPath } from 'node:url';
+import { spawn } from 'node:child_process';
 
 import { loadEnv, setEnvValue } from './env';
 import { transcribe } from './transcribe';
+import { startPortalServer, type PortalHandle } from './portal-server';
 import { IPC, SETTINGS_KEYS, SECRET_SETTINGS_KEYS, SECRET_SENTINEL, MAX_TOOL_CALLS_LIMIT } from './ipc-channels';
 import type {
   WorkspaceHydration,
@@ -69,13 +71,32 @@ function send(channel: string, ...args: unknown[]) {
   win?.webContents.send(channel, ...args);
 }
 
+/**
+ * The phone portal mirrors ONE workspace (the same one this desktop app opens
+ * on startup) — set once that workspace exists, in app.whenReady. Declared up
+ * here because the WorkspaceManager's emit callbacks (which fire from deep
+ * inside agent turns) are wired before that workspace is created.
+ */
+let portal: PortalHandle | null = null;
+let portalWorkspaceId: string | null = null;
+/** Current tunnel state — polled by the renderer's Portal button on mount via IPC.portalGetStatus, pushed live via IPC.portalStatus. */
+let portalStatus: import('./ipc-channels').PortalStatus = { state: 'starting' };
+function setPortalStatus(next: typeof portalStatus) {
+  portalStatus = next;
+  send(IPC.portalStatus, next);
+}
+
 const manager = new WorkspaceManager({
   terminal: (workspaceId, evt) => send(IPC.termData, workspaceId, evt),
   activity: (workspaceId, sessionId, evt) => send(IPC.agentActivity, workspaceId, sessionId, evt),
-  message: (workspaceId, sessionId, msg) => send(IPC.agentMessage, workspaceId, sessionId, msg),
+  message: (workspaceId, sessionId, msg) => {
+    send(IPC.agentMessage, workspaceId, sessionId, msg);
+    if (workspaceId === portalWorkspaceId) portal?.broadcastMessage(msg);
+  },
   status: (workspaceId) => {
     const ws = manager.get(workspaceId);
     if (ws) send(IPC.wsUpdated, ws.summary());
+    if (ws && workspaceId === portalWorkspaceId) portal?.broadcastStatus(ws.status === 'running');
   },
   diffProposed: (workspaceId, diff) => send(IPC.diffProposed, workspaceId, diff),
   diffUpdated: (workspaceId, diff) => send(IPC.diffUpdated, workspaceId, diff),
@@ -109,6 +130,66 @@ function loadContent(w: BrowserWindow) {
   } else {
     w.loadFile(path.join(__dirname, '..', 'dist', 'index.html'));
   }
+}
+
+/**
+ * Spawns `cloudflared tunnel --url` — a "quick tunnel": no Cloudflare account,
+ * no login, no DNS setup, just an ephemeral https://*.trycloudflare.com URL
+ * that proxies straight to the portal server. Matches the "just me, no auth"
+ * ask: the URL is unguessable and dies with the process, so nothing further
+ * is exposed than knowing that one link. Requires cloudflared on PATH — if
+ * it's missing, the portal is still reachable on the LAN at the port logged
+ * below, just not from outside the network.
+ */
+function startPortalTunnel(port: number) {
+  setPortalStatus({ state: 'starting' });
+
+  let proc;
+  try {
+    proc = spawn('cloudflared', ['tunnel', '--url', `http://localhost:${port}`], {
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+  } catch (err) {
+    setPortalStatus({ state: 'unavailable', reason: String(err) });
+    return;
+  }
+
+  proc.on('error', (err) => {
+    console.warn('[forge] cloudflared not available:', err.message);
+    setPortalStatus({ state: 'unavailable', reason: err.message });
+  });
+
+  let announced = false;
+  const onOutput = (chunk: Buffer) => {
+    if (announced) return;
+    const match = chunk.toString().match(/https:\/\/[a-z0-9-]+\.trycloudflare\.com/i);
+    if (!match) return;
+    announced = true;
+    const url = match[0];
+    console.log(`[forge] portal available at: ${url}`);
+    setPortalStatus({ state: 'ready', url });
+    try {
+      new Notification({ title: 'Forge portal ready', body: url }).show();
+    } catch {
+      // Notifications aren't available in every environment — the in-app Portal button still shows the URL.
+    }
+    try {
+      const dest = path.join(app.getPath('userData'), 'portal-url.txt');
+      fs.writeFileSync(dest, url + '\n');
+    } catch {
+      // Non-essential convenience file — a failure here shouldn't affect the tunnel itself.
+    }
+  };
+  proc.stdout.on('data', onOutput);
+  proc.stderr.on('data', onOutput); // cloudflared logs its assigned URL to stderr, not stdout.
+
+  proc.on('exit', (code) => {
+    if (!announced) setPortalStatus({ state: 'unavailable', reason: `cloudflared exited (code ${code})` });
+  });
+
+  app.on('before-quit', () => {
+    proc.kill();
+  });
 }
 
 function createWindow() {
@@ -164,6 +245,11 @@ app.whenReady().then(() => {
   // isn't a real project anyway — start with no root and let the user pick one.
   const first = manager.create(app.isPackaged ? null : path.join(__dirname, '..'));
   void first.restoreSessions();
+
+  portalWorkspaceId = first.id;
+  const portalPort = Number(process.env.PORTAL_PORT) || 5333;
+  portal = startPortalServer(() => manager.get(portalWorkspaceId!) ?? null, portalPort);
+  startPortalTunnel(portalPort);
 
   createWindow();
   initUpdater((status) => send(IPC.updateStatus, status));
@@ -635,6 +721,11 @@ app.whenReady().then(() => {
     installUpdate();
     return true;
   });
+
+  // The renderer's Portal button reads this once on mount (tunnel may already
+  // be 'ready' by the time the window loads) and then just listens for
+  // IPC.portalStatus pushes for everything after.
+  ipcMain.handle(IPC.portalGetStatus, async () => portalStatus);
 
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();

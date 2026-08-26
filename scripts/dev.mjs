@@ -15,7 +15,7 @@ const shared = {
   target: 'node20',
   // Kept out of the bundle in dev too, so its behavior matches the packaged
   // build exactly — see the comment in build-main.mjs.
-  external: ['electron', 'electron-updater'],
+  external: ['electron', 'electron-updater', 'ws'],
   sourcemap: true,
 };
 

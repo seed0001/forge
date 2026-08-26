@@ -14,7 +14,13 @@ const shared = {
   // via its own __dirname/require.resolve at runtime — bundling it would rewrite
   // those paths and break differential-update downloads. Left as a real
   // node_modules dependency instead; electron-builder packages it unmodified.
-  external: ['electron', 'electron-updater'],
+  // ws (used by the phone portal's WebSocket server) is external for a
+  // narrower reason: esbuild's ESM output can't polyfill its internal dynamic
+  // `require()`s of Node builtins (events, stream, ...) — left unbundled,
+  // Node's own loader resolves those natively. It's a real "dependency" in
+  // package.json, so electron-builder ships it in node_modules the same way
+  // it already does electron-updater.
+  external: ['electron', 'electron-updater', 'ws'],
   minify: true,
 };
 

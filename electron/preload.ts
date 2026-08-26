@@ -120,6 +120,10 @@ contextBridge.exposeInMainWorld('forge', {
     install: () => ipcRenderer.invoke(IPC.updateInstall),
     onStatus: (cb: (status: unknown) => void) => on(IPC.updateStatus, cb),
   },
+  portal: {
+    getStatus: () => ipcRenderer.invoke(IPC.portalGetStatus),
+    onStatus: (cb: (status: unknown) => void) => on(IPC.portalStatus, cb),
+  },
   settings: {
     get: () => ipcRenderer.invoke(IPC.settingsGet),
     set: (values: Partial<ProviderSettings>) => ipcRenderer.invoke(IPC.settingsSet, values),

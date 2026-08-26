@@ -76,6 +76,9 @@ export const IPC = {
   updateInstall: 'update:install',
   updateStatus: 'update:status',
 
+  portalGetStatus: 'portal:get-status',
+  portalStatus: 'portal:status',
+
   settingsGet: 'settings:get',
   settingsSet: 'settings:set',
 
@@ -361,6 +364,18 @@ export type UpdateStatus =
   | { state: 'downloading'; version: string; percent: number }
   | { state: 'downloaded'; version: string }
   | { state: 'error'; message: string };
+
+/**
+ * The phone portal's Cloudflare quick-tunnel — 'starting' from app launch
+ * until cloudflared prints its assigned https://*.trycloudflare.com URL (a
+ * few seconds), 'ready' with that URL once it does, or 'unavailable' if
+ * cloudflared isn't installed/couldn't start (the portal server itself still
+ * runs locally, just isn't reachable from outside the network without it).
+ */
+export type PortalStatus =
+  | { state: 'starting' }
+  | { state: 'ready'; url: string }
+  | { state: 'unavailable'; reason: string };
 
 /**
  * Every credential the Settings page can read and write, keyed by the exact

@@ -16,6 +16,7 @@ import type {
   CatalogModel,
   ChatProvider,
   UpdateStatus,
+  PortalStatus,
   ProviderSettings,
   RoadmapItem,
   RoadmapItemStatus,
@@ -120,6 +121,9 @@ interface ForgeState {
 
   /** Manual-only, app-wide — see electron/updater.ts for why nothing here runs on its own. */
   updateStatus: UpdateStatus;
+
+  /** The phone portal's Cloudflare quick-tunnel — see electron/main.ts's startPortalTunnel. */
+  portalStatus: PortalStatus;
 
   /** Provider API keys, app-wide (one .env, not per-workspace). Loaded lazily when the Settings overlay first opens. */
   settingsOpen: boolean;
@@ -285,6 +289,7 @@ export const useForge = create<ForgeState>((set, get) => {
     modelsLoadedOnce: false,
 
     updateStatus: { state: 'idle' },
+    portalStatus: { state: 'starting' },
 
     settingsOpen: false,
     providerSettings: null,
@@ -298,6 +303,12 @@ export const useForge = create<ForgeState>((set, get) => {
         .getCurrent()
         .then(({ provider, model }) => set({ currentModel: model, currentProvider: provider }));
       if (!subscribed) forge.updates.onStatus((status) => set({ updateStatus: status }));
+      if (!subscribed) {
+        forge.portal.onStatus((status) => set({ portalStatus: status }));
+        // The tunnel may already be 'ready' by the time this window loads — the
+        // push above only covers status changes from here on, so back-fill once.
+        void forge.portal.getStatus().then((status) => set({ portalStatus: status }));
+      }
 
       const list = await forge.workspaces.list();
       set((s) => {

@@ -15,6 +15,7 @@ import type {
   CatalogModel,
   ChatProvider,
   UpdateStatus,
+  PortalStatus,
   ProviderSettings,
   RoadmapItem,
   RoadmapItemStatus,
@@ -132,6 +133,10 @@ export interface ForgeApi {
     download: () => Promise<boolean>;
     install: () => Promise<boolean>;
     onStatus: (cb: (status: UpdateStatus) => void) => Unsubscribe;
+  };
+  portal: {
+    getStatus: () => Promise<PortalStatus>;
+    onStatus: (cb: (status: PortalStatus) => void) => Unsubscribe;
   };
   settings: {
     get: () => Promise<ProviderSettings>;

@@ -165,6 +165,9 @@ interface ForgeState {
   downloadUpdate: () => Promise<void>;
   installUpdate: () => Promise<void>;
 
+  enablePortal: () => Promise<void>;
+  disablePortal: () => Promise<void>;
+
   sendChat: (text: string) => Promise<void>;
   stopAgent: () => Promise<void>;
 
@@ -289,7 +292,7 @@ export const useForge = create<ForgeState>((set, get) => {
     modelsLoadedOnce: false,
 
     updateStatus: { state: 'idle' },
-    portalStatus: { state: 'starting' },
+    portalStatus: { state: 'disabled' },
 
     settingsOpen: false,
     providerSettings: null,
@@ -723,6 +726,14 @@ export const useForge = create<ForgeState>((set, get) => {
 
     installUpdate: async () => {
       await forge.updates.install();
+    },
+
+    enablePortal: async () => {
+      await forge.portal.enable();
+    },
+
+    disablePortal: async () => {
+      await forge.portal.disable();
     },
 
     sendChat: async (text) => {

@@ -78,6 +78,8 @@ export const IPC = {
 
   portalGetStatus: 'portal:get-status',
   portalStatus: 'portal:status',
+  portalEnable: 'portal:enable',
+  portalDisable: 'portal:disable',
 
   settingsGet: 'settings:get',
   settingsSet: 'settings:set',
@@ -395,7 +397,13 @@ export type UpdateStatus =
  * cloudflared isn't installed/couldn't start (the portal server itself still
  * runs locally, just isn't reachable from outside the network without it).
  */
+/**
+ * 'disabled' is the default and only ever changes in direct response to the
+ * Operator clicking "Enable"/"Disable" in Settings — nothing here starts a
+ * server or a public tunnel on its own just because the app launched.
+ */
 export type PortalStatus =
+  | { state: 'disabled' }
   | { state: 'starting' }
   | { state: 'ready'; url: string }
   | { state: 'unavailable'; reason: string };

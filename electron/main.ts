@@ -1,4 +1,4 @@
-import { app, BrowserWindow, dialog, ipcMain, session, shell, Notification } from 'electron';
+import { app, BrowserWindow, dialog, ipcMain, session, shell } from 'electron';
 import path from 'node:path';
 import fs from 'node:fs';
 import { fileURLToPath } from 'node:url';
@@ -80,12 +80,21 @@ function send(channel: string, ...args: unknown[]) {
  */
 let portal: PortalHandle | null = null;
 let portalWorkspaceId: string | null = null;
-/** Current tunnel state — polled by the renderer's Portal button on mount via IPC.portalGetStatus, pushed live via IPC.portalStatus. */
-let portalStatus: import('./ipc-channels').PortalStatus = { state: 'starting' };
+let portalTunnelProc: ReturnType<typeof spawn> | null = null;
+/** Current tunnel state — polled by the renderer's Portal control on mount via IPC.portalGetStatus, pushed live via IPC.portalStatus. Stays 'disabled' until the Operator explicitly enables it in Settings. */
+let portalStatus: import('./ipc-channels').PortalStatus = { state: 'disabled' };
 function setPortalStatus(next: typeof portalStatus) {
   portalStatus = next;
   send(IPC.portalStatus, next);
 }
+
+// Killing the tunnel process on quit is a single, permanent listener that
+// always reads the LIVE portalTunnelProc — not registered per-enable, so
+// toggling the portal on/off repeatedly across a session can never stack up
+// duplicate listeners holding stale process references.
+app.on('before-quit', () => {
+  portalTunnelProc?.kill();
+});
 
 const manager = new WorkspaceManager({
   terminal: (workspaceId, evt) => send(IPC.termData, workspaceId, evt),
@@ -136,11 +145,14 @@ function loadContent(w: BrowserWindow) {
 /**
  * Spawns `cloudflared tunnel --url` — a "quick tunnel": no Cloudflare account,
  * no login, no DNS setup, just an ephemeral https://*.trycloudflare.com URL
- * that proxies straight to the portal server. Matches the "just me, no auth"
- * ask: the URL is unguessable and dies with the process, so nothing further
- * is exposed than knowing that one link. Requires cloudflared on PATH — if
- * it's missing, the portal is still reachable on the LAN at the port logged
- * below, just not from outside the network.
+ * that proxies straight to the portal server. Only ever called in direct
+ * response to the Operator clicking "Enable" in Settings (see enablePortal) —
+ * never automatically. The URL is shown once, in the Settings panel that's
+ * already open when this fires; it is deliberately NOT also written to a
+ * plaintext file or popped as an OS notification, since either one just
+ * copies the same "whoever sees this can use the portal" risk onto a second,
+ * less controlled surface (a file other local software can read, a banner
+ * visible on a lock screen) for no real benefit over the panel itself.
  */
 function startPortalTunnel(port: number) {
   setPortalStatus({ state: 'starting' });
@@ -154,6 +166,7 @@ function startPortalTunnel(port: number) {
     setPortalStatus({ state: 'unavailable', reason: String(err) });
     return;
   }
+  portalTunnelProc = proc;
 
   proc.on('error', (err) => {
     console.warn('[forge] cloudflared not available:', err.message);
@@ -166,31 +179,38 @@ function startPortalTunnel(port: number) {
     const match = chunk.toString().match(/https:\/\/[a-z0-9-]+\.trycloudflare\.com/i);
     if (!match) return;
     announced = true;
-    const url = match[0];
-    console.log(`[forge] portal available at: ${url}`);
-    setPortalStatus({ state: 'ready', url });
-    try {
-      new Notification({ title: 'Forge portal ready', body: url }).show();
-    } catch {
-      // Notifications aren't available in every environment — the in-app Portal button still shows the URL.
-    }
-    try {
-      const dest = path.join(app.getPath('userData'), 'portal-url.txt');
-      fs.writeFileSync(dest, url + '\n');
-    } catch {
-      // Non-essential convenience file — a failure here shouldn't affect the tunnel itself.
-    }
+    console.log(`[forge] portal available at: ${match[0]}`);
+    setPortalStatus({ state: 'ready', url: match[0] });
   };
   proc.stdout.on('data', onOutput);
   proc.stderr.on('data', onOutput); // cloudflared logs its assigned URL to stderr, not stdout.
 
   proc.on('exit', (code) => {
+    if (portalTunnelProc === proc) portalTunnelProc = null;
     if (!announced) setPortalStatus({ state: 'unavailable', reason: `cloudflared exited (code ${code})` });
   });
+}
 
-  app.on('before-quit', () => {
-    proc.kill();
-  });
+/** Idempotent — a second call while already running/starting is a no-op. */
+function enablePortal() {
+  if (portal || portalStatus.state === 'starting') return;
+  const target = manager.get(portalWorkspaceId ?? '') ?? manager.list()[0];
+  if (!target) {
+    setPortalStatus({ state: 'unavailable', reason: 'No workspace open yet.' });
+    return;
+  }
+  portalWorkspaceId = target.id;
+  const portalPort = Number(process.env.PORTAL_PORT) || 5333;
+  portal = startPortalServer(() => manager.get(portalWorkspaceId!) ?? null, portalPort);
+  startPortalTunnel(portalPort);
+}
+
+function disablePortal() {
+  portalTunnelProc?.kill();
+  portalTunnelProc = null;
+  portal?.close();
+  portal = null;
+  setPortalStatus({ state: 'disabled' });
 }
 
 function createWindow() {
@@ -247,10 +267,10 @@ app.whenReady().then(() => {
   const first = manager.create(app.isPackaged ? null : path.join(__dirname, '..'));
   void first.restoreSessions();
 
+  // Remembers which workspace the portal would mirror once enabled — the
+  // server and tunnel themselves only ever start in response to the
+  // Operator's own click in Settings (see enablePortal), never here.
   portalWorkspaceId = first.id;
-  const portalPort = Number(process.env.PORTAL_PORT) || 5333;
-  portal = startPortalServer(() => manager.get(portalWorkspaceId!) ?? null, portalPort);
-  startPortalTunnel(portalPort);
 
   createWindow();
   initUpdater((status) => send(IPC.updateStatus, status));
@@ -727,6 +747,14 @@ app.whenReady().then(() => {
   // be 'ready' by the time the window loads) and then just listens for
   // IPC.portalStatus pushes for everything after.
   ipcMain.handle(IPC.portalGetStatus, async () => portalStatus);
+  ipcMain.handle(IPC.portalEnable, async () => {
+    enablePortal();
+    return true;
+  });
+  ipcMain.handle(IPC.portalDisable, async () => {
+    disablePortal();
+    return true;
+  });
 
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();

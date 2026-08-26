@@ -136,6 +136,8 @@ export interface ForgeApi {
   };
   portal: {
     getStatus: () => Promise<PortalStatus>;
+    enable: () => Promise<boolean>;
+    disable: () => Promise<boolean>;
     onStatus: (cb: (status: PortalStatus) => void) => Unsubscribe;
   };
   settings: {

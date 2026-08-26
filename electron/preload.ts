@@ -122,6 +122,8 @@ contextBridge.exposeInMainWorld('forge', {
   },
   portal: {
     getStatus: () => ipcRenderer.invoke(IPC.portalGetStatus),
+    enable: () => ipcRenderer.invoke(IPC.portalEnable),
+    disable: () => ipcRenderer.invoke(IPC.portalDisable),
     onStatus: (cb: (status: unknown) => void) => on(IPC.portalStatus, cb),
   },
   settings: {

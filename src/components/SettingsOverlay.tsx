@@ -11,6 +11,7 @@ import {
   type PermissionLevel,
 } from '../../electron/ipc-channels';
 import { IconCheck, IconEye, IconEyeOff, IconGear, IconX } from './icons';
+import { PortalControl } from './PortalControl';
 
 const PERMISSION_CATEGORIES: { id: PermissionCategory; label: string; blurb: string }[] = [
   { id: 'bash', label: 'Shell commands', blurb: 'run_command — anything the agent executes in the terminal.' },
@@ -381,6 +382,8 @@ export function SettingsOverlay() {
             )}
           </div>
         )}
+
+        <PortalControl />
       </div>
 
       <div className="rev-foot">

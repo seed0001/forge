@@ -16,7 +16,6 @@ import { AutonomySlider } from './components/AutonomySlider';
 import { ProviderSelector } from './components/ProviderSelector';
 import { ModelSelector } from './components/ModelSelector';
 import { UpdateControl } from './components/UpdateControl';
-import { PortalControl } from './components/PortalControl';
 import { SettingsOverlay } from './components/SettingsOverlay';
 import { IconGear } from './components/icons';
 
@@ -72,7 +71,6 @@ export default function App() {
                 </div>
                 <div className="spacer" />
                 {view?.summary.rootPath && <div className="center-path">{view.summary.rootPath}</div>}
-                <PortalControl />
                 <UpdateControl />
                 <ProviderSelector />
                 <ModelSelector />

@@ -11,6 +11,8 @@ import { OPENROUTER_URL, FAIRROUTER_URL, PROVIDER_LABEL, chatHeaders, resolveCha
 import type { ChatProviderConfig } from './chat-provider';
 import { matchesAllowlist, isShellChained } from './perm-store';
 import { buildGuardrailNote, containsForeignScript, stripLeakedTags, looksCollapsed } from './guardrails';
+import { ContextStore, type RecordKind } from './context-store';
+import { addLesson, listLessons, matchLessons } from './learnings-store';
 import type {
   ActivityEvent,
   TermDataEvent,
@@ -184,6 +186,14 @@ const RETRY_BASE_DELAY_MS = 1000;
 /** No provider response at all within this long is treated as a stalled connection, same as a network error. */
 const REQUEST_TIMEOUT_MS = 90_000;
 
+/**
+ * Rough character budget for the project knowledge base injected into every
+ * turn (see context-store.ts's resolveForPrompt) — no real tokenizer is
+ * available here, so this trades exactness for simplicity. ~4 chars/token,
+ * so this is roughly 1000 tokens' worth of records.
+ */
+const CONTEXT_CHAR_BUDGET = 4000;
+
 /** A dropped connection, DNS hiccup, or timed-out socket — worth a retry, unlike a real 4xx from the provider. */
 function isTransientNetError(err: unknown): boolean {
   const msg = err instanceof Error ? err.message : String(err);
@@ -353,6 +363,95 @@ const BASE_TOOLS = [
           },
         },
         required: ['prompt'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'memory_topic',
+      description:
+        "Manage named topics in this project's persistent knowledge base — a structured place for durable " +
+        'facts/rules/procedures that stays out of the conversation and out of SCRATCH.md (which is free-form ' +
+        'prose you rewrite as you work). Create a topic before adding records to it with memory_record.',
+      parameters: {
+        type: 'object',
+        properties: {
+          action: { type: 'string', enum: ['create', 'list', 'delete'] },
+          name: { type: 'string', description: '(create) Short topic name, e.g. "API conventions" or "deployment".' },
+          description: { type: 'string', description: '(create) One sentence describing what belongs in this topic.' },
+          topic_id: { type: 'string', description: '(delete) The topic id to remove, along with every record in it.' },
+        },
+        required: ['action'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'memory_record',
+      description:
+        "Add, update, delete, or search durable facts in this project's persistent knowledge base. Unlike the " +
+        'conversation, a record here survives compaction and every future session — this is the only memory a ' +
+        "brand-new session starts with, re-injected into your context automatically (budget-permitting) every " +
+        'turn. Writing here does NOT go through the reviewable diff queue like propose_edit — use it for facts ' +
+        'genuinely worth keeping forever (a real constraint, a decision and why, a procedure), not routine ' +
+        'task narration.',
+      parameters: {
+        type: 'object',
+        properties: {
+          action: { type: 'string', enum: ['add', 'update', 'delete', 'search'] },
+          topic_id: { type: 'string', description: '(add) Which topic this belongs to — create one first with memory_topic if needed.' },
+          record_id: { type: 'string', description: '(update/delete) The record id to change or remove.' },
+          kind: {
+            type: 'string',
+            enum: ['fact', 'rule', 'procedure', 'knowledge'],
+            description: '(add) What kind of record this is.',
+          },
+          title: { type: 'string', description: '(add/update) Short title.' },
+          content: { type: 'string', description: '(add/update) The actual fact/rule/procedure text.' },
+          tags: { type: 'array', items: { type: 'string' }, description: '(add/update) Optional tags for search.' },
+          priority: {
+            type: 'number',
+            description: '(add/update) 0-10, higher surfaces first once the context budget is tight. Defaults to 5.',
+          },
+          mandatory: {
+            type: 'boolean',
+            description: '(add/update) If true, always included regardless of budget — use sparingly.',
+          },
+          supersedes: {
+            type: 'string',
+            description: '(add) id of an older record this replaces — the old one is kept for history but excluded from context/search.',
+          },
+          query: { type: 'string', description: '(search) Free-text search across title/content/tags.' },
+        },
+        required: ['action'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'log_lesson',
+      description:
+        'Record or list a durable "if X then Y" behavioral lesson for your own future reference — applies ' +
+        'across every project and session, not just this one, unlike memory_record. Use this when you make a ' +
+        'mistake and work out how to avoid it next time, or the Operator corrects your approach in a way worth ' +
+        'remembering generally. Not for project-specific facts — use memory_record for those.',
+      parameters: {
+        type: 'object',
+        properties: {
+          action: { type: 'string', enum: ['add', 'list'] },
+          trigger: {
+            type: 'string',
+            description: '(add) A short phrase describing the SITUATION that should bring this lesson to mind.',
+          },
+          behavior: {
+            type: 'string',
+            description: '(add) What to actually do differently when the trigger situation recurs.',
+          },
+        },
+        required: ['action'],
       },
     },
   },
@@ -557,6 +656,17 @@ function buildSystemPrompt(rootPath: string, hasRules: boolean, isSubagent = fal
     '- All three always go through OpenRouter and need OPENROUTER_API_KEY configured, regardless of',
     '  which provider is chosen for the main chat model, and each is',
     '  a real paid API call — do not call them speculatively or repeatedly on a hunch.',
+    '- memory_topic and memory_record manage this project\'s durable knowledge base: facts, rules, and',
+    '  procedures that survive compaction and every future session, unlike the conversation itself.',
+    '  Records you already added are re-injected into your own context automatically, within a budget,',
+    "  every turn — you do not need to search for them just to \"remember\" they exist. Writing here",
+    '  does not go through the reviewable diff queue the way propose_edit does — use it for things',
+    '  genuinely worth keeping forever, not routine narration of what you just did.',
+    '- log_lesson records an "if X then Y" behavioral lesson that applies across every project, not',
+    '  just this one — for a mistake you want to avoid repeating anywhere, not a project-specific fact.',
+    '- If PROJECT.md or SCRATCH.md exist in the project root, their contents are injected into your',
+    '  context automatically every turn — you do not need to read_file them just to see what they say,',
+    '  only to edit them.',
     ...(isSubagent
       ? []
       : [
@@ -668,6 +778,10 @@ export class AgentSession {
   private avoidedModels = new Set<string>();
   /** Set by runSubagent when a spawn_subagent call requests a specific model for that one subagent; null means inherit the primary's active model. */
   private modelOverride: string | null = null;
+  /** This project's durable knowledge base — recreated by setRoot() when the workspace's folder changes. */
+  private contextStore: ContextStore;
+  /** Lessons matched against the user's own message at the start of send(), injected once on the first turn. */
+  private matchedLessons: Array<{ trigger: string; behavior: string }> = [];
 
   constructor(rootPath: string, cb: AgentCallbacks, rulesDir: string | null, isSubagent = false) {
     this.rootPath = rootPath;
@@ -676,11 +790,13 @@ export class AgentSession {
     this.isSubagent = isSubagent;
     this.tools = isSubagent ? SUBAGENT_TOOLS : TOOLS;
     this.rules = new RuleSet(rulesDir);
+    this.contextStore = new ContextStore(rootPath);
     this.messages.push({ role: 'system', content: buildSystemPrompt(rootPath, this.rules.enabled, isSubagent) });
   }
 
   setRoot(rootPath: string) {
     this.rootPath = rootPath;
+    this.contextStore = new ContextStore(rootPath);
     // Keep the prompt's stated root in step with the workspace it describes.
     if (this.messages[0]?.role === 'system') {
       this.messages[0] = {
@@ -826,6 +942,29 @@ export class AgentSession {
       }
     }
     return null;
+  }
+
+  /**
+   * Reads PROJECT.md and SCRATCH.md fresh — no caching — so this is always
+   * current even though SCRATCH.md is meant to be actively rewritten mid-task.
+   * Both are optional; a missing file is silently skipped, not an error.
+   * Called once per turn from send() and never persisted into this.messages,
+   * so a stale copy from three turns ago can never linger in the request.
+   */
+  private async buildProjectFilesNote(): Promise<string | null> {
+    const parts: string[] = [];
+    for (const name of ['PROJECT.md', 'SCRATCH.md']) {
+      try {
+        const content = await fs.readFile(path.join(this.rootPath, name), 'utf8');
+        if (!content.trim()) continue;
+        const clipped =
+          content.length > 6000 ? `${content.slice(0, 6000)}\n…(truncated — read the file directly for the rest)` : content;
+        parts.push(`### ${name}\n${clipped}`);
+      } catch {
+        // Optional file — silently absent is normal, not a failure.
+      }
+    }
+    return parts.length ? parts.join('\n\n') : null;
   }
 
   /**
@@ -1181,6 +1320,123 @@ export class AgentSession {
       const result = this.cb.onRoadmapItemDone(itemId, summary || '(no summary given)');
       if (!result.ok) return `ERROR: ${result.error ?? 'could not complete that roadmap item.'}`;
       return `Roadmap item ${itemId} marked done.`;
+    }
+
+    if (name === 'memory_topic') {
+      const action = String(args.action ?? '');
+      const actId = nextId('act');
+
+      if (action === 'create') {
+        const topicName = String(args.name ?? '').trim();
+        if (!topicName) return 'ERROR: memory_topic create requires a "name".';
+        const topic = await this.contextStore.createTopic(topicName, String(args.description ?? '').trim());
+        this.trackActivity({ id: actId, kind: 'thinking', detail: `Memory: created topic "${topic.name}"`, status: 'done' });
+        return `Topic created: id=${topic.id}, name="${topic.name}".`;
+      }
+      if (action === 'list') {
+        const topics = await this.contextStore.listTopics();
+        this.trackActivity({ id: actId, kind: 'thinking', detail: 'Memory: listed topics', status: 'done' });
+        if (!topics.length) return 'No topics exist yet in this project\'s knowledge base.';
+        return untrusted(topics.map((t) => `${t.id}: ${t.name} — ${t.description || '(no description)'}`).join('\n'));
+      }
+      if (action === 'delete') {
+        const topicId = String(args.topic_id ?? '').trim();
+        if (!topicId) return 'ERROR: memory_topic delete requires a "topic_id".';
+        const ok = await this.contextStore.deleteTopic(topicId);
+        this.trackActivity({
+          id: actId,
+          kind: 'thinking',
+          detail: `Memory: ${ok ? 'deleted' : 'tried to delete (not found)'} topic ${topicId}`,
+          status: ok ? 'done' : 'error',
+        });
+        return ok ? `Topic ${topicId} and its records deleted.` : `ERROR: no topic with id "${topicId}".`;
+      }
+      return `ERROR: unknown memory_topic action "${action}". Use create, list, or delete.`;
+    }
+
+    if (name === 'memory_record') {
+      const action = String(args.action ?? '');
+      const actId = nextId('act');
+
+      if (action === 'add') {
+        const kind = String(args.kind ?? '') as RecordKind;
+        if (!['fact', 'rule', 'procedure', 'knowledge'].includes(kind)) {
+          return 'ERROR: memory_record add requires a "kind" of fact, rule, procedure, or knowledge.';
+        }
+        const title = String(args.title ?? '').trim();
+        const content = String(args.content ?? '').trim();
+        if (!title || !content) return 'ERROR: memory_record add requires both "title" and "content".';
+        const result = await this.contextStore.addRecord({
+          topicId: String(args.topic_id ?? '').trim(),
+          kind,
+          title,
+          content,
+          tags: Array.isArray(args.tags) ? args.tags.map(String) : undefined,
+          priority: typeof args.priority === 'number' ? args.priority : undefined,
+          mandatory: typeof args.mandatory === 'boolean' ? args.mandatory : undefined,
+          supersedes: typeof args.supersedes === 'string' ? args.supersedes : undefined,
+        });
+        if ('error' in result) return `ERROR: ${result.error}`;
+        this.trackActivity({ id: actId, kind: 'thinking', detail: `Memory: added record "${result.title}"`, status: 'done' });
+        return `Record added: id=${result.id}.`;
+      }
+      if (action === 'update') {
+        const recordId = String(args.record_id ?? '').trim();
+        if (!recordId) return 'ERROR: memory_record update requires a "record_id".';
+        const result = await this.contextStore.updateRecord(recordId, {
+          title: typeof args.title === 'string' ? args.title : undefined,
+          content: typeof args.content === 'string' ? args.content : undefined,
+          tags: Array.isArray(args.tags) ? args.tags.map(String) : undefined,
+          priority: typeof args.priority === 'number' ? args.priority : undefined,
+          mandatory: typeof args.mandatory === 'boolean' ? args.mandatory : undefined,
+        });
+        if ('error' in result) return `ERROR: ${result.error}`;
+        this.trackActivity({ id: actId, kind: 'thinking', detail: `Memory: updated record "${result.title}"`, status: 'done' });
+        return `Record ${recordId} updated.`;
+      }
+      if (action === 'delete') {
+        const recordId = String(args.record_id ?? '').trim();
+        if (!recordId) return 'ERROR: memory_record delete requires a "record_id".';
+        const ok = await this.contextStore.deleteRecord(recordId);
+        this.trackActivity({
+          id: actId,
+          kind: 'thinking',
+          detail: `Memory: ${ok ? 'deleted' : 'tried to delete (not found)'} record ${recordId}`,
+          status: ok ? 'done' : 'error',
+        });
+        return ok ? `Record ${recordId} deleted.` : `ERROR: no record with id "${recordId}".`;
+      }
+      if (action === 'search') {
+        const query = String(args.query ?? '').trim();
+        const results = await this.contextStore.search(query, typeof args.topic_id === 'string' ? args.topic_id : undefined);
+        this.trackActivity({ id: actId, kind: 'thinking', detail: `Memory: searched "${query}"`, status: 'done' });
+        if (!results.length) return `No matching records for "${query}".`;
+        return untrusted(
+          results.map((r) => `${r.id} [${r.kind}, priority ${r.priority}${r.mandatory ? ', mandatory' : ''}] ${r.title}: ${r.content}`).join('\n')
+        );
+      }
+      return `ERROR: unknown memory_record action "${action}". Use add, update, delete, or search.`;
+    }
+
+    if (name === 'log_lesson') {
+      const action = String(args.action ?? '');
+      const actId = nextId('act');
+
+      if (action === 'add') {
+        const trigger = String(args.trigger ?? '').trim();
+        const behavior = String(args.behavior ?? '').trim();
+        if (!trigger || !behavior) return 'ERROR: log_lesson add requires both "trigger" and "behavior".';
+        await addLesson(trigger, behavior);
+        this.trackActivity({ id: actId, kind: 'thinking', detail: `Logged a lesson: ${trigger}`, status: 'done' });
+        return 'Lesson recorded — it will be matched against future conversations across every project.';
+      }
+      if (action === 'list') {
+        const lessons = await listLessons();
+        this.trackActivity({ id: actId, kind: 'thinking', detail: 'Listed lessons', status: 'done' });
+        if (!lessons.length) return 'No lessons recorded yet.';
+        return untrusted(lessons.map((l) => `If: ${l.trigger}\nThen: ${l.behavior}`).join('\n\n'));
+      }
+      return `ERROR: unknown log_lesson action "${action}". Use add or list.`;
     }
 
     if (name === 'web_search') {
@@ -1745,6 +2001,7 @@ export class AgentSession {
     this.lastToolBatchSignature = null;
     this.identicalBatchStreak = 0;
     this.failedOverThisTurn = false;
+    this.matchedLessons = await matchLessons(userText);
     this.cb.onStatus(true);
     await this.engageRules(userText);
     if (images?.length) {
@@ -1819,6 +2076,48 @@ export class AgentSession {
       // Ephemeral for this one request only — never spliced into this.messages,
       // so it can never be persisted, re-sent verbatim, or accumulate turn over turn.
       const wireMessages = await this.messagesForRequest();
+
+      // Project working-memory files and the knowledge base are both read
+      // fresh every turn (cheap — a small file read and an in-memory-cached
+      // lookup) since either can change mid-task, unlike the rules preamble.
+      const projectFilesNote = await this.buildProjectFilesNote();
+      if (projectFilesNote) {
+        wireMessages.push({
+          role: 'system',
+          content: `Current project working-memory files (read fresh every turn — always up to date):\n${projectFilesNote}`,
+        });
+      }
+
+      const contextPackage = await this.contextStore.resolveForPrompt(CONTEXT_CHAR_BUDGET);
+      if (contextPackage.text) {
+        wireMessages.push({
+          role: 'system',
+          content: `Project knowledge base (${contextPackage.included} of ${contextPackage.included + contextPackage.omitted} records — the rest didn't fit this turn's budget; use memory_record search to find them):\n${contextPackage.text}`,
+        });
+        if (turn === 0) {
+          this.trackActivity({
+            id: nextId('act'),
+            kind: 'thinking',
+            detail: `Loaded ${contextPackage.included} knowledge-base record${contextPackage.included === 1 ? '' : 's'}${contextPackage.omitted ? ` (${contextPackage.omitted} omitted, over budget)` : ''}`,
+            status: 'done',
+          });
+        }
+      }
+
+      if (turn === 0 && this.matchedLessons.length) {
+        const lessonText = this.matchedLessons.map((l) => `- ${l.behavior}`).join('\n');
+        wireMessages.push({
+          role: 'system',
+          content: `Lessons from past mistakes that match this request:\n${lessonText}`,
+        });
+        this.trackActivity({
+          id: nextId('act'),
+          kind: 'thinking',
+          detail: `Matched ${this.matchedLessons.length} past lesson${this.matchedLessons.length === 1 ? '' : 's'}`,
+          status: 'done',
+        });
+      }
+
       if (this.pendingGuardrailNote) {
         wireMessages.push({ role: 'system', content: this.pendingGuardrailNote });
         this.pendingGuardrailNote = null;

@@ -78,12 +78,17 @@ export function titleFrom(text: string): string {
 }
 
 /**
- * Sessions are stored outside the user's project — keyed by a hash of the
- * workspace path — so opening a folder never writes into their repo.
+ * A short, stable id for a project root, used to key per-project storage
+ * outside the project itself (sessions here; context-store.ts's knowledge
+ * base reuses this too) — so opening a folder never writes into the user's
+ * own repo.
  */
+export function hashRoot(rootPath: string): string {
+  return crypto.createHash('sha256').update(path.resolve(rootPath)).digest('hex').slice(0, 16);
+}
+
 function fileForRoot(rootPath: string): string {
-  const hash = crypto.createHash('sha256').update(path.resolve(rootPath)).digest('hex').slice(0, 16);
-  return path.join(app.getPath('userData'), 'sessions', `${hash}.json`);
+  return path.join(app.getPath('userData'), 'sessions', `${hashRoot(rootPath)}.json`);
 }
 
 export async function loadSessions(rootPath: string | null): Promise<Session[]> {

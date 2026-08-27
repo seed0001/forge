@@ -126,27 +126,34 @@ export function Sidebar() {
 
   if (!view) return <div className="sidebar" />;
 
-  const tab = view.sidebar;
+  // Files/folders only matter in a coding workspace. In chat or browsing the
+  // sidebar is just the session history.
+  const isCoding = view.summary.kind === 'coding';
+  const tab = isCoding ? view.sidebar : 'sessions';
 
   return (
     <div className="sidebar">
       <div className="side-head">
         <div className="side-title" title={view.summary.rootPath ?? ''}>{view.summary.name}</div>
         <div className="spacer" />
-        <button className="side-btn" onClick={() => activeId && pickFolder(activeId)} title="Open a folder">
-          <IconFolderOpen className="icon-xs" />
-          Open
-        </button>
+        {isCoding && (
+          <button className="side-btn" onClick={() => activeId && pickFolder(activeId)} title="Open a folder">
+            <IconFolderOpen className="icon-xs" />
+            Open
+          </button>
+        )}
       </div>
 
-      <div className="side-tabs">
-        <button className={`side-tab${tab === 'sessions' ? ' on' : ''}`} onClick={() => setSidebar('sessions')}>
-          Sessions
-        </button>
-        <button className={`side-tab${tab === 'files' ? ' on' : ''}`} onClick={() => setSidebar('files')}>
-          Files
-        </button>
-      </div>
+      {isCoding && (
+        <div className="side-tabs">
+          <button className={`side-tab${tab === 'sessions' ? ' on' : ''}`} onClick={() => setSidebar('sessions')}>
+            Sessions
+          </button>
+          <button className={`side-tab${tab === 'files' ? ' on' : ''}`} onClick={() => setSidebar('files')}>
+            Files
+          </button>
+        </div>
+      )}
 
       {tab === 'sessions' ? (
         <SessionList />

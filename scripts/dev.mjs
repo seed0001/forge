@@ -46,6 +46,13 @@ async function buildMainProcess() {
     entryPoints: [path.join(root, 'electron', 'preload.ts')],
     outfile: path.join(root, 'dist-electron', 'preload.cjs'),
   });
+
+  await esbuild.build({
+    ...shared,
+    format: 'cjs',
+    entryPoints: [path.join(root, 'electron', 'overlay-preload.ts')],
+    outfile: path.join(root, 'dist-electron', 'overlay-preload.cjs'),
+  });
 }
 
 const server = await createServer({ configFile: path.join(root, 'vite.config.ts') });

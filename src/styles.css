@@ -254,6 +254,45 @@ input, textarea { font: inherit; color: inherit; }
   background: var(--bg-panel); border: 1px solid var(--line); border-radius: var(--r-lg); overflow: hidden;
 }
 
+/* ── The Orb — agent-state indicator ──────────────────────────────────── */
+.orb { display: block; width: 100%; height: 100%; }
+.orb-chip {
+  width: 26px; height: 26px; flex: none; border-radius: 50%;
+  overflow: hidden; margin-right: var(--s1);
+}
+
+/* Large hero Orb + copy, shown on an empty chat. */
+.orb-stage {
+  position: absolute; inset: 0 0 96px; z-index: 1;   /* clear the composer */
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  gap: var(--s5); padding: var(--s6);
+  pointer-events: none;
+}
+.orb-hero { width: min(38vmin, 300px); height: min(38vmin, 300px); pointer-events: auto; cursor: grab; }
+.orb-hero:active { cursor: grabbing; }
+.orb-copy { max-width: 46ch; text-align: center; }
+.orb-copy h1 { font-size: calc(var(--t-lg) * var(--font-scale)); font-weight: 600; margin: 0 0 var(--s2); letter-spacing: -0.01em; }
+.orb-copy p { margin: 0; font-size: var(--t-base); color: var(--fg-3); line-height: 1.6; }
+
+/* ── Mode bar (chat / coding / browsing) ──────────────────────────────── */
+.modebar {
+  flex: none; z-index: 2;
+  display: flex; align-items: center; gap: var(--s3);
+  padding: var(--s2) var(--s3);
+  background: var(--bg-panel); border: 1px solid var(--line); border-radius: var(--r-lg);
+}
+.modebar-fresh { border-color: var(--line-strong); }
+.modebar-seg { display: flex; gap: 2px; background: var(--bg-raised); border-radius: var(--r-md); padding: 2px; }
+.modebar-opt {
+  display: inline-flex; align-items: center; gap: 6px;
+  height: 26px; padding: 0 var(--s3); border-radius: var(--r-sm);
+  font-size: var(--t-xs); font-weight: 500; color: var(--fg-3);
+}
+.modebar-opt:hover { color: var(--fg-2); }
+.modebar-opt.on { background: var(--bg-active); color: var(--fg); }
+.modebar-opt .icon-xs { color: currentColor; }
+.modebar-hint { font-size: var(--t-xs); color: var(--fg-3); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
 /* ── Typeface picker ───────────────────────────────────────────────────── */
 .fontpick { position: relative; }
 .seg-icon {
@@ -406,7 +445,7 @@ input, textarea { font: inherit; color: inherit; }
 .modelbadge.free { color: var(--green); background: var(--green-bg); }
 
 /* ── Chat ──────────────────────────────────────────────────────────────── */
-.chat { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+.chat { flex: 1; min-height: 0; display: flex; flex-direction: column; position: relative; }
 .chat-scroll { flex: 1; overflow-y: auto; overflow-x: hidden; }
 .thread {
   max-width: 760px; margin: 0 auto;

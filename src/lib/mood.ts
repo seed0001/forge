@@ -61,6 +61,18 @@ function phaseFromKind(kind: ActivityEvent['kind']): Phase {
   }
 }
 
+/**
+ * A Mood for a phase you already know (used by the desktop Orb, which is driven
+ * by explicit voice/agent states rather than an activity trail).
+ */
+export function staticMood(phase: Phase, intensity = 0.55, speed = 1): Mood {
+  if (phase === 'idle') {
+    return { phase: 'idle', colors: PALETTES.thinking, intensity: 0, speed: 0.6, label: '' };
+  }
+  const p = phase as Exclude<Phase, 'idle'>;
+  return { phase, colors: PALETTES[p], intensity, speed, label: LABELS[p] };
+}
+
 export function deriveMood(opts: {
   running: boolean;
   activity: ActivityEvent[];

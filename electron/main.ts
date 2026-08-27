@@ -31,6 +31,7 @@ import { listCatalogModels } from './models-service';
 import { initUpdater, checkForUpdates, downloadUpdate, installUpdate } from './updater';
 import { BrowserViewManager } from './browser-view-manager';
 import { loadPermissionOverrides, savePermissionOverrides, loadBashAllowlist, saveBashAllowlist } from './perm-store';
+import { createOverlayWindow, overlaySend } from './overlay-window';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -86,7 +87,12 @@ function setPortalStatus(next: typeof portalStatus) {
 // always reads the LIVE portalTunnelProc — not registered per-enable, so
 // toggling the portal on/off repeatedly across a session can never stack up
 // duplicate listeners holding stale process references.
+// Closing the main window only hides it (the Orb overlay stays and keeps the
+// app alive); a genuine quit comes from the Orb menu / app.quit(), which sets
+// this so the main window's close handler stops intercepting.
+let quitting = false;
 app.on('before-quit', () => {
+  quitting = true;
   portalTunnelProc?.kill();
 });
 
@@ -119,15 +125,32 @@ async function persistWorkspaceIndex(): Promise<void> {
 // know which Workspace that project lives in.
 const manager = new WorkspaceManager({
   terminal: (projectId, evt) => send(IPC.termData, projectId, evt),
-  activity: (projectId, sessionId, evt) => send(IPC.agentActivity, projectId, sessionId, evt),
+  activity: (projectId, sessionId, evt) => {
+    send(IPC.agentActivity, projectId, sessionId, evt);
+    if (projectId === orbProjectId) overlaySend(IPC.overlayAgentActivity, evt);
+  },
   message: (projectId, sessionId, msg) => {
     send(IPC.agentMessage, projectId, sessionId, msg);
     if (projectId === portalProjectId) portal?.broadcastMessage(msg);
+    if (
+      projectId === orbProjectId &&
+      !msg.note &&
+      msg.role === 'assistant' &&
+      typeof msg.text === 'string' &&
+      msg.text.trim()
+    ) {
+      console.log('[orb] reply:', msg.text.slice(0, 200));
+      overlaySend(IPC.overlayAgentReply, msg.text);
+      void speakThroughOrb(msg.text);
+    }
   },
   status: (projectId) => {
     const project = manager.findProject(projectId);
     if (project) send(IPC.wsUpdated, project.summary());
     if (project && projectId === portalProjectId) portal?.broadcastStatus(project.status === 'running');
+    if (project && projectId === orbProjectId) {
+      overlaySend(IPC.overlayAgentStatus, project.status === 'running');
+    }
   },
   diffProposed: (projectId, diff) => send(IPC.diffProposed, projectId, diff),
   diffUpdated: (projectId, diff) => send(IPC.diffUpdated, projectId, diff),
@@ -243,12 +266,18 @@ function createWindow() {
     minWidth: 1000,
     minHeight: 640,
     backgroundColor: '#000000',
+    // The Orb overlay is the front door; the main window opens on demand.
+    show: false,
+    // Created hidden — force it to render anyway so it's ready the instant the
+    // Orb summons it, instead of showing a black frame that fills in later.
+    paintWhenInitiallyHidden: true,
     titleBarStyle: 'hidden',
     titleBarOverlay: { color: '#000000', symbolColor: '#a8a8a4', height: 40 },
     webPreferences: {
       preload: path.join(__dirname, 'preload.cjs'),
       contextIsolation: true,
       nodeIntegration: false,
+      backgroundThrottling: false,
     },
   });
 
@@ -265,12 +294,91 @@ function createWindow() {
     console.error('[forge] renderer unresponsive');
   });
 
+  // The main window is a thing the Orb summons — closing it just hides it.
+  w.on('close', (e) => {
+    if (!quitting) {
+      e.preventDefault();
+      w.hide();
+    }
+  });
   w.on('closed', () => {
     if (win === w) win = null;
   });
 
   win = w;
   loadContent(w);
+}
+
+/** Show the main Forge window, creating it if it was never made / was destroyed. */
+function showMainWindow() {
+  if (!win || win.isDestroyed()) createWindow();
+  win?.show();
+  win?.focus();
+}
+
+// ── The Orb's own agent ────────────────────────────────────────────────
+// A dedicated project the desktop Orb talks to. Full autonomy (spoken
+// confirmations for risky actions come later); its replies are spoken aloud
+// through the Orb using whatever TTS voice Forge is configured for.
+let orbProjectId: string | null = null;
+
+async function ensureOrbProject() {
+  if (orbProjectId) {
+    const existing = manager.findProject(orbProjectId);
+    if (existing) return existing;
+  }
+  const ws = manager.createWorkspace('coding', 'Orb');
+  const project = await manager.addProject(ws.id, app.getPath('home'), 'chat');
+  if (!project) return null;
+  orbProjectId = project.id;
+  project.setAutonomy('auto');
+  void persistWorkspaceIndex();
+  return project;
+}
+
+async function orbAsk(text: string) {
+  console.log('[orb] ask:', text);
+  const project = await ensureOrbProject();
+  if (!project) {
+    overlaySend(IPC.overlayAgentReply, "I couldn't start my agent.");
+    return;
+  }
+  try {
+    await project.sendToAgent(text);
+  } catch (err) {
+    console.error('[orb] sendToAgent failed:', err);
+    overlaySend(IPC.overlayAgentReply, 'Something went wrong on my end.');
+  }
+}
+
+function orbStopAgent() {
+  if (orbProjectId) manager.findProject(orbProjectId)?.stopAgent();
+}
+
+function spokenSummary(text: string, limit = 420): string {
+  const flat = text.replace(/```[\s\S]*?```/g, ' (code) ').replace(/\s+/g, ' ').trim();
+  if (flat.length <= limit) return flat;
+  const cut = flat.slice(0, limit);
+  const stop = Math.max(cut.lastIndexOf('. '), cut.lastIndexOf('! '), cut.lastIndexOf('? '));
+  return stop > limit * 0.5 ? cut.slice(0, stop + 1) : cut.replace(/\s\S*$/, '') + '…';
+}
+
+async function speakThroughOrb(text: string) {
+  const provider = (process.env.TTS_PROVIDER || 'edge') as TtsProvider;
+  const voice =
+    provider === 'sapi'
+      ? process.env.TTS_SAPI_VOICE || ''
+      : provider === 'xtts'
+        ? process.env.TTS_XTTS_VOICE || ''
+        : process.env.TTS_EDGE_VOICE || 'en-US-AndrewNeural';
+  try {
+    const res = await synthesizeSpeech(spokenSummary(text), provider, voice);
+    if (res.audio) {
+      overlaySend(IPC.overlaySpeak, { b64: res.audio.toString('base64'), mime: res.mimeType });
+    }
+  } catch {
+    /* a failed synthesis just means no voice for this reply */
+  }
 }
 
 app.whenReady().then(async () => {
@@ -335,6 +443,18 @@ app.whenReady().then(async () => {
   portalProjectId = (activeWorkspaceId ? manager.get(activeWorkspaceId) : undefined)?.activeProjectId ?? null;
 
   createWindow();
+  try {
+    createOverlayWindow({
+      showMainWindow,
+      quit: () => app.quit(),
+      ask: (t) => void orbAsk(t),
+      stopAgent: orbStopAgent,
+    });
+  } catch (err) {
+    // A broken overlay must never take down the main app.
+    console.error('[forge] overlay window failed to start:', err);
+    showMainWindow();
+  }
   initUpdater((status) => send(IPC.updateStatus, status));
 
   // ── Renderer-facing "workspace" (= project tab) surface ─────────────────
@@ -916,11 +1036,12 @@ app.whenReady().then(async () => {
   });
 
   app.on('activate', () => {
-    if (BrowserWindow.getAllWindows().length === 0) createWindow();
+    showMainWindow();
   });
 });
 
 app.on('window-all-closed', () => {
+  // Only fires once the Orb overlay is gone too — i.e. a real quit.
   manager.disposeAll();
   if (process.platform !== 'darwin') app.quit();
 });

@@ -124,12 +124,33 @@ export const IPC = {
   focusBoardUpdated: 'focus:board-updated',
   focusQuestionRequest: 'focus:question-request',
   focusQuestionAnswer: 'focus:question-answer',
+
+  // Desktop overlay (the roaming Orb) — its own frameless, transparent,
+  // click-through window that spans the display.
+  overlaySetInteractive: 'overlay:set-interactive',
+  overlayContextMenu: 'overlay:context-menu',
+  overlayOpenForge: 'overlay:open-forge',
+  overlayGetDisplay: 'overlay:get-display',
+  overlayDisplayChanged: 'overlay:display-changed',
+  overlaySetPaused: 'overlay:set-paused',
+  // Voice conversation between the Orb and its agent.
+  overlayAsk: 'overlay:ask',
+  overlayStopAgent: 'overlay:stop-agent',
+  overlaySpeak: 'overlay:speak',
+  overlayAgentActivity: 'overlay:agent-activity',
+  overlayAgentStatus: 'overlay:agent-status',
+  overlayAgentReply: 'overlay:agent-reply',
 } as const;
 
 export type ProjectStatus = 'idle' | 'running' | 'review';
 
-/** null means "not chosen yet" — drives the Coding/Browsing chooser screen. */
-export type WorkspaceKind = 'coding' | 'browsing';
+/**
+ * A workspace's mode. New workspaces open straight into 'chat' (a plain
+ * conversation, no project folder); the Operator can switch to 'coding' or
+ * 'browsing' from the mode bar at any time. null is the legacy "not chosen"
+ * state, still treated as chat by the UI.
+ */
+export type WorkspaceKind = 'chat' | 'coding' | 'browsing';
 
 /**
  * A Workspace's type — required at creation, not changeable after (a fine

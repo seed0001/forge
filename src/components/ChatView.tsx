@@ -1,9 +1,8 @@
 import { useEffect, useRef, useState } from 'react';
 import { useForge, useActiveWorkspace } from '../state/store';
-import { deriveMood } from '../lib/mood';
+import { useMood } from '../lib/use-mood';
 import { useVoice } from '../lib/use-voice';
 import { useTts } from '../lib/use-tts';
-import { usePacedActivity } from '../lib/use-paced-activity';
 import type { TtsProvider } from '../../electron/ipc-channels';
 import { Aurora } from './Aurora';
 import { Markdown } from './Markdown';
@@ -87,29 +86,10 @@ export function ChatView() {
   const roadmapNeedsReview = (view?.roadmap ?? []).filter(
     (it) => it.status === 'pending' || it.status === 'needs_revision'
   ).length;
-  // One line, not a stacking transcript: whatever the agent last reported —
-  // an in-progress step, or (per ActivityEvent.summary) the run's single
-  // consolidated closing line — replaces whatever was shown before it. Paced
-  // so a step that arrives already-done (read_file, list_files) still gets
-  // a beat on screen instead of being overwritten before it ever paints.
-  const activityList = view?.activity ?? [];
-  const currentActivity = usePacedActivity(activityList);
-
-  // Re-tick while a task is live so the field deepens as the work goes on.
-  const [now, setNow] = useState(() => Date.now());
-  useEffect(() => {
-    if (!running) return;
-    const t = setInterval(() => setNow(Date.now()), 1000);
-    return () => clearInterval(t);
-  }, [running]);
-
-  const mood = deriveMood({
-    running,
-    activity: activityList,
-    current: currentActivity,
-    elapsedMs: view?.runStartedAt ? now - view.runStartedAt : 0,
-    hasPendingDiffs: diffs.length > 0,
-  });
+  // What the agent is doing, plus the single paced trail cursor — one line,
+  // not a stacking transcript, and shared with the Orb in the top bar via
+  // useMood so the field, the trail, and the Orb can never drift apart.
+  const { mood, current: currentActivity } = useMood();
 
   // Dictation appends into the composer rather than sending, so nothing is
   // acted on before you have seen what was heard.
@@ -165,17 +145,22 @@ export function ChatView() {
 
   if (!view) return <div className="chat" />;
 
+  const kind = view.summary.kind ?? 'chat';
+  const emptyCopy =
+    kind === 'coding'
+      ? 'It reads files, runs commands and proposes edits. Nothing reaches disk until you accept it — and you can switch to another workspace while it works.'
+      : kind === 'browsing'
+        ? 'Ask about anything you have open or clipped in the browser, or just talk.'
+        : 'Ask anything. Switch this workspace to Coding or Browsing from the bar below whenever you need files or the web.';
+
   return (
     <div className="chat">
       <div className="chat-scroll" ref={scrollRef}>
         <div className="thread">
           {view.chat.length === 0 && (
             <div className="thread-empty">
-              <h1>What should this workspace do?</h1>
-              <p>
-                It reads files, runs commands and proposes edits. Nothing reaches disk until you accept it —
-                and you can switch to another workspace while it works.
-              </p>
+              <h1>{kind === 'coding' ? 'What should this workspace do?' : 'What do you want to do?'}</h1>
+              <p>{emptyCopy}</p>
             </div>
           )}
 

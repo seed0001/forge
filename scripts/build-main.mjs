@@ -65,4 +65,12 @@ await esbuild.build({
   outfile: path.join(root, 'dist-electron', 'preload.cjs'),
 });
 
+// Preload for the transparent desktop Orb overlay window.
+await esbuild.build({
+  ...shared,
+  format: 'cjs',
+  entryPoints: [path.join(root, 'electron', 'overlay-preload.ts')],
+  outfile: path.join(root, 'dist-electron', 'overlay-preload.cjs'),
+});
+
 console.log('[forge] main process built for production');

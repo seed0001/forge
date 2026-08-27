@@ -9,7 +9,7 @@ import { RoadmapPanel } from './components/RoadmapPanel';
 import { SchedulerPanel } from './components/SchedulerPanel';
 import { BrowserPanel } from './components/BrowserPanel';
 import { FocusPanel } from './components/FocusPanel';
-import { WorkspaceChooser } from './components/WorkspaceChooser';
+import { ModeBar } from './components/ModeBar';
 import { ReviewOverlay } from './components/ReviewOverlay';
 import { PaintEditorOverlay } from './components/PaintEditorOverlay';
 import { FontPicker } from './components/FontPicker';
@@ -19,6 +19,8 @@ import { ModelSelector } from './components/ModelSelector';
 import { UpdateControl } from './components/UpdateControl';
 import { SettingsOverlay } from './components/SettingsOverlay';
 import { IconGear } from './components/icons';
+
+const CHAT_VIEWS = [{ key: 'chat', label: 'Chat' }] as const;
 
 const CODING_VIEWS = [
   { key: 'chat', label: 'Chat' },
@@ -43,17 +45,20 @@ export default function App() {
     init();
   }, [init]);
 
+  // A brand-new workspace opens straight into chat; null is the legacy
+  // "not chosen yet" state and behaves the same until the Operator picks.
   const kind = view?.summary.kind ?? null;
-  const isBrowsing = kind === 'browsing';
-  const VIEWS = isBrowsing ? BROWSING_VIEWS : CODING_VIEWS;
-  const center = view?.center ?? (isBrowsing ? 'browser' : 'chat');
+  const effectiveKind: 'chat' | 'coding' | 'browsing' = kind ?? 'chat';
+  const VIEWS =
+    effectiveKind === 'browsing' ? BROWSING_VIEWS : effectiveKind === 'coding' ? CODING_VIEWS : CHAT_VIEWS;
+  const center = view?.center ?? (effectiveKind === 'browsing' ? 'browser' : 'chat');
 
   return (
     <div className="app">
       <TabStrip />
       <div className="shell">
-        {kind === null ? (
-          <WorkspaceChooser />
+        {!view ? (
+          <div className="sidebar" />
         ) : (
           <>
             <Sidebar />
@@ -90,6 +95,8 @@ export default function App() {
                 {center === 'scheduler' && <SchedulerPanel />}
                 {center === 'browser' && <BrowserPanel />}
               </div>
+
+              <ModeBar current={effectiveKind} chosen={kind !== null} />
             </div>
             <FocusPanel />
           </>

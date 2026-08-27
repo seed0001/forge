@@ -1,0 +1,45 @@
+* { box-sizing: border-box; margin: 0; padding: 0; }
+html, body, #orb-root {
+  height: 100%; width: 100%;
+  background: transparent;
+  overflow: hidden;
+  /* the window itself handles click-through; nothing here should ever scroll */
+  user-select: none;
+  cursor: default;
+}
+
+.orb-sprite {
+  position: fixed; top: 0; left: 0;
+  will-change: transform;
+  /* NO filter / border / background — only the orb's own pixels may show. */
+}
+.orb-sprite canvas { display: block; width: 100%; height: 100%; background: transparent; }
+
+/* One fading line under the orb — what it just heard / what it's doing. Never
+   a log; it replaces itself and clears. */
+.orb-caption {
+  position: absolute;
+  top: 100%;
+  left: 50%;
+  transform: translateX(-50%);
+  margin-top: 2px;
+  max-width: 320px;
+  padding: 4px 10px;
+  border-radius: 999px;
+  font: 500 12px/1.35 "Geist Variable", system-ui, -apple-system, sans-serif;
+  color: #f2f2f1;
+  text-align: center;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  background: rgba(8, 8, 12, 0.72);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  box-shadow: 0 2px 14px rgba(0, 0, 0, 0.5);
+  animation: orb-caption-in 160ms ease-out;
+  pointer-events: none;
+}
+@keyframes orb-caption-in {
+  from { opacity: 0; transform: translate(-50%, -4px); }
+  to { opacity: 1; transform: translate(-50%, 0); }
+}

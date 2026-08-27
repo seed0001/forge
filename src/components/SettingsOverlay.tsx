@@ -18,6 +18,17 @@ import {
 import { IconCheck, IconEye, IconEyeOff, IconGear, IconVolume, IconRefresh, IconX } from './icons';
 import { PortalControl } from './PortalControl';
 
+type SettingsCategory = 'models' | 'voice' | 'search' | 'agent' | 'permissions' | 'portal';
+
+const CATEGORIES: { id: SettingsCategory; label: string; blurb: string }[] = [
+  { id: 'models', label: 'Models', blurb: 'Chat-completion providers' },
+  { id: 'voice', label: 'Voice', blurb: 'Speech in and out' },
+  { id: 'search', label: 'Web search', blurb: 'Search-tool provider' },
+  { id: 'agent', label: 'Agent', blurb: 'Limits and budgets' },
+  { id: 'permissions', label: 'Permissions', blurb: 'What the agent may do unattended' },
+  { id: 'portal', label: 'Phone portal', blurb: 'Chat from your phone' },
+];
+
 const PERMISSION_CATEGORIES: { id: PermissionCategory; label: string; blurb: string }[] = [
   { id: 'bash', label: 'Shell commands', blurb: 'run_command — anything the agent executes in the terminal.' },
   { id: 'edit', label: 'File edits', blurb: 'propose_edit — anything the agent writes to a file.' },
@@ -49,6 +60,7 @@ interface ProviderDef {
   id: string;
   name: string;
   blurb: string;
+  category: SettingsCategory;
   linkLabel?: string;
   linkHref?: string;
   fields: FieldDef[];
@@ -58,6 +70,7 @@ const PROVIDERS: ProviderDef[] = [
   {
     id: 'openrouter',
     name: 'OpenRouter',
+    category: 'models',
     blurb: 'Powers chat, image generation, vision, and music tools — one key covers all of them.',
     linkLabel: 'openrouter.ai/keys',
     linkHref: 'https://openrouter.ai/keys',
@@ -66,6 +79,7 @@ const PROVIDERS: ProviderDef[] = [
   {
     id: 'fairrouter',
     name: 'FairRouter',
+    category: 'models',
     blurb:
       'An alternative chat model provider, selectable per-model from the model picker alongside OpenRouter. ' +
       'Image generation, vision, and music tools always go through OpenRouter regardless of which one is active.',
@@ -76,6 +90,7 @@ const PROVIDERS: ProviderDef[] = [
   {
     id: 'ollama',
     name: 'Ollama',
+    category: 'models',
     blurb: 'A local Ollama install — no API key needed. Requires an OpenAI-compatible endpoint (Ollama serves one at /v1 by default).',
     linkLabel: 'ollama.com',
     linkHref: 'https://ollama.com',
@@ -93,6 +108,7 @@ const PROVIDERS: ProviderDef[] = [
   {
     id: 'llamacpp',
     name: 'llama.cpp',
+    category: 'models',
     blurb: 'A local llama.cpp server (llama-server) — no API key needed. It exposes an OpenAI-compatible endpoint on its own port.',
     linkLabel: 'github.com/ggml-org/llama.cpp',
     linkHref: 'https://github.com/ggml-org/llama.cpp',
@@ -110,6 +126,7 @@ const PROVIDERS: ProviderDef[] = [
   {
     id: 'search',
     name: 'Web search',
+    category: 'search',
     blurb: 'A Tavily key, used by the web_search tool.',
     linkLabel: 'app.tavily.com',
     linkHref: 'https://app.tavily.com',
@@ -118,6 +135,7 @@ const PROVIDERS: ProviderDef[] = [
   {
     id: 'transcribe',
     name: 'Voice input',
+    category: 'voice',
     blurb: 'Any OpenAI-compatible /audio/transcriptions endpoint — Groq (fast, free tier) by default.',
     linkLabel: 'console.groq.com/keys',
     linkHref: 'https://console.groq.com/keys',
@@ -135,6 +153,7 @@ const PROVIDERS: ProviderDef[] = [
   {
     id: 'agent',
     name: 'Agent behavior',
+    category: 'agent',
     blurb: `How many tool calls (file reads, edits, commands, searches...) the agent may make in a single task before it stops itself. Default is ${MAX_TOOL_CALLS_DEFAULT}, max ${MAX_TOOL_CALLS_LIMIT}.`,
     fields: [
       {
@@ -191,6 +210,7 @@ export function SettingsOverlay() {
   const [draft, setDraft] = useState<ProviderSettings>(EMPTY);
   const [revealed, setRevealed] = useState<Set<string>>(new Set());
   const [justSaved, setJustSaved] = useState(false);
+  const [category, setCategory] = useState<SettingsCategory>('models');
 
   useEffect(() => {
     if (saved) setDraft(saved);
@@ -248,13 +268,28 @@ export function SettingsOverlay() {
     closeSettings();
   }
 
+  function providerConfigured(p: ProviderDef): boolean {
+    const required = p.fields.filter((f) => f.required ?? f.secret);
+    if (required.length === 0) return false; // nothing to configure → no positive signal
+    return required.every((f) => draft[f.key].trim());
+  }
+
+  // A category's nav dot is green once at least one provider in it is fully set up.
+  function categoryConfigured(cat: SettingsCategory): boolean | null {
+    const provs = PROVIDERS.filter((p) => p.category === cat);
+    if (!provs.some((p) => p.fields.some((f) => f.required ?? f.secret))) return null;
+    return provs.some(providerConfigured);
+  }
+
+  const activeProviders = PROVIDERS.filter((p) => p.category === category);
+
   return (
-    <div className="overlay">
-      <div className="rev-head">
+    <div className="overlay settings-canvas">
+      <div className="settings-topbar">
         <IconGear className="icon" />
         <div className="col">
           <div className="rev-title">Settings</div>
-          <div className="rev-sub">API keys for every provider Forge talks to, stored in forge/.env</div>
+          <div className="rev-sub">Providers and behavior for Forge, stored in forge/.env</div>
         </div>
         <div className="spacer" />
         <button className="iconbtn" onClick={handleClose} title="Close">
@@ -263,10 +298,35 @@ export function SettingsOverlay() {
       </div>
 
       <div className="settings-body">
+        <nav className="settings-panel settings-nav">
+          {CATEGORIES.map((c) => {
+            const status = saved ? categoryConfigured(c.id) : null;
+            return (
+              <button
+                key={c.id}
+                className={`settings-nav-item${c.id === category ? ' sel' : ''}`}
+                onClick={() => setCategory(c.id)}
+              >
+                <span className="col" style={{ minWidth: 0 }}>
+                  <span className="settings-nav-label">{c.label}</span>
+                  <span className="settings-nav-blurb">{c.blurb}</span>
+                </span>
+                {status !== null && (
+                  <span
+                    className="settings-nav-dot"
+                    style={{ background: status ? 'var(--green)' : 'var(--fg-3)' }}
+                  />
+                )}
+              </button>
+            );
+          })}
+        </nav>
+
+        <div className="settings-panel settings-pane">
         {!saved ? (
           <div className="modelmenu-note">Loading…</div>
         ) : (
-          PROVIDERS.map((provider) => (
+          activeProviders.map((provider) => (
             <div key={provider.id} className="settings-section">
               <div className="settings-section-head">
                 <div className="row" style={{ gap: 'var(--s2)' }}>
@@ -341,7 +401,7 @@ export function SettingsOverlay() {
           ))
         )}
 
-        {saved && (
+        {saved && category === 'voice' && (
           <div className="settings-section">
             <div className="settings-section-head">
               <div className="row" style={{ gap: 'var(--s2)' }}>
@@ -446,7 +506,7 @@ export function SettingsOverlay() {
           </div>
         )}
 
-        {permOverrides && (
+        {permOverrides && category === 'permissions' && (
           <div className="settings-section">
             <div className="settings-section-head">
               <div className="row" style={{ gap: 'var(--s2)' }}>
@@ -519,10 +579,11 @@ export function SettingsOverlay() {
           </div>
         )}
 
-        <PortalControl />
+        {category === 'portal' && <PortalControl />}
+        </div>
       </div>
 
-      <div className="rev-foot">
+      <div className="settings-panel settings-foot">
         {justSaved && (
           <div className="row" style={{ gap: 'var(--s1)', color: 'var(--green)', fontSize: 'var(--t-sm)' }}>
             <IconCheck className="icon-xs" />

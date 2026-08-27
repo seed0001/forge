@@ -31,7 +31,7 @@ export function ProviderSelector() {
 
   return (
     <div className="modelpick" ref={ref}>
-      <button className="autonomy-trigger" onClick={() => setOpen((o) => !o)} title="Provider">
+      <button className={`autonomy-trigger${open ? ' on' : ''}`} onClick={() => setOpen((o) => !o)} title="Provider">
         <IconGlobe className="icon-xs" />
         <span>{current?.label ?? currentProvider}</span>
       </button>

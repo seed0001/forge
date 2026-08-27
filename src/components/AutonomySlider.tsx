@@ -59,7 +59,7 @@ export function AutonomySlider() {
 
   return (
     <div className="autonomy" ref={ref}>
-      <button className="autonomy-trigger" onClick={() => setOpen((o) => !o)} title="Autonomy level">
+      <button className={`autonomy-trigger${open ? ' on' : ''}`} onClick={() => setOpen((o) => !o)} title="Autonomy level">
         <IconBolt className="icon-xs" style={{ color: current.color }} />
         <span>{current.label}</span>
       </button>

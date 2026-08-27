@@ -133,22 +133,36 @@ input, textarea { font: inherit; color: inherit; }
 .side-btn { height: 24px; padding: 0 var(--s2); border-radius: var(--r-sm); font-size: var(--t-xs); color: var(--fg-3); display: flex; align-items: center; gap: var(--s1); }
 .side-btn:hover { background: var(--bg-hover); color: var(--fg); }
 
-.side-tabs { display: flex; gap: 2px; padding: 0 var(--s2) var(--s2); }
-.side-tab {
-  flex: 1; height: 26px; border-radius: var(--r-sm);
-  font-size: var(--t-xs); font-weight: 500; color: var(--fg-3);
+/* Soft-key segmented control: a raised track, the active tab a pressed key. */
+.side-tabs {
+  display: flex; gap: 3px;
+  padding: 3px;
   background: var(--bg-raised);
+  border: 1px solid var(--line);
+  border-radius: 11px;
+}
+.sidebar .side-tabs { margin: 0 var(--s2) var(--s2); }
+.side-tab {
+  flex: 1; height: 26px; border-radius: 8px;
+  font-size: var(--t-xs); font-weight: 500; color: var(--fg-3);
+  background: transparent;
+  transition: color 120ms ease, background 120ms ease, box-shadow 120ms ease;
 }
 .side-tab:hover { color: var(--fg-2); }
-.side-tab.on { background: var(--bg-active); color: var(--fg); }
+.side-tab.on {
+  background: var(--bg-active); color: var(--fg);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.06), 0 1px 2px rgba(0, 0, 0, 0.5);
+}
 
 /* ── Session history ───────────────────────────────────────────────────── */
 .newsession {
   display: flex; align-items: center; justify-content: center; gap: var(--s2);
   margin: 0 var(--s2) var(--s2);
-  height: 30px; border-radius: var(--r-md);
+  height: 32px; border-radius: 10px;
   border: 1px solid var(--line-strong);
+  background: var(--bg-raised);
   font-size: var(--t-sm); font-weight: 500; color: var(--fg-2);
+  transition: color 120ms ease, background 120ms ease, border-color 120ms ease;
 }
 .newsession:hover { border-color: var(--fg-3); color: var(--fg); background: var(--bg-hover); }
 
@@ -166,7 +180,7 @@ input, textarea { font: inherit; color: inherit; }
   position: relative;
   padding: var(--s2) var(--s2) var(--s2) var(--s3);
   margin-bottom: 6px;
-  border-radius: var(--r-md);
+  border-radius: 11px;
   background: var(--bg-raised);
   border: 1px solid var(--line);
   box-shadow: 0 1px 2px rgba(0, 0, 0, 0.5);
@@ -179,12 +193,73 @@ input, textarea { font: inherit; color: inherit; }
 }
 .sessrow.on {
   background: var(--bg-active);
-  border-color: color-mix(in srgb, var(--amber) 55%, var(--line-strong));
-  box-shadow: 0 0 0 1px color-mix(in srgb, var(--amber) 18%, transparent), 0 2px 8px rgba(0, 0, 0, 0.6);
+  border-color: color-mix(in srgb, var(--amber) 45%, var(--line-strong));
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.05), 0 0 0 1px var(--amber-bg), 0 2px 8px rgba(0, 0, 0, 0.55);
 }
-.sessrow.on::before {
+/* Left rail: solid amber on the active session, dim on any other running one. */
+.sessrow.on::before,
+.sessrow.working::before {
   content: ''; position: absolute; left: 0; top: var(--s2); bottom: var(--s2);
-  width: 2px; border-radius: 0 2px 2px 0; background: var(--amber);
+  width: 2px; border-radius: 0 2px 2px 0;
+  background: color-mix(in srgb, var(--amber) 32%, transparent);
+}
+.sessrow.on::before { background: var(--amber); }
+
+/* ── Working state: the agent is thinking on this session ─────────────── */
+/* A lit node runs down the rail. */
+.sessrow.working::after {
+  content: ''; position: absolute; left: -1px;
+  width: 3px; height: 16px; border-radius: 2px;
+  background: var(--amber);
+  box-shadow: 0 0 9px 2px rgba(217, 168, 108, 0.6);
+  animation: sess-rail-run 2s cubic-bezier(0.5, 0, 0.5, 1) infinite;
+}
+@keyframes sess-rail-run {
+  0% { top: 8px; }
+  50% { top: calc(100% - 24px); }
+  100% { top: 8px; }
+}
+/* A sheen sweeps through the title. */
+.sessrow.working .sesstitle { position: relative; }
+.sessrow.working .sesstitle::after {
+  content: ''; position: absolute; inset: 0; pointer-events: none;
+  background: linear-gradient(100deg, transparent 40%, rgba(255, 255, 255, 0.16) 50%, transparent 60%);
+  background-size: 240% 100%; background-repeat: no-repeat;
+  animation: sess-sheen 2.7s ease-in-out infinite;
+}
+@keyframes sess-sheen {
+  0% { background-position: 170% 0; }
+  55%, 100% { background-position: -70% 0; }
+}
+/* The timestamp glows amber and pulses. */
+.sessrow.working .sesstime {
+  color: var(--amber);
+  animation: sess-now-pulse 1.6s ease-in-out infinite;
+}
+@keyframes sess-now-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.4; }
+}
+/* The context bar shimmers as the window fills. */
+.sessrow.working .ctxfill { position: relative; }
+.sessrow.working .ctxfill::after {
+  content: ''; position: absolute; inset: 0;
+  background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.35), transparent);
+  background-size: 55% 100%; background-repeat: no-repeat;
+  animation: sess-bar-shim 1.9s linear infinite;
+}
+@keyframes sess-bar-shim {
+  0% { background-position: -70% 0; }
+  100% { background-position: 170% 0; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .sessrow.working::after,
+  .sessrow.working .sesstitle::after,
+  .sessrow.working .sesstime,
+  .sessrow.working .ctxfill::after { animation: none; }
+  .sessrow.working .sesstitle::after,
+  .sessrow.working .ctxfill::after { display: none; }
 }
 
 .sesstop { display: flex; align-items: center; gap: var(--s2); }
@@ -245,10 +320,23 @@ input, textarea { font: inherit; color: inherit; }
   /* overflow stays visible so the provider/model dropdowns can escape */
 }
 .center-path { font-size: var(--t-xs); color: var(--fg-3); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 45%; }
-.segmented { display: flex; gap: 2px; background: var(--bg-raised); border-radius: var(--r-md); padding: 2px; }
-.seg { height: 24px; padding: 0 var(--s3); border-radius: var(--r-sm); font-size: var(--t-xs); font-weight: 500; color: var(--fg-3); }
+/* Soft-key segmented switcher — a raised track, the active view a pressed key. */
+.segmented {
+  display: flex; gap: 3px; padding: 3px;
+  background: var(--bg-raised);
+  border: 1px solid var(--line);
+  border-radius: 11px;
+}
+.seg {
+  height: 24px; padding: 0 var(--s3); border-radius: 8px;
+  font-size: var(--t-xs); font-weight: 500; color: var(--fg-3);
+  transition: color 120ms ease, background 120ms ease, box-shadow 120ms ease;
+}
 .seg:hover { color: var(--fg-2); }
-.seg.on { background: var(--bg-active); color: var(--fg); }
+.seg.on {
+  background: var(--bg-active); color: var(--fg);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.06), 0 1px 2px rgba(0, 0, 0, 0.5);
+}
 .center-body {
   flex: 1; min-height: 0; display: flex; flex-direction: column;
   background: var(--bg-panel); border: 1px solid var(--line); border-radius: var(--r-lg); overflow: hidden;
@@ -257,10 +345,14 @@ input, textarea { font: inherit; color: inherit; }
 /* ── Typeface picker ───────────────────────────────────────────────────── */
 .fontpick { position: relative; }
 .seg-icon {
-  width: 28px; height: 28px; border-radius: var(--r-sm);
+  width: 28px; height: 28px; border-radius: 8px;
   display: flex; align-items: center; justify-content: center; color: var(--fg-3);
+  transition: color 120ms ease, background 120ms ease, box-shadow 120ms ease;
 }
-.seg-icon:hover { background: var(--bg-hover); color: var(--fg); }
+.seg-icon:hover {
+  background: var(--bg-active); color: var(--fg);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.05);
+}
 .fontmenu {
   position: absolute; top: calc(100% + 6px); right: 0; z-index: 30;
   width: 280px; max-height: 70vh; overflow-y: auto;
@@ -312,14 +404,22 @@ input, textarea { font: inherit; color: inherit; }
 
 /* ── Autonomy slider ───────────────────────────────────────────────────── */
 .autonomy { position: relative; }
+/* Soft-key toolbar controls — provider, model, autonomy, updates. */
 .autonomy-trigger {
-  height: 28px; padding: 0 var(--s3); border-radius: var(--r-sm);
+  height: 28px; padding: 0 10px; border-radius: 9px;
   display: flex; align-items: center; gap: var(--s1);
   font-size: var(--t-xs); font-weight: 600; color: var(--fg-2);
+  background: var(--bg-raised);
+  border: 1px solid var(--line);
+  transition: color 120ms ease, background 120ms ease, border-color 120ms ease, box-shadow 120ms ease;
 }
-.autonomy-trigger:hover { background: var(--bg-hover); color: var(--fg); }
+.autonomy-trigger:hover { background: var(--bg-hover); border-color: var(--line-strong); color: var(--fg); }
+.autonomy-trigger.on {
+  background: var(--bg-active); color: var(--fg); border-color: var(--line-strong);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.05), 0 1px 2px rgba(0, 0, 0, 0.45);
+}
 .autonomy-trigger:disabled { cursor: default; opacity: 0.7; }
-.autonomy-trigger:disabled:hover { background: none; }
+.autonomy-trigger:disabled:hover { background: var(--bg-raised); border-color: var(--line); }
 .spin { animation: spin 1s linear infinite; }
 @keyframes spin { to { transform: rotate(360deg); } }
 .autonomy-menu {

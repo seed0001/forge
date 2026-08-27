@@ -81,7 +81,7 @@ export function ModelSelector() {
 
   return (
     <div className="modelpick" ref={ref}>
-      <button className="autonomy-trigger" onClick={() => setOpen((o) => !o)} title="Model">
+      <button className={`autonomy-trigger${open ? ' on' : ''}`} onClick={() => setOpen((o) => !o)} title="Model">
         <IconCpu className="icon-xs" style={{ color: current?.isFree ? 'var(--green)' : 'var(--fg-3)' }} />
         <span>{shortName(currentModel) || 'Select model'}</span>
       </button>
@@ -112,7 +112,7 @@ export function ModelSelector() {
             />
           </div>
 
-          <div className="side-tabs" style={{ padding: 0, marginBottom: 'var(--s2)' }}>
+          <div className="side-tabs" style={{ marginBottom: 'var(--s2)' }}>
             <button className={`side-tab${filter === 'all' ? ' on' : ''}`} onClick={() => setFilter('all')}>
               All
             </button>

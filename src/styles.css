@@ -730,14 +730,35 @@ input, textarea { font: inherit; color: inherit; }
 .live-sub { color: var(--fg-3); }
 .live-pill.err { color: var(--red); border-color: var(--red); max-width: 100%; height: auto; padding: var(--s1) var(--s3); cursor: pointer; }
 
+/* Soft-key composer — a raised card; focus lights the hairline amber. */
 .composer-box {
+  position: relative;
   border: 1px solid var(--line-strong);
-  border-radius: var(--r-xl);
-  background: rgba(14, 14, 14, 0.88);
+  border-radius: 14px;
+  background: rgba(14, 14, 14, 0.92);
   backdrop-filter: blur(12px);
-  padding: var(--s3) var(--s3) var(--s2);
+  padding: var(--s3) var(--s3) 10px;
+  transition: border-color 160ms ease, box-shadow 160ms ease;
 }
-.composer-box:focus-within { border-color: #3c3c3c; }
+.composer-box:focus-within {
+  border-color: color-mix(in srgb, var(--amber) 42%, var(--line-strong));
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.05), 0 0 0 3px var(--amber-bg);
+}
+/* While the agent is working: a lit node runs the top edge. */
+.composer-box.working::before {
+  content: ''; position: absolute; left: 12px; right: 12px; top: -1px; height: 2px;
+  border-radius: 2px; pointer-events: none;
+  background: linear-gradient(90deg, transparent, var(--amber), transparent);
+  background-size: 40% 100%; background-repeat: no-repeat;
+  animation: composer-run-edge 1.7s linear infinite;
+}
+@keyframes composer-run-edge {
+  0% { background-position: -50% 0; }
+  100% { background-position: 150% 0; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .composer-box.working::before { animation: none; background-position: 50% 0; }
+}
 .composer-box textarea {
   width: 100%; display: block; resize: none; background: none; border: none; outline: none;
   font-size: var(--t-base); line-height: 1.55; min-height: 22px; max-height: 160px;
@@ -757,14 +778,14 @@ input, textarea { font: inherit; color: inherit; }
 }
 .composer-img-remove:hover { background: var(--red-bg); color: var(--red); }
 
-.chiprow { display: flex; align-items: center; gap: var(--s2); margin-top: var(--s2); }
+.chiprow { display: flex; align-items: center; gap: var(--s2); margin-top: 10px; }
 .chip {
-  height: 22px; padding: 0 var(--s2); border-radius: var(--r-pill);
+  height: 22px; padding: 0 var(--s2); border-radius: 8px;
   font-size: var(--t-xs); display: inline-flex; align-items: center; gap: var(--s1);
-  background: var(--bg-hover); color: var(--fg-3);
+  background: var(--bg-raised); border: 1px solid var(--line); color: var(--fg-3);
   max-width: 180px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
-.chip.amber { background: var(--amber-bg); color: var(--amber); }
+.chip.amber { background: var(--amber-bg); border-color: transparent; color: var(--amber); }
 .allowlist-pattern {
   display: inline-flex; align-items: center; gap: var(--s2); height: 26px; padding: 0 var(--s1) 0 var(--s3);
   border-radius: var(--r-pill); background: var(--bg-hover); color: var(--fg-2); font-size: var(--t-xs);
@@ -774,19 +795,35 @@ input, textarea { font: inherit; color: inherit; }
   border-radius: 50%; color: var(--fg-3);
 }
 .allowlist-pattern button:hover { background: var(--red-bg); color: var(--red); }
+/* Soft-key action buttons — rounded squares, not circles. */
 .micbtn {
-  width: 28px; height: 28px; border-radius: 50%; flex: none;
+  width: 28px; height: 28px; border-radius: 9px; flex: none;
   display: flex; align-items: center; justify-content: center;
-  color: var(--fg-3); background: var(--bg-hover);
-  transition: transform 90ms linear, background 200ms ease, color 200ms ease;
+  color: var(--fg-3); background: var(--bg-raised); border: 1px solid var(--line);
+  transition: transform 90ms linear, background 200ms ease, color 200ms ease, border-color 200ms ease;
 }
-.micbtn:hover { color: var(--fg); }
-.micbtn.live { background: #f43f5e; color: #fff; }
+.micbtn:hover { color: var(--fg); background: var(--bg-hover); border-color: var(--line-strong); }
+.micbtn.live { background: #f43f5e; color: #fff; border-color: transparent; }
 .micbtn:disabled { opacity: 0.5; cursor: default; }
 
-.send { width: 28px; height: 28px; border-radius: 50%; display: flex; align-items: center; justify-content: center; background: var(--fg); color: var(--bg-base); flex: none; }
-.send:disabled { background: var(--bg-active); color: var(--fg-3); cursor: default; }
-.send.stop { background: var(--red); color: #241413; }
+.send {
+  width: 28px; height: 28px; border-radius: 9px; flex: none;
+  display: flex; align-items: center; justify-content: center;
+  background: var(--amber); color: #140d05;
+  border: 1px solid transparent;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.25), 0 1px 3px rgba(0, 0, 0, 0.5);
+  transition: background 150ms ease, box-shadow 150ms ease, color 150ms ease;
+}
+.send:hover:not(:disabled) { background: #e5b980; }
+.send:disabled {
+  background: var(--bg-raised); color: var(--fg-3); border-color: var(--line);
+  box-shadow: none; cursor: default;
+}
+.send.stop {
+  background: var(--bg-active); color: var(--fg); border-color: var(--line-strong);
+  box-shadow: none;
+}
+.send.stop:hover { background: var(--bg-hover); }
 
 /* ── Editor ────────────────────────────────────────────────────────────── */
 .filetabs { height: 34px; flex: none; display: flex; border-bottom: 1px solid var(--line); overflow-x: auto; }

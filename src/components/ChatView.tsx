@@ -390,7 +390,7 @@ export function ChatView() {
             </div>
           )}
           <div
-            className="composer-box"
+            className={`composer-box${running ? ' working' : ''}`}
             onPaste={(e) => {
               const files = imageFilesFrom(e.clipboardData.items, null);
               if (files.length) {

@@ -1,7 +1,7 @@
 {
   "name": "forge",
   "private": true,
-  "version": "0.2.21",
+  "version": "0.2.22",
   "description": "Desktop pair-programming agent with reviewable diffs and governed autonomy.",
   "author": "seed0001",
   "type": "module",
@@ -61,7 +61,6 @@
     "files": [
       "dist/**/*",
       "dist-electron/**/*",
-      "rules/**/*",
       ".env.example",
       "package.json"
     ],

@@ -1034,7 +1034,6 @@ export class Project {
     const id = `${this.id}-focus${this.focusSeq}-${Date.now().toString(36)}`;
     const sessionId = this.newBackgroundSession(`Focus: ${label}`).id;
     const budgetMs = Math.round(Math.min(Math.max(budgetMinutes, 1), 240) * 60_000);
-    const rulesDir = process.env.RULES_DIR?.trim() || null;
     const findSession = () => this.sessions.find((s) => s.id === sessionId);
 
     let lastReply = '';
@@ -1086,7 +1085,6 @@ export class Project {
         askAndWait: (from, question, timeoutMinutes) => this.requestFocusAnswer(from, question, timeoutMinutes),
         fileBugReport: (report) => this.fileBugReport(report),
       },
-      rulesDir,
       true,
       `Focus: ${label}`,
       this.workspaceLink
@@ -1139,7 +1137,6 @@ export class Project {
   private ensureAgent(sessionId: string): AgentSession {
     const rt = this.runtime(sessionId);
     if (!rt.agent) {
-      const rulesDir = process.env.RULES_DIR?.trim() || null;
       const findSession = () => this.sessions.find((s) => s.id === sessionId);
       rt.agent = new AgentSession(this.rootPath ?? process.cwd(), {
         onActivity: (evt) => {
@@ -1231,7 +1228,7 @@ export class Project {
         askAndWait: (from, question, timeoutMinutes) => this.requestFocusAnswer(from, question, timeoutMinutes),
         fileBugReport: (report) => this.fileBugReport(report),
         startFocusAgent: (task, label, budgetMinutes) => this.startFocusAgent(task, label, budgetMinutes),
-      }, rulesDir, false, findSession()?.title, this.workspaceLink);
+      }, false, findSession()?.title, this.workspaceLink);
       const session = findSession();
       if (session) rt.agent.restoreHistory(session.messages);
     }

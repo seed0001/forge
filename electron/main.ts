@@ -49,22 +49,9 @@ if (!fs.existsSync(envFile) && fs.existsSync(envExample)) {
 }
 loadEnv(envFile);
 
-/**
- * The ruleset ships with the project. RULES_DIR stays available as an override
- * for pointing a workspace at a different ruleset, but the app must never
- * depend on a folder outside itself to know how to behave.
- */
-const bundledRules = path.join(__dirname, '..', 'rules');
-const overrideRules = process.env.RULES_DIR?.trim();
-if (overrideRules && fs.existsSync(overrideRules)) {
-  process.env.RULES_DIR = overrideRules;
-} else {
-  if (overrideRules) {
-    console.warn(`[forge] RULES_DIR "${overrideRules}" not found; using bundled rules/`);
-  }
-  process.env.RULES_DIR = fs.existsSync(bundledRules) ? bundledRules : '';
-}
-console.log(`[forge] ruleset: ${process.env.RULES_DIR || '(none found)'}`);
+// The agent's standing rules now live in a single Operator-owned file
+// (userData/RULES.md, see rules-store.ts) — read into every session, appended to
+// only when the Operator explicitly asks. No bundled ruleset, no RULES_DIR.
 
 // Seed the permission overrides cache so project.ts's resolvePermission
 // never needs to do a synchronous file read on the hot path.

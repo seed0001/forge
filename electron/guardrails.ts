@@ -81,8 +81,8 @@ export function looksCollapsed(text: string): boolean {
 
 /**
  * Strips any internal harness fence the model echoes back verbatim in its
- * visible reply — [UNTRUSTED]/[/UNTRUSTED] wrap every tool result, and a
- * ruleset module can be fenced as [TRUSTED: ...] (see rules-service.ts) — so
+ * visible reply — [UNTRUSTED]/[/UNTRUSTED] wrap every tool result, and the
+ * Operator's rules doc is fenced as [TRUSTED: ...] (see rules-store.ts) — so
  * a model that quotes a tool result back at length doesn't leak the fence
  * markers themselves into what the Operator sees. Only removes the tags,
  * never the surrounding prose.

@@ -49,32 +49,52 @@ function fieldMatches(field: string, value: number, max: number): boolean {
   });
 }
 
-function cronMatches(expr: string, date: Date): boolean {
-  const fields = expr.trim().split(/\s+/);
-  if (fields.length !== 5) return false;
-  const [min, hour, day, month, weekday] = fields;
-  return (
-    fieldMatches(min, date.getMinutes(), 59) &&
-    fieldMatches(hour, date.getHours(), 23) &&
-    fieldMatches(day, date.getDate(), 31) &&
-    fieldMatches(month, date.getMonth() + 1, 12) &&
-    fieldMatches(weekday, date.getDay(), 6)
-  );
-}
-
 /** True if `expr` parses as a plausible 5-field cron expression — used to validate before ever storing a task. */
 export function isValidCronExpr(expr: string): boolean {
   const fields = expr.trim().split(/\s+/);
   return fields.length === 5 && fields.every((f) => /^(\*|\*\/\d+|\d+(-\d+)?)(,(\*|\*\/\d+|\d+(-\d+)?))*$/.test(f));
 }
 
-/** Next minute-boundary timestamp at or after `from` matching a cron expression, searched forward up to ~2 years before giving up. */
+/**
+ * Next minute-boundary timestamp at or after `from` matching a cron
+ * expression, or null if none falls within the search horizon.
+ *
+ * Searches day-by-day, only walking the 1,440 minutes of a day whose
+ * date/month/weekday fields actually match. An impossible expression
+ * (e.g. `0 0 30 2 *` — the 30th of February) then costs ~1,460 cheap
+ * iterations instead of the ~1,000,000 a flat minute-by-minute scan took,
+ * so a bad expression can't stall the scheduler tick that computes it.
+ * The horizon is ~4 years so a Feb-29 schedule still resolves.
+ */
 export function nextCronRun(expr: string, from: number): number | null {
-  const start = new Date(Math.ceil(from / 60_000) * 60_000);
-  const cursor = new Date(start);
-  for (let i = 0; i < 60 * 24 * 366 * 2; i++) {
-    if (cronMatches(expr, cursor)) return cursor.getTime();
-    cursor.setMinutes(cursor.getMinutes() + 1);
+  const fields = expr.trim().split(/\s+/);
+  if (fields.length !== 5) return null;
+  const [min, hour, day, month, weekday] = fields;
+
+  const cursor = new Date(Math.ceil(from / 60_000) * 60_000);
+  const HORIZON_DAYS = 366 * 4;
+  for (let d = 0; d < HORIZON_DAYS; d++) {
+    const dateOk =
+      fieldMatches(day, cursor.getDate(), 31) &&
+      fieldMatches(month, cursor.getMonth() + 1, 12) &&
+      fieldMatches(weekday, cursor.getDay(), 6);
+    if (dateOk) {
+      const dayOfMonth = cursor.getDate();
+      for (let m = 0; m < 24 * 60; m++) {
+        const t = new Date(cursor);
+        t.setMinutes(t.getMinutes() + m);
+        if (t.getDate() !== dayOfMonth) break; // crossed midnight — done with this day
+        if (
+          t.getTime() >= from &&
+          fieldMatches(min, t.getMinutes(), 59) &&
+          fieldMatches(hour, t.getHours(), 23)
+        ) {
+          return t.getTime();
+        }
+      }
+    }
+    cursor.setDate(cursor.getDate() + 1);
+    cursor.setHours(0, 0, 0, 0);
   }
   return null;
 }

@@ -1,6 +1,13 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { listTree } from './fs-service';
+import {
+  fetchJsonGuarded,
+  fetchTextGuarded,
+  grepInWorker,
+  SEARCH_TIMEOUT_MS,
+  type GrepWorkerOutput,
+} from './tool-guards';
 import type { FileNode, CatalogModel } from './ipc-channels';
 
 /** Escapes every regex-special character in a single literal glob segment. */
@@ -78,7 +85,17 @@ const BINARY_EXT = new Set([
   '.woff', '.woff2', '.ttf', '.eot', '.mp3', '.mp4', '.mov', '.wav', '.bin', '.wasm',
 ]);
 
-/** Regex content search across a project's text files, skipping binaries and anything past a per-file size cap. */
+/**
+ * Regex content search across a project's text files, skipping binaries and
+ * anything past a per-file size cap.
+ *
+ * The actual matching runs on a worker thread (see tool-guards.grepInWorker)
+ * with a hard deadline: `pattern` comes from the model, and a
+ * catastrophic-backtracking regex has no in-thread way to be stopped —
+ * terminating the worker is the only real bound. A pattern that blows the
+ * deadline throws (caught by the tool handler and returned as an error the
+ * model can act on), rather than hanging the turn.
+ */
 export async function grepSearch(
   rootPath: string,
   pattern: RegExp,
@@ -97,27 +114,19 @@ export async function grepSearch(
     return true;
   });
 
-  const matches: GrepMatch[] = [];
-  let filesScanned = 0;
-  for (const abs of candidates) {
-    if (matches.length >= maxMatches) break;
-    try {
-      const stat = await fs.stat(abs);
-      if (stat.size > maxFileBytes) continue;
-      const content = await fs.readFile(abs, 'utf8');
-      filesScanned++;
-      const lines = content.split('\n');
-      for (let i = 0; i < lines.length && matches.length < maxMatches; i++) {
-        if (pattern.test(lines[i])) {
-          matches.push({ file: toRel(rootPath, abs), line: i + 1, text: lines[i].trim().slice(0, 300) });
-        }
-        pattern.lastIndex = 0; // a global-flag pattern must not carry state across lines/files
-      }
-    } catch {
-      // Unreadable file (permissions, race with a delete) — skipped, same tolerance list_files already has.
-    }
-  }
-  return { matches, filesScanned, truncated: matches.length >= maxMatches };
+  const out: GrepWorkerOutput = await grepInWorker({
+    pattern: pattern.source,
+    flags: pattern.flags,
+    files: candidates,
+    maxMatches,
+    maxFileBytes,
+  });
+
+  return {
+    matches: out.matches.map((m) => ({ file: toRel(rootPath, m.file), line: m.line, text: m.text })),
+    filesScanned: out.filesScanned,
+    truncated: out.truncated,
+  };
 }
 
 const ENTITIES: Record<string, string> = { amp: '&', lt: '<', gt: '>', quot: '"', "#39": "'", apos: "'", nbsp: ' ' };
@@ -134,7 +143,12 @@ function decodeEntities(s: string): string {
  * for "what does this page roughly say," not a replacement for Forge's
  * embedded-browser page extraction (electron/page-extract.ts).
  */
-export function htmlToText(html: string, maxLinks = 20): { text: string; links: string[] } {
+export function htmlToText(rawHtml: string, maxLinks = 20): { text: string; links: string[] } {
+  // Bound the input before any regex touches it. The link/tag patterns below
+  // are O(n^2) on pathological input (a huge run of non-'>' characters), so an
+  // adversarial multi-megabyte page could otherwise wedge the turn. 2 MB is far
+  // more raw HTML than "what does this page say" ever needs.
+  const html = rawHtml.length > 2_000_000 ? rawHtml.slice(0, 2_000_000) : rawHtml;
   const links: string[] = [];
   const linkRe = /<a\b[^>]*href=["']([^"']+)["'][^>]*>/gi;
   let m: RegExpExecArray | null;
@@ -162,12 +176,13 @@ export interface DevSearchResult {
 }
 
 export async function searchGithubRepos(query: string): Promise<DevSearchResult[]> {
-  const res = await fetch(
+  const res = await fetchJsonGuarded(
     `https://api.github.com/search/repositories?q=${encodeURIComponent(query)}&sort=stars&order=desc&per_page=8`,
-    { headers: { Accept: 'application/vnd.github+json', 'User-Agent': 'Forge' } }
+    { headers: { Accept: 'application/vnd.github+json', 'User-Agent': 'Forge' } },
+    SEARCH_TIMEOUT_MS
   );
   if (!res.ok) throw new Error(`GitHub search failed (${res.status})`);
-  const data = (await res.json()) as { items?: Array<Record<string, unknown>> };
+  const data = (res.data ?? {}) as { items?: Array<Record<string, unknown>> };
   return (data.items ?? []).map((r) => ({
     title: String(r.full_name),
     url: String(r.html_url),
@@ -176,9 +191,13 @@ export async function searchGithubRepos(query: string): Promise<DevSearchResult[
 }
 
 export async function searchNpmPackages(query: string): Promise<DevSearchResult[]> {
-  const res = await fetch(`https://registry.npmjs.org/-/v1/search?text=${encodeURIComponent(query)}&size=8`);
+  const res = await fetchJsonGuarded(
+    `https://registry.npmjs.org/-/v1/search?text=${encodeURIComponent(query)}&size=8`,
+    {},
+    SEARCH_TIMEOUT_MS
+  );
   if (!res.ok) throw new Error(`npm search failed (${res.status})`);
-  const data = (await res.json()) as { objects?: Array<{ package: Record<string, any> }> };
+  const data = (res.data ?? {}) as { objects?: Array<{ package: Record<string, any> }> };
   return (data.objects ?? []).map((o) => ({
     title: String(o.package.name),
     url: o.package.links?.npm ?? `https://www.npmjs.com/package/${o.package.name}`,
@@ -187,9 +206,13 @@ export async function searchNpmPackages(query: string): Promise<DevSearchResult[
 }
 
 export async function searchHackerNews(query: string): Promise<DevSearchResult[]> {
-  const res = await fetch(`https://hn.algolia.com/api/v1/search?query=${encodeURIComponent(query)}&tags=story&hitsPerPage=8`);
+  const res = await fetchJsonGuarded(
+    `https://hn.algolia.com/api/v1/search?query=${encodeURIComponent(query)}&tags=story&hitsPerPage=8`,
+    {},
+    SEARCH_TIMEOUT_MS
+  );
   if (!res.ok) throw new Error(`Hacker News search failed (${res.status})`);
-  const data = (await res.json()) as { hits?: Array<Record<string, unknown>> };
+  const data = (res.data ?? {}) as { hits?: Array<Record<string, unknown>> };
   return (data.hits ?? []).map((h) => ({
     title: String(h.title),
     url: (h.url as string) || `https://news.ycombinator.com/item?id=${h.objectID}`,
@@ -198,9 +221,9 @@ export async function searchHackerNews(query: string): Promise<DevSearchResult[]
 }
 
 export async function fetchRssFeed(url: string, maxItems = 10): Promise<DevSearchResult[]> {
-  const res = await fetch(url, { headers: { 'User-Agent': 'Forge' } });
+  const res = await fetchTextGuarded(url, { headers: { 'User-Agent': 'Forge' } }, { timeoutMs: SEARCH_TIMEOUT_MS });
   if (!res.ok) throw new Error(`RSS/Atom fetch failed (${res.status})`);
-  const xml = await res.text();
+  const xml = res.text.length > 2_000_000 ? res.text.slice(0, 2_000_000) : res.text;
   const items: DevSearchResult[] = [];
   const itemRe = /<(item|entry)\b[\s\S]*?<\/\1>/gi;
   let m: RegExpExecArray | null;

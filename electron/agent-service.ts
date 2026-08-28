@@ -17,6 +17,13 @@ import {
 } from './chat-provider';
 import type { ChatProviderConfig } from './chat-provider';
 import { matchesAllowlist, isShellChained } from './perm-store';
+import {
+  fetchJsonGuarded,
+  fetchTextGuarded,
+  withAbortDeadline,
+  HTTP_TIMEOUT_MS,
+  SEARCH_TIMEOUT_MS,
+} from './tool-guards';
 import { buildGuardrailNote, containsForeignScript, stripLeakedTags, looksCollapsed } from './guardrails';
 import { ContextStore, type RecordKind } from './context-store';
 import { addLesson, listLessons, matchLessons } from './learnings-store';
@@ -992,19 +999,22 @@ async function tavilySearch(query: string): Promise<{ results: WebResult[]; answ
     throw new Error('No SEARCH_API set. Add a Tavily key to forge/.env (get one at app.tavily.com) and restart.');
   }
 
-  const res = await fetch('https://api.tavily.com/search', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    // include_answer asks Tavily to synthesize a short direct answer from the
-    // results, not just return the raw list — free on their end, and often
-    // saves the model a whole extra reasoning step over the same snippets.
-    body: JSON.stringify({ api_key: key, query, max_results: 6, search_depth: 'basic', include_answer: true }),
-  });
+  const res = await fetchJsonGuarded(
+    'https://api.tavily.com/search',
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      // include_answer asks Tavily to synthesize a short direct answer from the
+      // results, not just return the raw list — free on their end, and often
+      // saves the model a whole extra reasoning step over the same snippets.
+      body: JSON.stringify({ api_key: key, query, max_results: 6, search_depth: 'basic', include_answer: true }),
+    },
+    SEARCH_TIMEOUT_MS
+  );
   if (!res.ok) {
-    const detail = await res.text();
-    throw new Error(`Tavily request failed (${res.status}): ${detail.slice(0, 300)}`);
+    throw new Error(`Tavily request failed (${res.status})`);
   }
-  const data = (await res.json()) as { results?: { title: string; url: string; content: string }[]; answer?: string };
+  const data = (res.data ?? {}) as { results?: { title: string; url: string; content: string }[]; answer?: string };
   return {
     results: (data.results ?? []).map((r) => ({ title: r.title, url: r.url, snippet: r.content })),
     answer: data.answer?.trim() || null,
@@ -1644,8 +1654,23 @@ export class AgentSession {
     model: string,
     apiKey: string
   ): Promise<{ audio: Buffer; format: string }> {
+    // Overall deadline on the whole streamed response — a stalled SSE
+    // connection would otherwise leave the reader.read() loop below waiting
+    // forever, hanging the agent turn.
+    return withAbortDeadline('Music generation', 300_000, (signal) =>
+      this.generateMusicStream(prompt, model, apiKey, signal)
+    );
+  }
+
+  private async generateMusicStream(
+    prompt: string,
+    model: string,
+    apiKey: string,
+    signal: AbortSignal
+  ): Promise<{ audio: Buffer; format: string }> {
     const response = await fetch(OPENROUTER_URL, {
       method: 'POST',
+      signal,
       headers: {
         Authorization: `Bearer ${apiKey}`,
         'Content-Type': 'application/json',
@@ -2265,13 +2290,17 @@ export class AgentSession {
       const actId = nextId('act');
       this.trackActivity({ id: actId, kind: 'search', detail: `Fetched ${url}`, status: 'active' });
       try {
-        const resp = await fetch(url, { headers: { 'User-Agent': 'Mozilla/5.0 (compatible; Forge)' } });
+        const resp = await fetchTextGuarded(
+          url,
+          { headers: { 'User-Agent': 'Mozilla/5.0 (compatible; Forge)' } },
+          { timeoutMs: HTTP_TIMEOUT_MS }
+        );
         if (!resp.ok) {
           this.trackActivity({ id: actId, kind: 'search', detail: `Fetched ${url}`, status: 'error' });
           return `ERROR: fetch failed (${resp.status}) for ${url}.`;
         }
-        const contentType = resp.headers.get('content-type') ?? '';
-        const raw = await resp.text();
+        const contentType = resp.contentType;
+        const raw = resp.text;
         const { text, links } = contentType.includes('html') ? htmlToText(raw) : { text: raw, links: [] as string[] };
         await audit(this.rootPath, 'search', `webfetch: ${url}`, `${text.length} chars`);
         this.trackActivity({ id: actId, kind: 'search', detail: `Fetched ${url}`, status: 'done' });
@@ -2437,27 +2466,30 @@ export class AgentSession {
       });
 
       try {
-        const resp = await fetch(OPENROUTER_IMAGES_URL, {
-          method: 'POST',
-          headers: {
-            Authorization: `Bearer ${apiKey}`,
-            'Content-Type': 'application/json',
-            'HTTP-Referer': 'https://forge.local',
-            'X-Title': 'Forge',
+        const resp = await fetchJsonGuarded(
+          OPENROUTER_IMAGES_URL,
+          {
+            method: 'POST',
+            headers: {
+              Authorization: `Bearer ${apiKey}`,
+              'Content-Type': 'application/json',
+              'HTTP-Referer': 'https://forge.local',
+              'X-Title': 'Forge',
+            },
+            body: JSON.stringify({
+              model,
+              prompt,
+              n: 1,
+              ...(aspectRatio ? { aspect_ratio: aspectRatio } : {}),
+            }),
           },
-          body: JSON.stringify({
-            model,
-            prompt,
-            n: 1,
-            ...(aspectRatio ? { aspect_ratio: aspectRatio } : {}),
-          }),
-        });
+          180_000
+        );
         if (!resp.ok) {
-          const text = await resp.text();
           this.trackActivity({ id: actId, kind: 'generate', detail: 'Image generation failed', status: 'error' });
-          return `ERROR: OpenRouter image generation failed (${resp.status}): ${text.slice(0, 500)}`;
+          return `ERROR: OpenRouter image generation failed (${resp.status}).`;
         }
-        const data = await resp.json();
+        const data = (resp.data ?? {}) as any;
         const item = data.data?.[0];
         if (!item?.b64_json) {
           this.trackActivity({ id: actId, kind: 'generate', detail: 'Image generation failed', status: 'error' });
@@ -2512,33 +2544,36 @@ export class AgentSession {
       try {
         const b64 = file.data.toString('base64');
         await audit(this.rootPath, 'read', `${rel} (image)`, `${fmtBytes(file.data.length)}, ${fmtBytes(b64.length)} base64`);
-        const resp = await fetch(OPENROUTER_URL, {
-          method: 'POST',
-          headers: {
-            Authorization: `Bearer ${apiKey}`,
-            'Content-Type': 'application/json',
-            'HTTP-Referer': 'https://forge.local',
-            'X-Title': 'Forge',
+        const resp = await fetchJsonGuarded(
+          OPENROUTER_URL,
+          {
+            method: 'POST',
+            headers: {
+              Authorization: `Bearer ${apiKey}`,
+              'Content-Type': 'application/json',
+              'HTTP-Referer': 'https://forge.local',
+              'X-Title': 'Forge',
+            },
+            body: JSON.stringify({
+              model,
+              messages: [
+                {
+                  role: 'user',
+                  content: [
+                    { type: 'text', text: question },
+                    { type: 'image_url', image_url: { url: `data:${mime};base64,${b64}` } },
+                  ],
+                },
+              ],
+            }),
           },
-          body: JSON.stringify({
-            model,
-            messages: [
-              {
-                role: 'user',
-                content: [
-                  { type: 'text', text: question },
-                  { type: 'image_url', image_url: { url: `data:${mime};base64,${b64}` } },
-                ],
-              },
-            ],
-          }),
-        });
+          120_000
+        );
         if (!resp.ok) {
-          const text = await resp.text();
           this.trackActivity({ id: actId, kind: 'analyze', detail: `Analysis of ${rel} failed`, status: 'error' });
-          return `ERROR: OpenRouter vision request failed (${resp.status}): ${text.slice(0, 500)}`;
+          return `ERROR: OpenRouter vision request failed (${resp.status}).`;
         }
-        const data = await resp.json();
+        const data = (resp.data ?? {}) as any;
         const text = data.choices?.[0]?.message?.content;
         if (!text) {
           this.trackActivity({ id: actId, kind: 'analyze', detail: `Analysis of ${rel} failed`, status: 'error' });
@@ -2663,21 +2698,25 @@ export class AgentSession {
       .join('\n');
 
     try {
-      const resp = await fetch(cfg.url, {
-        method: 'POST',
-        headers: chatHeaders(cfg.provider, cfg.apiKey),
-        body: JSON.stringify({
-          model: cfg.model,
-          messages: [{ role: 'user', content: prompt }],
-          max_tokens: 20,
-          temperature: 0.4,
-          usage: { include: true },
-        }),
-      });
+      const resp = await fetchJsonGuarded(
+        cfg.url,
+        {
+          method: 'POST',
+          headers: chatHeaders(cfg.provider, cfg.apiKey),
+          body: JSON.stringify({
+            model: cfg.model,
+            messages: [{ role: 'user', content: prompt }],
+            max_tokens: 20,
+            temperature: 0.4,
+            usage: { include: true },
+          }),
+        },
+        60_000
+      );
       if (!resp.ok) return null;
-      const data = await resp.json();
-      if (typeof data.usage?.cost === 'number') this.cb.onCost(data.usage.cost);
-      const text = data.choices?.[0]?.message?.content?.trim();
+      const data = resp.data as any;
+      if (typeof data?.usage?.cost === 'number') this.cb.onCost(data.usage.cost);
+      const text = data?.choices?.[0]?.message?.content?.trim();
       if (!text) return null;
       return text.replace(/^["'“]+|["'”]+$/g, '').replace(/[.!]+$/, '').slice(0, 60);
     } catch {
@@ -2712,24 +2751,28 @@ export class AgentSession {
     ].join('\n');
 
     try {
-      const resp = await fetch(cfg.url, {
-        method: 'POST',
-        headers: chatHeaders(cfg.provider, cfg.apiKey),
-        body: JSON.stringify({
-          model: cfg.model,
-          messages: [{ role: 'user', content: prompt }],
-          max_tokens: 400,
-          temperature: 0.3,
-          usage: { include: true },
-        }),
-      });
+      const resp = await fetchJsonGuarded(
+        cfg.url,
+        {
+          method: 'POST',
+          headers: chatHeaders(cfg.provider, cfg.apiKey),
+          body: JSON.stringify({
+            model: cfg.model,
+            messages: [{ role: 'user', content: prompt }],
+            max_tokens: 400,
+            temperature: 0.3,
+            usage: { include: true },
+          }),
+        },
+        90_000
+      );
       if (!resp.ok) return null;
-      const data = await resp.json();
-      if (typeof data.usage?.cost === 'number') {
+      const data = resp.data as any;
+      if (typeof data?.usage?.cost === 'number') {
         this.cb.onCost(data.usage.cost);
         this.taskCostUsd += data.usage.cost;
       }
-      const text = data.choices?.[0]?.message?.content?.trim();
+      const text = data?.choices?.[0]?.message?.content?.trim();
       return text || null;
     } catch {
       return null;

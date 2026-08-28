@@ -2,7 +2,11 @@
 
 Every released version of Forge, newest first. Dates are when the build went out.
 
-## 0.2.34 — 2026-08-28
+## 0.2.35 — 2026-08-28
+
+- **The agent can no longer hang the turn on a bad `grep` pattern.** A regex from the model now runs on a separate thread that's killed after 4 seconds — a catastrophic-backtracking pattern comes back as an error the agent can react to instead of freezing the run with no way out.
+- **Every web request a tool makes now has a timeout.** `webfetch`, web search, image/vision/music generation, and the title/summary helper calls used to wait forever on a server that connected but never answered. Each now aborts on a deadline (and fetched pages are size-capped, so parsing a huge page can't wedge the turn either).
+- **A broken scheduled-task time no longer stalls the scheduler.** Working out the next run for an impossible cron expression (e.g. "the 30th of February") took ~1,000,000 steps every tick; it now resolves in one.
 
 - **Roadmap is a side panel now, not a tab.** When the agent proposes a roadmap it appears in a collapsible panel on the right — expand/collapse each milestone, and hit **Discuss & chat** on any item to pull its plan into the composer and talk it through (re-outline, expand, whatever). Items waiting for review auto-expand and can be approved or rejected right there.
 - **Activity panel.** A new right-side panel shows what the agent looked at, reasoned about, and changed — grouped one card per run, newest last, each expandable down to the individual steps (reads, commands, edits with diff stats). The active run stays open and ticks live.

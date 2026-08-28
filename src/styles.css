@@ -811,6 +811,9 @@ input, textarea { font: inherit; color: inherit; }
   max-width: 180px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 .chip.amber { background: var(--amber-bg); border-color: transparent; color: var(--amber); }
+.chip.budget { font-variant-numeric: tabular-nums; }
+.chip.budget.over { background: var(--red-bg); border-color: transparent; color: var(--red); }
+.chip.budget.over-ok { background: var(--amber-bg); border-color: transparent; color: var(--amber); }
 .allowlist-pattern {
   display: inline-flex; align-items: center; gap: var(--s2); height: 26px; padding: 0 var(--s1) 0 var(--s3);
   border-radius: var(--r-pill); background: var(--bg-hover); color: var(--fg-2); font-size: var(--t-xs);

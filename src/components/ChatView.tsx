@@ -439,6 +439,24 @@ export function ChatView() {
             <div className="chiprow">
               <ReasoningSelector dropUp />
               <AutonomySlider dropUp />
+              {view.summary.budget?.limitUsd != null && (
+                <span
+                  className={`chip budget${
+                    view.summary.budget.overridden
+                      ? ' over-ok'
+                      : view.summary.budget.spentUsd >= view.summary.budget.limitUsd
+                        ? ' over'
+                        : ''
+                  }`}
+                  title={
+                    view.summary.budget.overridden
+                      ? `Budget $${view.summary.budget.limitUsd.toFixed(2)} reached — overage authorized ($${view.summary.budget.spentUsd.toFixed(2)} spent)`
+                      : `Project budget: $${view.summary.budget.spentUsd.toFixed(2)} spent of $${view.summary.budget.limitUsd.toFixed(2)}`
+                  }
+                >
+                  ${view.summary.budget.spentUsd.toFixed(2)} / ${view.summary.budget.limitUsd.toFixed(2)}
+                </span>
+              )}
               <span className="chip">{view.summary.name}</span>
               <div className="spacer" />
               <button

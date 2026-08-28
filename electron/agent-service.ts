@@ -44,6 +44,7 @@ import type {
   PermissionLevel,
   FocusMessage,
   FocusAgentSummary,
+  ProjectBudget,
 } from './ipc-channels';
 import { MAX_TOOL_CALLS_DEFAULT, MAX_TOOL_CALLS_LIMIT } from './ipc-channels';
 import type { BugReportInput } from './bug-store';
@@ -108,6 +109,10 @@ export interface AgentCallbacks {
   onCost: (usd: number) => void;
   /** Fires each time the running conversation is compacted, so the UI can show how many times. */
   onCompaction: () => void;
+  /** The project's spending cap and running spend — read fresh every turn, since it can change mid-task (the Operator can set it or authorize an overage in chat). */
+  getBudget: () => ProjectBudget;
+  /** Record/update the project budget from the set_budget tool. `limitUsd` null/0 clears it; `allowOverage` keeps the cap but stops the agent blocking on it. */
+  setBudget: (limitUsd: number | null, allowOverage: boolean) => void;
   /** Runs a shell command in the owning workspace's terminal. */
   runShell: (
     requestId: string,
@@ -936,7 +941,29 @@ const ADD_RULE_TOOL = {
   },
 } as const;
 
-const TOOLS = [...BASE_TOOLS, ADD_RULE_TOOL, SPAWN_TOOL, SPAWN_FOCUS_TOOL, PROPOSE_ROADMAP_TOOL, COMPLETE_ROADMAP_ITEM_TOOL];
+const SET_BUDGET_TOOL = {
+  type: 'function',
+  function: {
+    name: 'set_budget',
+    description:
+      "Record or update the Operator's spending cap for this project, in US dollars. Call this whenever the " +
+      'Operator states a budget in conversation — "we\'ve got $5 for this", "keep it under 20 bucks", "budget is 50". ' +
+      'Setting an amount starts the spend meter for the work ahead at zero. Pass amount_usd: 0 to remove the cap. ' +
+      'Pass allow_overage: true ONLY when the Operator has explicitly told you to keep going past a cap that is ' +
+      'already spent — "go over", "keep going anyway", "ignore the budget", "raise it to $X". While a budget is ' +
+      'spent and not yet overridden, this is the ONLY tool you may call.',
+    parameters: {
+      type: 'object',
+      properties: {
+        amount_usd: { type: 'number', description: 'The cap in USD. 0 removes the cap. Omit when only authorizing an overage.' },
+        allow_overage: { type: 'boolean', description: 'Continue past an already-spent cap. Set only on an explicit instruction to do so.' },
+      },
+      required: [],
+    },
+  },
+} as const;
+
+const TOOLS = [...BASE_TOOLS, ADD_RULE_TOOL, SET_BUDGET_TOOL, SPAWN_TOOL, SPAWN_FOCUS_TOOL, PROPOSE_ROADMAP_TOOL, COMPLETE_ROADMAP_ITEM_TOOL];
 const SUBAGENT_TOOLS = BASE_TOOLS;
 
 interface WebResult {
@@ -1081,6 +1108,16 @@ function buildSystemPrompt(rootPath: string, isSubagent = false): string {
     '- cost_summary reports this session\'s running dollar total and how much the CURRENT task has spent.',
     '  If the Operator has set a per-task spend limit in Settings, you will also get an automatic warning',
     '  once a task crosses it, and it will be stopped outright if it runs well past that despite the warning.',
+    ...(isSubagent
+      ? []
+      : [
+          '- set_budget records a project-wide spending cap the Operator gives you in plain language ("we\'ve got',
+          '  $5 for this", "keep it under 20"). Call it whenever they state one. Once cumulative spend reaches the',
+          '  cap you are stopped and switched to words-only: you can still answer questions, but every action is',
+          '  blocked until the Operator says to continue past the budget — at which point you call set_budget with',
+          '  allow_overage: true (and a new amount_usd if they gave one). Do not nag about the budget; report the',
+          '  running cost when asked or when you stop.',
+        ]),
     ...(isSubagent
       ? []
       : [
@@ -1230,6 +1267,10 @@ export class AgentSession {
   private contextRecoveryAttempts = 0;
   /** True once this task has force-compacted because the assembled request was over the byte budget — done at most once per send(). */
   private bytesRecoveryTried = false;
+  /** True for a turn where the project budget is spent (and no overage authorized): the agent may reply in words but every tool except set_budget is blocked. Recomputed at the top of each turn. */
+  private budgetLocked = false;
+  /** True once this send() has announced "we hit the budget", so it says it once and then stops rather than every turn. */
+  private budgetStopIssued = false;
 
   constructor(
     rootPath: string,
@@ -1739,6 +1780,8 @@ export class AgentSession {
         onUsage: () => {}, // A subagent's token usage belongs to its own conversation, not this one's.
         onCost: this.cb.onCost, // Real money spent on the Operator's behalf — always bubbles up.
         onCompaction: () => {}, // A subagent compacting its own scratch conversation isn't the visible thread's business.
+        getBudget: this.cb.getBudget, // A subagent must stop at the project budget too.
+        setBudget: this.cb.setBudget, // Never used (set_budget isn't a subagent tool), but keeps the callback shape whole.
         runShell: this.cb.runShell,
         getPermission: this.cb.getPermission,
         // 'bash' goes through the same distinct, fail-closed subagent channel as before.
@@ -1783,6 +1826,48 @@ export class AgentSession {
   }
 
   private async callTool(name: string, args: Record<string, unknown>): Promise<string> {
+    // While the project budget is spent and no overage is authorized, the
+    // agent may talk but not act — set_budget is the one way back.
+    if (this.budgetLocked && name !== 'set_budget') {
+      const b = this.cb.getBudget();
+      return (
+        `BUDGET REACHED — "${name}" is blocked. The Operator's $${(b.limitUsd ?? 0).toFixed(2)} cap for this project ` +
+        `is spent ($${b.spentUsd.toFixed(2)}). Tell them plainly that the budget is used up; they can say "go over budget" ` +
+        `or give a new amount for you to continue. Do not attempt an equivalent action another way.`
+      );
+    }
+
+    if (name === 'set_budget') {
+      const raw =
+        typeof args.amount_usd === 'number'
+          ? args.amount_usd
+          : typeof args.amount_usd === 'string' && args.amount_usd.trim() !== ''
+            ? Number(args.amount_usd.replace(/[$,\s]/g, ''))
+            : NaN;
+      const amount = Number.isFinite(raw) ? Math.max(raw, 0) : null;
+      const allowOverage = args.allow_overage === true || args.allow_overage === 'true';
+      this.cb.setBudget(amount, allowOverage);
+      const b = this.cb.getBudget();
+      this.budgetLocked = false; // re-evaluated at the next turn's top; unblock immediately for this reply
+      const label = allowOverage
+        ? 'Budget: overage authorized'
+        : b.limitUsd == null
+          ? 'Budget cleared'
+          : `Budget set to $${b.limitUsd.toFixed(2)}`;
+      this.trackActivity({ id: nextId('act'), kind: 'thinking', detail: label, status: 'done' });
+      await audit(
+        this.rootPath,
+        'request',
+        allowOverage ? 'budget overage authorized' : b.limitUsd == null ? 'budget cleared' : 'budget set',
+        b.limitUsd == null ? 'no cap' : `$${b.limitUsd.toFixed(2)} cap · $${b.spentUsd.toFixed(2)} spent`
+      );
+      if (b.limitUsd == null) return 'Budget cleared — no spending cap on this project now.';
+      if (allowOverage) {
+        return `Understood — continuing past the $${b.limitUsd.toFixed(2)} budget (about $${b.spentUsd.toFixed(2)} spent so far). I'll keep reporting the running cost.`;
+      }
+      return `Budget set: $${b.limitUsd.toFixed(2)} for this project (meter starts now). I'll stop and check with you when it's reached.`;
+    }
+
     if (name === 'list_files') {
       const rel = String(args.path ?? '.');
       const abs = path.resolve(this.rootPath, rel);
@@ -2893,6 +2978,20 @@ export class AgentSession {
     this.costWarningIssued = false;
     this.contextRecoveryAttempts = 0;
     this.bytesRecoveryTried = false;
+    // A fresh message while the budget is already spent: this turn still runs
+    // (so the agent can answer, or process a "go over budget" instruction),
+    // but callTool blocks every action except set_budget while budgetLocked,
+    // and the mid-task "we hit the budget" stop is suppressed for it — the
+    // user is deliberately still chatting.
+    {
+      const b = this.cb.getBudget();
+      const startedOverBudget = b.limitUsd != null && !b.overridden && b.spentUsd >= b.limitUsd;
+      this.budgetLocked = startedOverBudget;
+      // Suppress the mid-task "we hit the budget" announcement for a turn that
+      // began already over — that turn is deliberate words-only chat, not a
+      // task blowing the cap.
+      this.budgetStopIssued = startedOverBudget;
+    }
     this.matchedLessons = await matchLessons(userText);
     this.cb.onStatus(true);
     await this.primeRules();
@@ -3048,6 +3147,26 @@ export class AgentSession {
         this.pendingGuardrailNote = null;
       }
 
+      // Budget lock: recomputed each turn (spend can cross the line mid-loop).
+      // The agent may still produce this one reply, but callTool blocks every
+      // action except set_budget while it's set.
+      {
+        const b = this.cb.getBudget();
+        this.budgetLocked = b.limitUsd != null && !b.overridden && b.spentUsd >= b.limitUsd;
+        if (this.budgetLocked) {
+          wireMessages.push({
+            role: 'system',
+            content:
+              `BUDGET REACHED. The Operator set a $${b.limitUsd!.toFixed(2)} cap for this project and about ` +
+              `$${b.spentUsd.toFixed(2)} has been spent. Do NOT use any tool or take any action this turn — with ONE ` +
+              `exception: if the Operator is telling you to continue past the budget ("go over", "keep going", "ignore ` +
+              `the budget", "make it $X"), call set_budget (allow_overage: true, plus amount_usd if they named a new ` +
+              `number). Otherwise reply briefly in words only: if their request needs real work, say the budget is spent ` +
+              `and that they can say "go over budget" or give you a new amount. Do not apologize more than once.`,
+          });
+        }
+      }
+
       // Ephemeral for this one request only, like the notes above — never
       // spliced into this.messages, so it never persists past this call and
       // never affects the desktop app, which always sends source: 'desktop'.
@@ -3176,6 +3295,43 @@ export class AgentSession {
       if (typeof data.usage?.cost === 'number') {
         this.cb.onCost(data.usage.cost);
         this.taskCostUsd += data.usage.cost;
+      }
+
+      // Project budget — the conversational cap ("we've got $5 for this").
+      // The moment cumulative spend reaches it, stop the task, say so once,
+      // and leave the agent in words-only mode (callTool enforces that on the
+      // next message) until the Operator authorizes an overage.
+      {
+        const b = this.cb.getBudget();
+        if (
+          !this.budgetStopIssued &&
+          !this.isSubagent &&
+          b.limitUsd != null &&
+          !b.overridden &&
+          b.spentUsd >= b.limitUsd
+        ) {
+          this.budgetStopIssued = true;
+          this.budgetLocked = true;
+          this.trackActivity({
+            id: nextId('act'),
+            kind: 'stopped',
+            detail: `Budget reached — $${b.spentUsd.toFixed(2)} of $${b.limitUsd.toFixed(2)}`,
+            status: 'error',
+          });
+          await audit(
+            this.rootPath,
+            'request',
+            'budget reached — stopped',
+            `$${b.spentUsd.toFixed(2)} of $${b.limitUsd.toFixed(2)}`
+          );
+          this.flushMessage(
+            `Sorry — we've hit the $${b.limitUsd.toFixed(2)} budget for this project (about $${b.spentUsd.toFixed(2)} ` +
+              `spent). I've stopped here. I can still answer questions, but I won't run commands or make changes until ` +
+              `you tell me to go over budget — just say "go over budget", or give me a new amount to work with.`
+          );
+          this.cb.onStatus(false);
+          return;
+        }
       }
 
       // Per-task spend guard — Operator-configurable in Settings, blank means

@@ -200,6 +200,19 @@ export const DEFAULT_PERMISSION_OVERRIDES: PermissionOverrides = {
  * changed when a new, higher-level Workspace (see WorkspaceSummary below)
  * was inserted above it, but the shape and behavior here are unchanged.
  */
+/**
+ * A spending cap for a project, set conversationally ("we've got $5 for
+ * this") and enforced by the agent: once `spentUsd` reaches `limitUsd` it
+ * stops taking actions and only chats, until the Operator authorizes an
+ * overage (`overridden`) or sets a new amount. Persisted with the project's
+ * sessions. `limitUsd: null` means no cap.
+ */
+export interface ProjectBudget {
+  limitUsd: number | null;
+  spentUsd: number;
+  overridden: boolean;
+}
+
 export interface ProjectSummary {
   id: string;
   name: string;
@@ -210,6 +223,8 @@ export interface ProjectSummary {
   unseenCompletion: boolean;
   activeSessionId: string | null;
   autonomy: Autonomy;
+  /** The project's spending cap and running spend against it. */
+  budget: ProjectBudget;
   /** Every session in this project whose agent is currently working — each session runs independently, so more than one can be live at once. */
   runningSessionIds: string[];
   /** null until the Operator picks Coding or Browsing from the chooser screen. */

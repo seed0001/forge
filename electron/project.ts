@@ -12,6 +12,7 @@ import { loadFocusBoard, saveFocusBoard } from './focus-board';
 import { fileBugReport as fileBugReportOnDisk, type BugReportInput } from './bug-store';
 import {
   loadSessions,
+  loadBudget,
   saveSessions,
   summarize,
   titleFrom,
@@ -26,6 +27,7 @@ import type {
   ChatImage,
   ProjectSummary,
   ProjectStatus,
+  ProjectBudget,
   WorkspaceKind,
   Autonomy,
   RoadmapItem,
@@ -217,6 +219,9 @@ export class Project {
   kind: WorkspaceKind | null = null;
   /** Where a Browsing workspace saves markdown clips — deliberately separate from rootPath (which reloads sessions when changed); picking this never touches chat/sessions. */
   clipsFolder: string | null = null;
+  /** The project's conversational spending cap — see setBudget / addBudgetSpend. Restored from disk in setRoot. */
+  budget: ProjectBudget = { limitUsd: null, spentUsd: 0, overridden: false };
+  private lastBudgetPersist = 0;
 
   private emit: ProjectEmit;
   private lineSeq = 0;
@@ -277,6 +282,7 @@ export class Project {
     for (const rt of this.focusAgents.values()) rt.agent.stop();
     this.focusAgents.clear();
     this.sessions = await loadSessions(rootPath);
+    this.budget = await loadBudget(rootPath);
     this.activeSessionId = this.sessions[0]?.id ?? null;
     if (!this.activeSessionId) this.newSession();
     this.schedules = await loadScheduledTasks(rootPath);
@@ -404,6 +410,7 @@ export class Project {
 
   async restoreSessions() {
     this.sessions = await loadSessions(this.rootPath);
+    this.budget = await loadBudget(this.rootPath);
     this.activeSessionId = this.sessions[0]?.id ?? null;
     if (!this.activeSessionId) this.newSession();
     this.schedules = this.rootPath ? await loadScheduledTasks(this.rootPath) : [];
@@ -420,7 +427,42 @@ export class Project {
         session.updatedAt = Date.now();
       }
     }
-    await saveSessions(this.rootPath, this.sessions);
+    await saveSessions(this.rootPath, this.sessions, this.budget);
+  }
+
+  /**
+   * The project's spending cap, set from chat via the agent's set_budget
+   * tool. A fresh cap starts the meter at zero (it's the budget for the work
+   * ahead); `allowOverage` keeps the cap and spend but stops blocking.
+   */
+  setBudget(limitUsd: number | null | undefined, allowOverage: boolean) {
+    const newLimit = typeof limitUsd === 'number' && limitUsd > 0 ? limitUsd : null;
+    if (allowOverage) {
+      this.budget = {
+        limitUsd: newLimit ?? this.budget.limitUsd,
+        spentUsd: this.budget.spentUsd,
+        overridden: true,
+      };
+    } else if (newLimit == null) {
+      this.budget = { limitUsd: null, spentUsd: 0, overridden: false };
+    } else {
+      this.budget = { limitUsd: newLimit, spentUsd: 0, overridden: false };
+    }
+    void this.persist();
+    this.emit.status(this.id);
+  }
+
+  /** Every completion's real cost funnels here (via the onCost callback) so the budget meter reflects everything spent on this project. */
+  private addBudgetSpend(usd: number) {
+    if (!(usd > 0)) return;
+    this.budget.spentUsd += usd;
+    this.emit.status(this.id);
+    // Persisting the whole session file on every completion is wasteful — the
+    // meter is emitted live above; throttle the durable write.
+    if (Date.now() - this.lastBudgetPersist > 10_000) {
+      this.lastBudgetPersist = Date.now();
+      void this.persist();
+    }
   }
 
   get status(): ProjectStatus {
@@ -439,6 +481,7 @@ export class Project {
       unseenCompletion: this.unseenCompletion,
       activeSessionId: this.activeSessionId,
       autonomy: this.autonomy,
+      budget: this.budget,
       runningSessionIds: this.runningSessionIds,
       kind: this.kind,
       clipsFolder: this.clipsFolder,
@@ -1073,11 +1116,13 @@ export class Project {
         onUsage: () => {},
         onCost: (usd) => {
           const session = findSession();
-          if (!session) return;
-          session.costUsd = (session.costUsd ?? 0) + usd;
+          if (session) session.costUsd = (session.costUsd ?? 0) + usd;
+          this.addBudgetSpend(usd);
           this.emit.sessions(this.id);
         },
         onCompaction: () => {},
+        getBudget: () => this.budget,
+        setBudget: (limitUsd, allowOverage) => this.setBudget(limitUsd, allowOverage),
         runShell: (requestId, command) =>
           this.runtime(sessionId).terminal.run(requestId, 'agent', command, (evt) => this.recordTerminal(evt)),
         getPermission: (category) => resolvePermission(category, this.autonomy),
@@ -1210,8 +1255,8 @@ export class Project {
         },
         onCost: (usd) => {
           const session = findSession();
-          if (!session) return;
-          session.costUsd = (session.costUsd ?? 0) + usd;
+          if (session) session.costUsd = (session.costUsd ?? 0) + usd;
+          this.addBudgetSpend(usd);
           this.emit.sessions(this.id);
         },
         onCompaction: () => {
@@ -1220,6 +1265,8 @@ export class Project {
           session.compactionCount = (session.compactionCount ?? 0) + 1;
           this.emit.sessions(this.id);
         },
+        getBudget: () => this.budget,
+        setBudget: (limitUsd, allowOverage) => this.setBudget(limitUsd, allowOverage),
         runShell: (requestId, command) =>
           rt.terminal.run(requestId, 'agent', command, (evt) => this.recordTerminal(evt)),
         getPermission: (category) => resolvePermission(category, this.autonomy),

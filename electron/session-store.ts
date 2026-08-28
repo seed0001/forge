@@ -2,7 +2,9 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { app } from 'electron';
-import type { ChatMessage, ActivityEvent, RoadmapItem } from './ipc-channels';
+import type { ChatMessage, ActivityEvent, RoadmapItem, ProjectBudget } from './ipc-channels';
+
+export const NO_BUDGET: ProjectBudget = { limitUsd: null, spentUsd: 0, overridden: false };
 
 /** A provider message, stored verbatim so a session can resume with full context. */
 export type StoredMessage = Record<string, unknown>;
@@ -104,12 +106,34 @@ export async function loadSessions(rootPath: string | null): Promise<Session[]> 
   }
 }
 
-export async function saveSessions(rootPath: string | null, sessions: Session[]): Promise<void> {
+/** The project's persisted spending cap — lives in the same file as its sessions. */
+export async function loadBudget(rootPath: string | null): Promise<ProjectBudget> {
+  if (!rootPath) return { ...NO_BUDGET };
+  try {
+    const raw = await fs.readFile(fileForRoot(rootPath), 'utf8');
+    const parsed = JSON.parse(raw) as { budget?: Partial<ProjectBudget> };
+    const b = parsed.budget;
+    if (!b || typeof b !== 'object') return { ...NO_BUDGET };
+    return {
+      limitUsd: typeof b.limitUsd === 'number' && b.limitUsd > 0 ? b.limitUsd : null,
+      spentUsd: typeof b.spentUsd === 'number' && b.spentUsd >= 0 ? b.spentUsd : 0,
+      overridden: b.overridden === true,
+    };
+  } catch {
+    return { ...NO_BUDGET };
+  }
+}
+
+export async function saveSessions(
+  rootPath: string | null,
+  sessions: Session[],
+  budget: ProjectBudget = NO_BUDGET
+): Promise<void> {
   if (!rootPath) return;
   const file = fileForRoot(rootPath);
   try {
     await fs.mkdir(path.dirname(file), { recursive: true });
-    await fs.writeFile(file, JSON.stringify({ rootPath, sessions }, null, 2), 'utf8');
+    await fs.writeFile(file, JSON.stringify({ rootPath, sessions, budget }, null, 2), 'utf8');
   } catch {
     // Persistence failing must not take the running session down with it.
   }

@@ -2,6 +2,12 @@
 
 Every released version of Forge, newest first. Dates are when the build went out.
 
+## 0.2.34 — 2026-08-28
+
+- **Roadmap is a side panel now, not a tab.** When the agent proposes a roadmap it appears in a collapsible panel on the right — expand/collapse each milestone, and hit **Discuss & chat** on any item to pull its plan into the composer and talk it through (re-outline, expand, whatever). Items waiting for review auto-expand and can be approved or rejected right there.
+- **Activity panel.** A new right-side panel shows what the agent looked at, reasoned about, and changed — grouped one card per run, newest last, each expandable down to the individual steps (reads, commands, edits with diff stats). The active run stays open and ticks live.
+- Both panels collapse to a thin rail and only appear when there's something to show.
+
 ## 0.2.33 — 2026-08-28
 
 - **What's New view.** Click the version number at the bottom of the sidebar to see this changelog — every release, what changed, and when — without leaving the app. GitHub release notes now come from the same place.

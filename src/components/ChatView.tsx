@@ -50,7 +50,6 @@ export function ChatView() {
   const sendChat = useForge((s) => s.sendChat);
   const stopAgent = useForge((s) => s.stopAgent);
   const openReview = useForge((s) => s.openReview);
-  const setCenter = useForge((s) => s.setCenter);
   const decideApproval = useForge((s) => s.decideApproval);
   const decideSubagentApproval = useForge((s) => s.decideSubagentApproval);
   const addComposerImage = useForge((s) => s.addComposerImage);
@@ -58,10 +57,28 @@ export function ChatView() {
   const providerSettings = useForge((s) => s.providerSettings);
   const ttsAutoSpeak = useForge((s) => s.ttsAutoSpeak);
   const setTtsAutoSpeak = useForge((s) => s.setTtsAutoSpeak);
+  const consumeComposerDraft = useForge((s) => s.consumeComposerDraft);
 
   const [text, setText] = useState('');
   const scrollRef = useRef<HTMLDivElement>(null);
   const taRef = useRef<HTMLTextAreaElement>(null);
+
+  // Text staged from elsewhere ("Discuss & chat" on a roadmap item): fold it
+  // into whatever's already in the composer, put the cursor at the end, and
+  // clear the staged copy so it only lands once.
+  const composerDraft = view?.composerDraft ?? null;
+  useEffect(() => {
+    if (!composerDraft) return;
+    setText((prev) => (prev.trim() ? `${prev.trimEnd()}\n\n${composerDraft}` : composerDraft));
+    consumeComposerDraft();
+    requestAnimationFrame(() => {
+      const ta = taRef.current;
+      if (ta) {
+        ta.focus();
+        ta.setSelectionRange(ta.value.length, ta.value.length);
+      }
+    });
+  }, [composerDraft, consumeComposerDraft]);
 
   const ttsProvider = (providerSettings?.TTS_PROVIDER as TtsProvider) || 'edge';
   const ttsVoice =
@@ -339,12 +356,10 @@ export function ChatView() {
                 <div className="card-top">
                   <IconRoadmap className="icon-sm" />
                   <span className="card-title">
-                    {roadmapNeedsReview} roadmap item{roadmapNeedsReview === 1 ? '' : 's'} waiting for review
+                    {roadmapNeedsReview} roadmap item{roadmapNeedsReview === 1 ? '' : 's'} waiting for review — in the
+                    Roadmap panel on the right.
                   </span>
                 </div>
-                <button className="btn btn-primary" onClick={() => setCenter('roadmap')}>
-                  Review roadmap
-                </button>
               </div>
             </div>
           )}

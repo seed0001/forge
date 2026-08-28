@@ -5,11 +5,12 @@ import { Sidebar } from './components/Sidebar';
 import { ChatView } from './components/ChatView';
 import { EditorPanel } from './components/EditorPanel';
 import { TerminalPanel } from './components/TerminalPanel';
-import { RoadmapPanel } from './components/RoadmapPanel';
 import { SchedulerPanel } from './components/SchedulerPanel';
 import { AuditPanel } from './components/AuditPanel';
 import { BrowserPanel } from './components/BrowserPanel';
 import { FocusPanel } from './components/FocusPanel';
+import { RoadmapSidePanel } from './components/RoadmapSidePanel';
+import { ProcessPanel } from './components/ProcessPanel';
 import { WorkspaceChooser } from './components/WorkspaceChooser';
 import { ReviewOverlay } from './components/ReviewOverlay';
 import { PaintEditorOverlay } from './components/PaintEditorOverlay';
@@ -24,7 +25,6 @@ const CODING_VIEWS = [
   { key: 'chat', label: 'Chat' },
   { key: 'editor', label: 'Editor' },
   { key: 'terminal', label: 'Terminal' },
-  { key: 'roadmap', label: 'Roadmap' },
   { key: 'scheduler', label: 'Scheduler' },
   { key: 'audit', label: 'Audit' },
 ] as const;
@@ -49,7 +49,10 @@ export default function App() {
   const kind = view?.summary.kind ?? null;
   const isBrowsing = kind === 'browsing';
   const VIEWS = isBrowsing ? BROWSING_VIEWS : CODING_VIEWS;
-  const center = view?.center ?? (isBrowsing ? 'browser' : 'chat');
+  // 'roadmap' used to be a center tab; it's a right-side panel now, so fall
+  // back to chat for any session that had it selected.
+  const rawCenter = view?.center ?? (isBrowsing ? 'browser' : 'chat');
+  const center = rawCenter === 'roadmap' ? 'chat' : rawCenter;
 
   return (
     <div className="app">
@@ -87,12 +90,13 @@ export default function App() {
                 {center === 'chat' && <ChatView />}
                 {center === 'editor' && <EditorPanel />}
                 {center === 'terminal' && <TerminalPanel />}
-                {center === 'roadmap' && <RoadmapPanel />}
                 {center === 'scheduler' && <SchedulerPanel />}
                 {center === 'audit' && <AuditPanel />}
                 {center === 'browser' && <BrowserPanel />}
               </div>
             </div>
+            <ProcessPanel />
+            <RoadmapSidePanel />
             <FocusPanel />
           </>
         )}

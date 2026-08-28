@@ -55,6 +55,91 @@ export interface PendingImage {
   dataUrl: string;
 }
 
+/** One run's worth of activity, grouped for the Activity panel. */
+export interface ProcessTurn {
+  id: string;
+  startedAt: number;
+  endedAt: number | null;
+  /** While running: the latest meaningful step. When done: the run's summary line. */
+  label: string;
+  status: 'running' | 'done' | 'error' | 'stopped';
+  events: ActivityEvent[];
+}
+
+const MAX_PROCESS_TURNS = 40;
+const MAX_TURN_EVENTS = 160;
+let processTurnSeq = 0;
+
+/**
+ * Fold one activity event into the grouped process log. A `summary` event
+ * closes the open turn (and never gets added as a step); any other event
+ * opens a new turn if there isn't one, then appends/updates within it.
+ */
+function foldIntoProcessLog(log: ProcessTurn[], evt: ActivityEvent): ProcessTurn[] {
+  const out = log.slice();
+  const cur = out[out.length - 1];
+  const open = cur && cur.endedAt === null ? cur : null;
+
+  if (evt.summary) {
+    if (open) {
+      out[out.length - 1] = {
+        ...open,
+        endedAt: Date.now(),
+        label: evt.detail || open.label,
+        status:
+          evt.status === 'error'
+            ? /stopped by you|stopped —/i.test(evt.detail)
+              ? 'stopped'
+              : 'error'
+            : 'done',
+      };
+    }
+    return out;
+  }
+
+  let turn = open;
+  if (!turn) {
+    processTurnSeq += 1;
+    turn = {
+      id: `pt-${Date.now()}-${processTurnSeq}`,
+      startedAt: Date.now(),
+      endedAt: null,
+      label: 'Working…',
+      status: 'running',
+      events: [],
+    };
+    out.push(turn);
+  }
+
+  const idx = turn.events.findIndex((e) => e.id === evt.id);
+  const events = (idx >= 0 ? turn.events.map((e, i) => (i === idx ? evt : e)) : [...turn.events, evt]).slice(
+    -MAX_TURN_EVENTS
+  );
+  // Live heading: the most recent step that isn't a bare "Thinking…" tick.
+  const meaningful = [...events].reverse().find((e) => !(e.kind === 'thinking' && /^Thinking(…|\.\.\.)?/.test(e.detail)));
+  out[out.length - 1] = { ...turn, events, label: meaningful?.detail ?? 'Working…' };
+  return out.slice(-MAX_PROCESS_TURNS);
+}
+
+/** Build a starting process log from a session's server-side activity trail (only the current/last run is available on switch). */
+function seedProcessLog(activity: ActivityEvent[]): ProcessTurn[] {
+  if (!activity.length) return [];
+  processTurnSeq += 1;
+  const summary = activity.find((e) => e.summary);
+  const steps = activity.filter((e) => !e.summary);
+  const active = !summary && steps.some((e) => e.status === 'active');
+  return [
+    {
+      id: `pt-seed-${processTurnSeq}`,
+      startedAt: Date.now(),
+      endedAt: active ? null : Date.now(),
+      label: summary?.detail ?? (active ? 'Working…' : 'Earlier activity'),
+      status: active ? 'running' : summary?.status === 'error' ? 'error' : 'done',
+      events: steps.slice(-MAX_TURN_EVENTS),
+    },
+  ];
+}
+
 /**
  * Renderer-side mirror of one workspace. The main process owns the real state;
  * this accumulates events for EVERY workspace, including ones the user isn't
@@ -92,6 +177,10 @@ export interface WorkspaceView {
   runStartedAt: number | null;
   /** Images attached in the composer, waiting to go out with the next message. */
   composerImages: PendingImage[];
+  /** Text staged for the composer from elsewhere (e.g. "Discuss & chat" on a roadmap item) — ChatView folds it into the input once, then clears it. */
+  composerDraft: string | null;
+  /** Grouped, uncollapsed activity history for the Activity panel — one entry per run, newest last. Renderer-only, lives for the session's on-screen lifetime. */
+  processLog: ProcessTurn[];
   /** The chat image currently open in the paint editor overlay, if any. */
   paintTarget: { src: string; name: string } | null;
   /** A Browsing workspace's live nav state — null for a coding workspace, or before any page has loaded. */
@@ -207,6 +296,10 @@ interface ForgeState {
   editRoadmapItem: (itemId: string, patch: { title?: string; summary?: string; detail?: string }) => Promise<void>;
   pushBackRoadmapItem: (itemId: string, newDetail: string) => Promise<void>;
   setRoadmapItemStatus: (itemId: string, status: RoadmapItemStatus) => Promise<void>;
+  /** "Discuss & chat" on a roadmap item — stage its context in the composer and switch to the chat view. */
+  discussRoadmapItem: (item: RoadmapItem) => void;
+  /** ChatView calls this once it has folded composerDraft into the input. */
+  consumeComposerDraft: () => void;
 
   createSchedule: (label: string, prompt: string, schedule: ScheduleSpec) => Promise<void>;
   updateSchedule: (
@@ -264,6 +357,8 @@ function emptyView(summary: ProjectSummary): WorkspaceView {
     pendingSubagentApprovals: {},
     runStartedAt: null,
     composerImages: [],
+    composerDraft: null,
+    processLog: [],
     paintTarget: null,
     browserNav: null,
     schedules: [],
@@ -418,7 +513,7 @@ export const useForge = create<ForgeState>((set, get) => {
                   const idx = v.activity.findIndex((a) => a.id === evt.id);
                   return idx >= 0 ? v.activity.map((a, i) => (i === idx ? evt : a)) : [...v.activity, evt];
                 })();
-            next = { ...next, activity };
+            next = { ...next, activity, processLog: foldIntoProcessLog(next.processLog, evt) };
           }
 
           // A Focus agent runs on its own dedicated background session,
@@ -581,6 +676,7 @@ export const useForge = create<ForgeState>((set, get) => {
         tree: data.tree,
         chat: data.chat,
         activity: data.activity,
+        processLog: seedProcessLog(data.activity),
         terminalLines: data.terminalLines,
         pendingDiffs: Object.fromEntries(data.pendingDiffs.map((d) => [d.id, d])),
         checkpoints: data.checkpoints,
@@ -666,7 +762,7 @@ export const useForge = create<ForgeState>((set, get) => {
       if (!created) return;
       forgetComposerImages(id);
       // A new session starts empty; clear the visible thread immediately.
-      patch(id, (v) => ({ ...v, chat: [], activity: [], roadmap: [], center: 'chat', composerImages: [] }));
+      patch(id, (v) => ({ ...v, chat: [], activity: [], roadmap: [], processLog: [], center: 'chat', composerImages: [] }));
     },
 
     selectSession: async (sessionId) => {
@@ -682,6 +778,7 @@ export const useForge = create<ForgeState>((set, get) => {
         chat: result.chat,
         activity: result.activity,
         roadmap: result.roadmap,
+        processLog: seedProcessLog(result.activity),
         center: 'chat',
         composerImages: [],
       }));
@@ -698,7 +795,7 @@ export const useForge = create<ForgeState>((set, get) => {
       const stillExists = list.some((s) => s.id === sessionId);
       if (wasActive && !stillExists) {
         forgetComposerImages(id);
-        patch(id, (v) => ({ ...v, chat: [], activity: [], roadmap: [], composerImages: [] }));
+        patch(id, (v) => ({ ...v, chat: [], activity: [], roadmap: [], processLog: [], composerImages: [] }));
       }
     },
 
@@ -929,6 +1026,23 @@ export const useForge = create<ForgeState>((set, get) => {
       const id = get().activeId;
       if (!id) return;
       await forge.roadmap.setStatus(id, itemId, status);
+    },
+
+    discussRoadmapItem: (item) => {
+      const id = get().activeId;
+      if (!id) return;
+      const draft =
+        `Let's talk through this roadmap item — I may want to re-outline or expand it.\n\n` +
+        `## ${item.title}\n` +
+        (item.summary ? `_${item.summary}_\n\n` : '\n') +
+        `${item.detail.trim()}\n\n---\n`;
+      patch(id, (v) => ({ ...v, composerDraft: draft, center: 'chat' }));
+    },
+
+    consumeComposerDraft: () => {
+      const id = get().activeId;
+      if (!id) return;
+      patch(id, (v) => ({ ...v, composerDraft: null }));
     },
 
     createSchedule: async (label, prompt, schedule) => {

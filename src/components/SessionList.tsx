@@ -1,3 +1,4 @@
+import { useEffect, useState } from 'react';
 import type { SessionSummary } from '../../electron/ipc-channels';
 import { useForge, useActiveWorkspace } from '../state/store';
 import { relativeTime, formatDuration, formatCost } from '../lib/time';
@@ -34,6 +35,17 @@ export function SessionList() {
   const selectSession = useForge((s) => s.selectSession);
   const deleteSession = useForge((s) => s.deleteSession);
 
+  // Tick once a second while any session is running, so its Time stat climbs
+  // live instead of showing the last frozen total (elapsedMs is only folded in
+  // when a run ends).
+  const anyRunning = (view?.sessions ?? []).some((s) => s.runningSince != null);
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    if (!anyRunning) return;
+    const t = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(t);
+  }, [anyRunning]);
+
   if (!view) return null;
 
   const groups = new Map<string, SessionSummary[]>();
@@ -65,7 +77,8 @@ export function SessionList() {
               const used = hasContext ? Math.min((s.contextUsed ?? 0) / s.contextWindow!, 1) : 0;
               const remaining = 1 - used;
               const remainingTokens = hasContext ? Math.max(s.contextWindow! - (s.contextUsed ?? 0), 0) : 0;
-              const hasTime = !!s.elapsedMs && s.elapsedMs > 0;
+              const liveElapsed = (s.elapsedMs ?? 0) + (s.runningSince != null ? Math.max(now - s.runningSince, 0) : 0);
+              const hasTime = liveElapsed > 0;
               const hasCost = !!s.costUsd && s.costUsd > 0;
               return (
                 <div
@@ -111,7 +124,10 @@ export function SessionList() {
                       {hasTime && (
                         <div className="statrow statrow-plain">
                           <span className="statlabel">Time</span>
-                          <span className="statval">{formatDuration(s.elapsedMs!)}</span>
+                          <span className="statval">
+                            {formatDuration(liveElapsed)}
+                            {s.runningSince != null && ' …'}
+                          </span>
                         </div>
                       )}
                       {hasCost && (

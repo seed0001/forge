@@ -45,6 +45,8 @@ export interface SessionSummary {
   costUsd?: number;
   elapsedMs?: number;
   compactionCount?: number;
+  /** Epoch ms this session's current run started, or null when idle — lets the sidebar tick elapsed time live instead of showing the last frozen total. */
+  runningSince?: number | null;
 }
 
 function previewOf(m: ChatMessage | undefined): string {

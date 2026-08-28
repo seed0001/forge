@@ -45,6 +45,7 @@ import type {
   FocusMessage,
   FocusAgentSummary,
   ProjectBudget,
+  ReasoningLevel,
 } from './ipc-channels';
 import { MAX_TOOL_CALLS_DEFAULT, MAX_TOOL_CALLS_LIMIT } from './ipc-channels';
 import type { BugReportInput } from './bug-store';
@@ -251,8 +252,20 @@ const MAX_CONCURRENT_SUBAGENTS = 4;
 const MAX_FETCH_ATTEMPTS = 4;
 /** Doubles each retry (1s, 2s, 4s), unless the provider's own Retry-After header says otherwise. */
 const RETRY_BASE_DELAY_MS = 1000;
-/** No provider response at all within this long is treated as a stalled connection, same as a network error. */
-const REQUEST_TIMEOUT_MS = 90_000;
+/**
+ * No provider response within this long is treated as a stalled connection.
+ * The completions call isn't streamed, so `fetch()` doesn't resolve until the
+ * model has finished generating — INCLUDING every reasoning token. A hard
+ * "deep thinking" pass on a big context routinely runs several minutes, so the
+ * ceiling scales with the reasoning level; otherwise the watchdog aborts a
+ * request that was about to succeed and the loop thrashes retry→abort→retry.
+ */
+const REQUEST_TIMEOUT_BY_REASONING: Record<ReasoningLevel, number> = {
+  flash: 90_000,
+  thinking: 4 * 60_000,
+  deep: 12 * 60_000,
+};
+const REQUEST_TIMEOUT_FALLBACK_MS = 90_000;
 
 /** How many times a single task will force-compact and retry after a context-length-exceeded response before giving up and showing the error. */
 const MAX_CONTEXT_RECOVERY_ATTEMPTS = 2;
@@ -1267,6 +1280,8 @@ export class AgentSession {
   private contextRecoveryAttempts = 0;
   /** True once this task has force-compacted because the assembled request was over the byte budget — done at most once per send(). */
   private bytesRecoveryTried = false;
+  /** The per-turn "Thinking… Ns" ticker, tracked on the instance so send()'s finally can always kill it — a leaked interval keeps the UI pinned on "thinking" forever. */
+  private activeThinkTick: ReturnType<typeof setInterval> | null = null;
   /** True for a turn where the project budget is spent (and no overage authorized): the agent may reply in words but every tool except set_budget is blocked. Recomputed at the top of each turn. */
   private budgetLocked = false;
   /** True once this send() has announced "we hit the budget", so it says it once and then stops rather than every turn. */
@@ -2863,6 +2878,14 @@ export class AgentSession {
     return new Promise((resolve) => setTimeout(resolve, ms));
   }
 
+  /** Stop the per-turn thinking ticker. Safe to call repeatedly and when there is none. */
+  private clearThinkTick() {
+    if (this.activeThinkTick) {
+      clearInterval(this.activeThinkTick);
+      this.activeThinkTick = null;
+    }
+  }
+
   /**
    * One turn's completion request, with retry+backoff on a transient network
    * error or a retryable provider status (429/5xx), and a watchdog timeout
@@ -2879,19 +2902,22 @@ export class AgentSession {
   ): Promise<
     { kind: 'ok'; data: any } | { kind: 'aborted' } | { kind: 'failed'; message: string; contextExceeded?: boolean }
   > {
+    const timeoutMs = REQUEST_TIMEOUT_BY_REASONING[cfg.reasoning] ?? REQUEST_TIMEOUT_FALLBACK_MS;
     for (let attempt = 1; attempt <= MAX_FETCH_ATTEMPTS; attempt++) {
       if (this.aborted) return { kind: 'aborted' };
       this.controller = new AbortController();
       let watchdogFired = false;
+      // Armed until the whole response BODY has been read, not just headers —
+      // a stall can happen mid-body too, and clearing it early left json()
+      // able to hang forever with nothing watching.
       const watchdog = setTimeout(() => {
         watchdogFired = true;
         this.controller?.abort();
-      }, REQUEST_TIMEOUT_MS);
+      }, timeoutMs);
 
-      let resp: Response;
       try {
         const reasoning = reasoningRequestField(cfg);
-        resp = await fetch(cfg.url, {
+        const resp = await fetch(cfg.url, {
           method: 'POST',
           signal: this.controller.signal,
           headers: chatHeaders(cfg.provider, cfg.apiKey),
@@ -2904,6 +2930,44 @@ export class AgentSession {
             ...(reasoning ? { reasoning } : {}),
           }),
         });
+        if (this.aborted) {
+          clearTimeout(watchdog);
+          return { kind: 'aborted' };
+        }
+
+        if (!resp.ok) {
+          clearTimeout(watchdog);
+          if (isRetryableStatus(resp.status) && attempt < MAX_FETCH_ATTEMPTS) {
+            const retryAfter = Number(resp.headers.get('retry-after'));
+            const delay = Number.isFinite(retryAfter) && retryAfter > 0 ? retryAfter * 1000 : RETRY_BASE_DELAY_MS * 2 ** (attempt - 1);
+            this.trackActivity({
+              id: thinkId,
+              kind: 'thinking',
+              detail: `${PROVIDER_LABEL[cfg.provider]} is busy (${resp.status}) — retrying (${attempt}/${MAX_FETCH_ATTEMPTS - 1})…`,
+              status: 'active',
+            });
+            await this.sleep(delay);
+            if (this.aborted) return { kind: 'aborted' };
+            continue;
+          }
+          const text = await resp.text();
+          await audit(
+            this.rootPath,
+            'error',
+            `${PROVIDER_LABEL[cfg.provider]} HTTP ${resp.status}`,
+            text.slice(0, 300).replace(/\s+/g, ' ')
+          );
+          return {
+            kind: 'failed',
+            message: `${PROVIDER_LABEL[cfg.provider]} error (${resp.status}): ${text.slice(0, 500)}`,
+            contextExceeded: isContextLengthError(text) || isRequestTooLargeError(text, resp.status),
+          };
+        }
+
+        const data = await resp.json();
+        clearTimeout(watchdog);
+        if (this.aborted) return { kind: 'aborted' };
+        return { kind: 'ok', data };
       } catch (err) {
         clearTimeout(watchdog);
         if (this.aborted) return { kind: 'aborted' };
@@ -2912,56 +2976,70 @@ export class AgentSession {
           this.trackActivity({
             id: thinkId,
             kind: 'thinking',
-            detail: `${watchdogFired ? 'No response from provider' : 'Connection issue'} — retrying (${attempt}/${MAX_FETCH_ATTEMPTS - 1})…`,
+            detail: watchdogFired
+              ? `Still no full response after ${Math.round(timeoutMs / 1000)}s — retrying (${attempt}/${MAX_FETCH_ATTEMPTS - 1})…`
+              : `Connection issue — retrying (${attempt}/${MAX_FETCH_ATTEMPTS - 1})…`,
             status: 'active',
           });
+          if (watchdogFired) {
+            await audit(
+              this.rootPath,
+              'error',
+              `${PROVIDER_LABEL[cfg.provider]} no response`,
+              `aborted after ${Math.round(timeoutMs / 1000)}s (reasoning: ${cfg.reasoning}), attempt ${attempt}`
+            );
+          }
           await this.sleep(RETRY_BASE_DELAY_MS * 2 ** (attempt - 1));
           if (this.aborted) return { kind: 'aborted' };
           continue;
         }
         return {
           kind: 'failed',
-          message: `Request to ${PROVIDER_LABEL[cfg.provider]} failed: ${watchdogFired ? `no response after ${REQUEST_TIMEOUT_MS / 1000}s` : String(err)}`,
+          message: `Request to ${PROVIDER_LABEL[cfg.provider]} failed: ${
+            watchdogFired ? `no complete response after ${Math.round(timeoutMs / 1000)}s` : String(err)
+          }`,
         };
       }
-      clearTimeout(watchdog);
-      if (this.aborted) return { kind: 'aborted' };
-
-      if (!resp.ok) {
-        if (isRetryableStatus(resp.status) && attempt < MAX_FETCH_ATTEMPTS) {
-          const retryAfter = Number(resp.headers.get('retry-after'));
-          const delay = Number.isFinite(retryAfter) && retryAfter > 0 ? retryAfter * 1000 : RETRY_BASE_DELAY_MS * 2 ** (attempt - 1);
-          this.trackActivity({
-            id: thinkId,
-            kind: 'thinking',
-            detail: `${PROVIDER_LABEL[cfg.provider]} is busy (${resp.status}) — retrying (${attempt}/${MAX_FETCH_ATTEMPTS - 1})…`,
-            status: 'active',
-          });
-          await this.sleep(delay);
-          if (this.aborted) return { kind: 'aborted' };
-          continue;
-        }
-        const text = await resp.text();
-        await audit(
-          this.rootPath,
-          'error',
-          `${PROVIDER_LABEL[cfg.provider]} HTTP ${resp.status}`,
-          text.slice(0, 300).replace(/\s+/g, ' ')
-        );
-        return {
-          kind: 'failed',
-          message: `${PROVIDER_LABEL[cfg.provider]} error (${resp.status}): ${text.slice(0, 500)}`,
-          contextExceeded:
-            isContextLengthError(text) || isRequestTooLargeError(text, resp.status),
-        };
-      }
-
-      return { kind: 'ok', data: await resp.json() };
     }
     return { kind: 'failed', message: `Request to ${PROVIDER_LABEL[cfg.provider]} failed after ${MAX_FETCH_ATTEMPTS} attempts.` };
   }
 
+  /**
+   * Public entry for a turn. The whole loop runs inside a try/finally so an
+   * unexpected throw anywhere in it can NEVER leave the session pinned
+   * "running" with a leaked "Thinking…" ticker — the exact failure mode where
+   * the UI locks on the purple "deep thinking" state forever. finally always
+   * clears the ticker and reports the run as finished.
+   */
   async send(userText: string, images?: ChatImage[], source: 'desktop' | 'portal' = 'desktop') {
+    this.cb.onStatus(true);
+    try {
+      await this.runTurnLoop(userText, images, source);
+    } catch (err) {
+      this.clearThinkTick();
+      await audit(
+        this.rootPath,
+        'error',
+        'agent loop crashed',
+        String((err as Error)?.stack || err).slice(0, 400).replace(/\s+/g, ' ')
+      );
+      this.trackActivity({ id: nextId('act'), kind: 'stopped', detail: 'Stopped — internal error', status: 'error' });
+      if (!this.aborted) {
+        this.flushMessage(
+          `I hit an unexpected internal error and stopped this turn: ${String(err).slice(0, 240)}. Try again, or rephrase.`
+        );
+      }
+    } finally {
+      this.clearThinkTick();
+      this.cb.onStatus(false);
+    }
+  }
+
+  private async runTurnLoop(
+    userText: string,
+    images?: ChatImage[],
+    source: 'desktop' | 'portal' = 'desktop'
+  ) {
     this.aborted = false;
     this.activityTally = {};
     this.activityErrors = 0;
@@ -2993,7 +3071,6 @@ export class AgentSession {
       this.budgetStopIssued = startedOverBudget;
     }
     this.matchedLessons = await matchLessons(userText);
-    this.cb.onStatus(true);
     await this.primeRules();
     if (images?.length) {
       // Sent natively as vision content — the model sees it in its very next
@@ -3055,11 +3132,15 @@ export class AgentSession {
       const thinkId = nextId('act');
       const turnStart = Date.now();
       this.trackActivity({ id: thinkId, kind: 'thinking', detail: 'Thinking…', status: 'active' });
-      const tick = setInterval(() => {
+      this.clearThinkTick();
+      this.activeThinkTick = setInterval(() => {
+        const secs = Math.round((Date.now() - turnStart) / 1000);
         this.trackActivity({
           id: thinkId,
           kind: 'thinking',
-          detail: `Thinking… ${Math.round((Date.now() - turnStart) / 1000)}s`,
+          // Past ~1 min it's almost always a slow reasoning pass, not a hang —
+          // say so rather than leave the Operator guessing.
+          detail: secs >= 60 ? `Thinking… ${secs}s (deep reasoning can take a few minutes)` : `Thinking… ${secs}s`,
           status: 'active',
         });
       }, 1000);
@@ -3220,14 +3301,14 @@ export class AgentSession {
               'compacted to fit the byte budget',
               `${before} → ${this.messages.length} msgs`
             );
-            clearInterval(tick);
+            this.clearThinkTick();
             continue;
           }
         }
       }
 
       const attempt = await this.fetchCompletionWithRetry(cfg, activeModel, wireMessages, thinkId);
-      clearInterval(tick);
+      this.clearThinkTick();
 
       if (attempt.kind === 'aborted') {
         this.trackActivity({ id: thinkId, kind: 'thinking', detail: 'Stopped', status: 'error' });

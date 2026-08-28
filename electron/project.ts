@@ -145,6 +145,8 @@ interface SessionRuntime {
   activeRoadmapItemId: string | null;
   roadmapTurnSeq: number;
   pendingRoadmapRestart: RoadmapItem | null;
+  /** Messages the Operator sent while a turn was already running — replayed as one follow-up turn the moment this one finishes, never dropped. */
+  pendingFollowups: string[];
 }
 
 /** One running (or finished) background Focus agent — see Workspace.startFocusAgent/runFocusLoop. */
@@ -262,6 +264,7 @@ export class Project {
         activeRoadmapItemId: null,
         roadmapTurnSeq: 0,
         pendingRoadmapRestart: null,
+        pendingFollowups: [],
       };
       this.runtimes.set(sessionId, rt);
     }
@@ -291,7 +294,17 @@ export class Project {
 
   /** Sessions newest-first, the order the sidebar lists them in. */
   listSessions(): SessionSummary[] {
-    return [...this.sessions].sort((a, b) => b.updatedAt - a.updatedAt).map(summarize);
+    return [...this.sessions]
+      .sort((a, b) => b.updatedAt - a.updatedAt)
+      .map((s) => {
+        const summary = summarize(s);
+        // A running session's elapsed time is only folded into elapsedMs when
+        // the run ends — expose the current run's start so the sidebar can
+        // tick it live instead of showing a frozen number.
+        const rt = this.runtimes.get(s.id);
+        summary.runningSince = rt?.running && rt.runStartedAt !== null ? rt.runStartedAt : null;
+        return summary;
+      });
   }
 
   get activeSession(): Session | null {
@@ -1236,6 +1249,10 @@ export class Project {
             this.unseenCompletion = true;
             // Checkpoint the conversation whenever this session's agent goes quiet.
             void this.persist().then(() => this.emit.sessions(this.id));
+            this.drainFollowups(sessionId);
+          } else {
+            // Push the fresh runningSince to the sidebar so it can start ticking.
+            this.emit.sessions(this.id);
           }
           this.emit.status(this.id);
         },
@@ -1309,7 +1326,6 @@ export class Project {
   async sendToAgent(text: string, images?: ChatImage[], source: 'desktop' | 'portal' = 'desktop'): Promise<boolean> {
     if (!this.activeSessionId) this.newSession();
     const sessionId = this.activeSessionId!;
-    if (this.runtimes.get(sessionId)?.running) return false;
     const session = this.sessions.find((s) => s.id === sessionId)!;
 
     const msg: ChatMessage = { role: 'user', text, images };
@@ -1318,16 +1334,45 @@ export class Project {
     if (session.chat.filter((m) => m.role === 'user').length === 1) {
       session.title = titleFrom(text);
     }
-    session.activity = [];
     session.updatedAt = Date.now();
-
     this.emit.message(this.id, sessionId, msg);
     this.emit.sessions(this.id);
     this.unseenCompletion = false;
+
+    // A message sent while a turn is already running is NOT dropped (that used
+    // to lose the Operator's answer silently). It's echoed to the chat above
+    // and queued here; onStatus(false) replays the queue as one follow-up turn
+    // the moment the current run finishes.
+    const rt = this.runtime(sessionId);
+    if (rt.running) {
+      rt.pendingFollowups.push(text);
+      return true;
+    }
+
+    session.activity = [];
     // Deliberately not awaited: the agent loop runs to completion in the
     // background so the user can switch sessions/tabs and come back to the result.
     void this.ensureAgent(sessionId).send(text, images, source);
     return true;
+  }
+
+  /**
+   * After a run ends, replay anything the Operator queued while it was busy as
+   * one combined follow-up turn. Everything is read INSIDE the deferred
+   * callback: the finishing send() must fully unwind first (send() is not safe
+   * to re-enter synchronously), and stopAgent() clears the queue in between —
+   * so a Stop cancels the pending follow-up instead of racing it.
+   */
+  private drainFollowups(sessionId: string) {
+    setTimeout(() => {
+      const rt = this.runtimes.get(sessionId);
+      if (!rt || rt.running || rt.pendingFollowups.length === 0) return;
+      const combined = rt.pendingFollowups.join('\n\n');
+      rt.pendingFollowups = [];
+      const session = this.sessions.find((s) => s.id === sessionId);
+      if (session) session.activity = [];
+      void this.ensureAgent(sessionId).send(combined);
+    }, 0);
   }
 
   /** Stops whichever session is currently active — same "acts on what's displayed" rule as sendToAgent. */
@@ -1345,6 +1390,8 @@ export class Project {
     if (rt) {
       for (const [, entry] of rt.pendingApprovals) entry.resolve(false);
       rt.pendingApprovals.clear();
+      // Stop means stop — don't let queued follow-ups kick off a fresh run.
+      rt.pendingFollowups = [];
     }
     this.flushSubagentApprovalsFor(sessionId);
   }

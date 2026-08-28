@@ -302,6 +302,8 @@ export interface SessionSummary {
   elapsedMs?: number;
   /** How many times this session's conversation has been auto-compacted to free up context. */
   compactionCount?: number;
+  /** Epoch ms this session's current run started, or null/absent when idle — lets the sidebar tick elapsed time live. */
+  runningSince?: number | null;
 }
 
 /** An image attached to a chat message — either a user paste/drop or something the agent generated. */

@@ -17,6 +17,7 @@ import type {
   CatalogModel,
   ChatProvider,
   ReasoningLevel,
+  AuditReadResult,
   UpdateStatus,
   PortalStatus,
   ProviderSettings,
@@ -163,6 +164,9 @@ export interface ForgeApi {
   reasoning: {
     getCurrent: () => Promise<ReasoningLevel>;
     setCurrent: (level: ReasoningLevel) => Promise<ReasoningLevel>;
+  };
+  audit: {
+    read: (workspaceId: string) => Promise<AuditReadResult>;
   };
   updates: {
     check: () => Promise<boolean>;

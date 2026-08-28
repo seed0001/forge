@@ -61,7 +61,7 @@ export interface PendingImage {
  * currently looking at, so switching tabs is instant and nothing is missed.
  */
 /** Which surface the centre column is showing. Chat is the primary one. */
-export type CenterView = 'chat' | 'editor' | 'terminal' | 'roadmap' | 'scheduler' | 'browser';
+export type CenterView = 'chat' | 'editor' | 'terminal' | 'roadmap' | 'scheduler' | 'browser' | 'audit';
 
 /** Which list the sidebar is showing. Sessions is the primary one. */
 export type SidebarView = 'sessions' | 'files';

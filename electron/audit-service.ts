@@ -1,6 +1,7 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { SECRET_SETTINGS_KEYS } from './ipc-channels';
+import type { AuditEntry, AuditReadResult } from './ipc-channels';
 
 /**
  * Append-only activity log required by 00-MASTER §6 and 02-TOOLCALL: every
@@ -88,5 +89,41 @@ export async function audit(
     await fs.appendFile(file, line, 'utf8');
   } catch {
     // Auditing must never break the task it is recording.
+  }
+}
+
+/**
+ * `- <ISO ts> **<kind>** <detail>` with an optional ` — <outcome>` tail —
+ * the exact shape audit() writes. Header/blank lines and anything that
+ * doesn't match are skipped.
+ */
+const AUDIT_LINE_RE = /^-\s+(\S+)\s+\*\*([^*]+)\*\*\s+([\s\S]*)$/;
+
+export function parseAuditLog(raw: string): AuditEntry[] {
+  const out: AuditEntry[] = [];
+  for (const line of raw.split('\n')) {
+    const m = AUDIT_LINE_RE.exec(line.trim());
+    if (!m) continue;
+    const [, ts, kind, rest] = m;
+    const sep = rest.indexOf(' — ');
+    out.push({
+      ts,
+      kind: kind.trim(),
+      detail: (sep === -1 ? rest : rest.slice(0, sep)).trim(),
+      outcome: sep === -1 ? null : rest.slice(sep + 3).trim() || null,
+    });
+  }
+  return out;
+}
+
+/** Read + parse this workspace's AUDIT.md for the in-app Audit view. */
+export async function readAuditLog(rootPath: string | null): Promise<AuditReadResult> {
+  if (!rootPath) return { present: false };
+  const file = auditLogPath(rootPath);
+  try {
+    const raw = await fs.readFile(file, 'utf8');
+    return { present: true, path: file, entries: parseAuditLog(raw) };
+  } catch {
+    return { present: false };
   }
 }

@@ -162,6 +162,12 @@ export const IconEyeOff = (p: P) => (
     <path d="M9.6 9.9a2.75 2.75 0 0 0 3.9 3.9" />
   </svg>
 );
+export const IconList = (p: P) => (
+  <svg {...stroke(p)}>
+    <path d="M8 6h12M8 12h12M8 18h12" />
+    <path d="M3.5 6h.01M3.5 12h.01M3.5 18h.01" />
+  </svg>
+);
 export const IconRoadmap = (p: P) => (
   <svg {...stroke(p)}>
     <path d="M5 6.5h2.2M5 12h2.2M5 17.5h2.2" />

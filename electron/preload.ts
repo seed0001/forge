@@ -138,6 +138,9 @@ contextBridge.exposeInMainWorld('forge', {
     getCurrent: (): Promise<ReasoningLevel> => ipcRenderer.invoke(IPC.reasoningGetCurrent),
     setCurrent: (level: ReasoningLevel): Promise<ReasoningLevel> => ipcRenderer.invoke(IPC.reasoningSetCurrent, level),
   },
+  audit: {
+    read: (workspaceId: string) => ipcRenderer.invoke(IPC.auditRead, workspaceId),
+  },
   updates: {
     check: () => ipcRenderer.invoke(IPC.updateCheck),
     download: () => ipcRenderer.invoke(IPC.updateDownload),

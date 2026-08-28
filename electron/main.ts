@@ -27,6 +27,7 @@ import type {
   ProviderSettings,
   ChatProvider,
   ReasoningLevel,
+  AuditReadResult,
   RoadmapItemStatus,
   WorkspaceKind,
   WorkspaceType,
@@ -36,6 +37,7 @@ import type {
   TtsProvider,
 } from './ipc-channels';
 import * as fsService from './fs-service';
+import { readAuditLog } from './audit-service';
 import { WorkspaceManager } from './workspace-manager';
 import { saveAttachment, attachmentDirFor, readImageAsDataUrl } from './attachment-store';
 import { listCatalogModels } from './models-service';
@@ -791,6 +793,13 @@ app.whenReady().then(async () => {
     process.env[REASONING_ENV_KEY] = next;
     setEnvValue(envFile, REASONING_ENV_KEY, next);
     return next;
+  });
+
+  // The in-app Audit view: parse this workspace's AUDIT.md so the Operator
+  // can read the trail without opening the file. Read-only.
+  ipcMain.handle(IPC.auditRead, async (_e, workspaceId: string): Promise<AuditReadResult> => {
+    const ws = manager.findProject(workspaceId);
+    return readAuditLog(ws?.rootPath ?? null);
   });
 
   // settingsGet never returns a real credential value — only whether one is

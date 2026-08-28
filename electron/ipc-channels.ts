@@ -93,6 +93,8 @@ export const IPC = {
   reasoningGetCurrent: 'reasoning:get-current',
   reasoningSetCurrent: 'reasoning:set-current',
 
+  auditRead: 'audit:read',
+
   updateCheck: 'update:check',
   updateDownload: 'update:download',
   updateInstall: 'update:install',
@@ -485,6 +487,19 @@ export interface CatalogModel {
   isFree: boolean;
   provider: ChatProvider;
 }
+
+/** One parsed line of AUDIT.md, for the in-app Audit view. `kind` is one of audit-service.ts's AuditKind values (kept loose here so the renderer needn't import that node-only module). */
+export interface AuditEntry {
+  ts: string;
+  kind: string;
+  detail: string;
+  outcome: string | null;
+}
+
+/** What audit:read returns — `present:false` when the workspace has no AUDIT.md yet. */
+export type AuditReadResult =
+  | { present: false }
+  | { present: true; path: string; entries: AuditEntry[] };
 
 /**
  * State of a manual update check. Nothing here happens without the Operator

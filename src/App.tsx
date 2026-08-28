@@ -7,6 +7,7 @@ import { EditorPanel } from './components/EditorPanel';
 import { TerminalPanel } from './components/TerminalPanel';
 import { RoadmapPanel } from './components/RoadmapPanel';
 import { SchedulerPanel } from './components/SchedulerPanel';
+import { AuditPanel } from './components/AuditPanel';
 import { BrowserPanel } from './components/BrowserPanel';
 import { FocusPanel } from './components/FocusPanel';
 import { WorkspaceChooser } from './components/WorkspaceChooser';
@@ -24,11 +25,13 @@ const CODING_VIEWS = [
   { key: 'terminal', label: 'Terminal' },
   { key: 'roadmap', label: 'Roadmap' },
   { key: 'scheduler', label: 'Scheduler' },
+  { key: 'audit', label: 'Audit' },
 ] as const;
 
 const BROWSING_VIEWS = [
   { key: 'browser', label: 'Browser' },
   { key: 'chat', label: 'Chat' },
+  { key: 'audit', label: 'Audit' },
 ] as const;
 
 export default function App() {
@@ -84,6 +87,7 @@ export default function App() {
                 {center === 'terminal' && <TerminalPanel />}
                 {center === 'roadmap' && <RoadmapPanel />}
                 {center === 'scheduler' && <SchedulerPanel />}
+                {center === 'audit' && <AuditPanel />}
                 {center === 'browser' && <BrowserPanel />}
               </div>
             </div>

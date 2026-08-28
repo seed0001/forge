@@ -3,11 +3,26 @@ import path from 'node:path';
 import { SECRET_SETTINGS_KEYS } from './ipc-channels';
 
 /**
- * Append-only mutation log required by 00-MASTER §6 and 02-TOOLCALL:
- * every command run and every file changed is recorded, so the Operator can
- * reconstruct what happened without trusting a summary.
+ * Append-only activity log required by 00-MASTER §6 and 02-TOOLCALL: every
+ * command run, every file changed, every file read or listed, and every
+ * model request (with its wire size) is recorded, so the Operator can
+ * reconstruct exactly what happened — and how big each request got — without
+ * trusting a summary.
+ *
+ * - command / write / revert / search: mutations and lookups (original set)
+ * - read / list: what the agent looked at, even when it changed nothing
+ * - request: one line per model call — bytes, message count, image count
+ * - error: a provider error verbatim (e.g. the 8 MB payload rejection)
  */
-export type AuditKind = 'command' | 'write' | 'revert' | 'search';
+export type AuditKind =
+  | 'command'
+  | 'write'
+  | 'revert'
+  | 'search'
+  | 'read'
+  | 'list'
+  | 'request'
+  | 'error';
 
 /** The single AUDIT.md a workspace's audit() calls write to — the one source of truth for "is this path the audit log". */
 export function auditLogPath(rootPath: string): string {
@@ -63,7 +78,12 @@ export async function audit(
     try {
       await fs.access(file);
     } catch {
-      await fs.writeFile(file, '# AUDIT\n\nMutations made by the Forge agent.\n\n', 'utf8');
+      await fs.writeFile(
+        file,
+        '# AUDIT\n\nEverything the Forge agent did, in order: commands run, files written, ' +
+          'files read or listed, searches, model requests (with wire size), and provider errors.\n\n',
+        'utf8'
+      );
     }
     await fs.appendFile(file, line, 'utf8');
   } catch {

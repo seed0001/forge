@@ -295,6 +295,13 @@ function isContextLengthError(bodyText: string): boolean {
   );
 }
 
+/** Compact byte count for the audit trail — "12 B", "4.3 KB", "7.9 MB". */
+function fmtBytes(n: number): string {
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+  return `${(n / (1024 * 1024)).toFixed(2)} MB`;
+}
+
 /**
  * A different flavour of "your request is too big": not a token-count limit
  * but a hard byte ceiling on the request payload. OpenRouter caps total text
@@ -1221,6 +1228,8 @@ export class AgentSession {
   private costWarningIssued = false;
   /** How many times THIS task has already force-compacted and retried after a context-length-exceeded response. */
   private contextRecoveryAttempts = 0;
+  /** True once this task has force-compacted because the assembled request was over the byte budget — done at most once per send(). */
+  private bytesRecoveryTried = false;
 
   constructor(
     rootPath: string,
@@ -1324,6 +1333,38 @@ export class AgentSession {
         return { ...m, content: parts } as unknown as Record<string, unknown>;
       })
     );
+  }
+
+  /**
+   * Size profile of an assembled wire request, for the audit trail and for
+   * the oversize-request diagnostics. `top` names the few biggest individual
+   * messages (index, role, size) so a runaway one is obvious in the log.
+   */
+  private wireStats(wire: Record<string, unknown>[]): {
+    bytes: number;
+    messages: number;
+    images: number;
+    top: string;
+  } {
+    let images = 0;
+    const sized = wire.map((m, i) => {
+      const content = (m as { content?: unknown }).content;
+      if (Array.isArray(content)) {
+        for (const p of content as { type?: string }[]) if (p?.type === 'image_url') images++;
+      }
+      return {
+        i,
+        role: String((m as { role?: string }).role ?? '?'),
+        bytes: JSON.stringify(m).length,
+      };
+    });
+    const bytes = sized.reduce((n, s) => n + s.bytes, 0);
+    const top = [...sized]
+      .sort((a, b) => b.bytes - a.bytes)
+      .slice(0, 5)
+      .map((s) => `#${s.i} ${s.role} ${fmtBytes(s.bytes)}`)
+      .join(', ');
+    return { bytes, messages: wire.length, images, top };
   }
 
   /**
@@ -1747,7 +1788,9 @@ export class AgentSession {
       const abs = path.resolve(this.rootPath, rel);
       this.trackActivity({ id: nextId('act'), kind: 'list', detail: `Listed ${rel}`, status: 'done' });
       const tree = await listTree(abs);
-      const names = flattenTree(tree).slice(0, 300).join('\n');
+      const allNames = flattenTree(tree);
+      await audit(this.rootPath, 'list', rel, `${allNames.length} entries`);
+      const names = allNames.slice(0, 300).join('\n');
       if (!names) return '(empty directory)';
       return `File and directory NAMES only — contents unknown until you read them:\n${untrusted(names)}`;
     }
@@ -1764,6 +1807,12 @@ export class AgentSession {
         detail: missing ? `${rel} — not found` : `Read ${rel}`,
         status: result.ok ? 'done' : missing ? 'skipped' : 'error',
       });
+      await audit(
+        this.rootPath,
+        'read',
+        rel,
+        result.ok ? `${result.content.length} chars` : missing ? 'not found' : `error: ${result.detail}`
+      );
       if (missing) {
         return `${rel} does not exist. That is a fact about the project, not a failure — do not guess at contents it never had.`;
       }
@@ -2067,6 +2116,7 @@ export class AgentSession {
       try {
         const files = await globSearch(this.rootPath, pattern);
         this.trackActivity({ id: actId, kind: 'search', detail: `Glob "${pattern}"`, status: files.length ? 'done' : 'skipped' });
+        await audit(this.rootPath, 'search', `glob: ${pattern}`, `${files.length} files`);
         if (!files.length) return `No files matched "${pattern}".`;
         return untrusted(files.join('\n'));
       } catch (err) {
@@ -2091,6 +2141,12 @@ export class AgentSession {
         const include = typeof args.include === 'string' && args.include.trim() ? args.include.trim() : undefined;
         const { matches, filesScanned, truncated } = await grepSearch(this.rootPath, regex, include);
         this.trackActivity({ id: actId, kind: 'search', detail: `Grep "${patternStr}"`, status: matches.length ? 'done' : 'skipped' });
+        await audit(
+          this.rootPath,
+          'search',
+          `grep: ${patternStr}${include ? ` in ${include}` : ''}`,
+          `${matches.length} matches / ${filesScanned} files${truncated ? ' (truncated)' : ''}`
+        );
         if (!matches.length) return `No matches for "${patternStr}" across ${filesScanned} file(s) searched.`;
         const body = matches.map((m) => `${m.file}:${m.line}: ${m.text}`).join('\n');
         return untrusted(`${matches.length} match(es) across ${filesScanned} file(s)${truncated ? ' (truncated)' : ''}:\n${body}`);
@@ -2355,6 +2411,7 @@ export class AgentSession {
       const actId = nextId('act');
       try {
         const b64 = file.data.toString('base64');
+        await audit(this.rootPath, 'read', `${rel} (image)`, `${fmtBytes(file.data.length)}, ${fmtBytes(b64.length)} base64`);
         const resp = await fetch(OPENROUTER_URL, {
           method: 'POST',
           headers: {
@@ -2620,14 +2677,14 @@ export class AgentSession {
     this.messages = [...this.messages.slice(0, firstNonSystem), summaryMessage, ...tail];
     this.cb.onCompaction();
 
+    const pct = Math.round((promptTokens / contextWindow) * 100);
     this.trackActivity({
       id: nextId('act'),
       kind: 'compact',
-      detail: `Compacted ${older.length} earlier messages to free up context (was ${Math.round(
-        (promptTokens / contextWindow) * 100
-      )}% full)`,
+      detail: `Compacted ${older.length} earlier messages to free up context (was ${pct}% full)`,
       status: 'done',
     });
+    await audit(this.rootPath, 'request', 'compacted history', `${older.length} msgs → 1 summary (was ~${pct}% of context)`);
   }
 
   /**
@@ -2800,6 +2857,12 @@ export class AgentSession {
           continue;
         }
         const text = await resp.text();
+        await audit(
+          this.rootPath,
+          'error',
+          `${PROVIDER_LABEL[cfg.provider]} HTTP ${resp.status}`,
+          text.slice(0, 300).replace(/\s+/g, ' ')
+        );
         return {
           kind: 'failed',
           message: `${PROVIDER_LABEL[cfg.provider]} error (${resp.status}): ${text.slice(0, 500)}`,
@@ -2829,6 +2892,7 @@ export class AgentSession {
     this.taskCostUsd = 0;
     this.costWarningIssued = false;
     this.contextRecoveryAttempts = 0;
+    this.bytesRecoveryTried = false;
     this.matchedLessons = await matchLessons(userText);
     this.cb.onStatus(true);
     await this.primeRules();
@@ -3002,6 +3066,46 @@ export class AgentSession {
       // oversized-on-the-wire-but-cheap-in-tokens payloads like stacked
       // base64 images coming).
       this.capWireRequestBytes(wireMessages);
+
+      // One line per model call in the audit trail — bytes, message count,
+      // image count — so an oversize request (and the error that follows it)
+      // can be traced back to exactly what the conversation was carrying.
+      const stats = this.wireStats(wireMessages);
+      await audit(
+        this.rootPath,
+        'request',
+        `turn ${turn + 1} · ${activeModel}`,
+        `${fmtBytes(stats.bytes)} · ${stats.messages} msgs · ${stats.images} img`
+      );
+
+      if (stats.bytes > REQUEST_BYTE_BUDGET) {
+        await audit(
+          this.rootPath,
+          'request',
+          `OVERSIZE turn ${turn + 1} — budget ${fmtBytes(REQUEST_BYTE_BUDGET)}`,
+          `biggest messages: ${stats.top}`
+        );
+        // Images were already pruned by capWireRequestBytes and it's still
+        // over — the weight is in text history. Force a compaction pass and
+        // rebuild the request once, rather than knowingly send one the
+        // provider will reject.
+        if (!this.bytesRecoveryTried) {
+          this.bytesRecoveryTried = true;
+          const w = await contextWindowForModel(activeModel, cfg.provider);
+          const before = this.messages.length;
+          await this.compactIfNeeded(w, w, cfg);
+          if (this.messages.length < before) {
+            await audit(
+              this.rootPath,
+              'request',
+              'compacted to fit the byte budget',
+              `${before} → ${this.messages.length} msgs`
+            );
+            clearInterval(tick);
+            continue;
+          }
+        }
+      }
 
       const attempt = await this.fetchCompletionWithRetry(cfg, activeModel, wireMessages, thinkId);
       clearInterval(tick);

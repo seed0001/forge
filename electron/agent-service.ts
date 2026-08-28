@@ -246,6 +246,15 @@ const REQUEST_TIMEOUT_MS = 90_000;
 const MAX_CONTEXT_RECOVERY_ATTEMPTS = 2;
 
 /**
+ * Stay comfortably under OpenRouter's 8 MB request-text ceiling. When the
+ * fully-hydrated wire request (base64 images included) exceeds this, the
+ * oldest inline images are dropped from the wire copy — oldest first, as few
+ * as needed — before the request goes out. Token-based compaction doesn't
+ * catch this case: an image costs ~1k tokens but ~1 MB on the wire.
+ */
+const REQUEST_BYTE_BUDGET = 6 * 1024 * 1024;
+
+/**
  * Rough character budget for the project knowledge base injected into every
  * turn (see context-store.ts's resolveForPrompt) — no real tokenizer is
  * available here, so this trades exactness for simplicity. ~4 chars/token,
@@ -276,6 +285,23 @@ function isRetryableStatus(status: number): boolean {
 function isContextLengthError(bodyText: string): boolean {
   return /context_length_exceeded|context length|maximum context|too many (input )?tokens|input too long|reduce the length of the messages/i.test(
     bodyText
+  );
+}
+
+/**
+ * A different flavour of "your request is too big": not a token-count limit
+ * but a hard byte ceiling on the request payload. OpenRouter caps total text
+ * input at 8 MB and returns a plain 400 ("The total text input size exceeds
+ * 8 MB"); other gateways return 413. This is reachable well below the token
+ * threshold when a conversation carries several inline base64 images (a
+ * screenshot is ~1000 tokens to the model but megabytes on the wire), so
+ * token-based compaction never fires on its own — it's handled the same way
+ * as a context-length error: force a compaction/prune pass and retry.
+ */
+function isRequestTooLargeError(bodyText: string, status: number): boolean {
+  return (
+    status === 413 ||
+    /total text input size exceeds|request (entity|body|payload) too large|payload too large|exceeds \d+\s*mb/i.test(bodyText)
   );
 }
 
@@ -1291,6 +1317,78 @@ export class AgentSession {
         return { ...m, content: parts } as unknown as Record<string, unknown>;
       })
     );
+  }
+
+  /**
+   * Keep the assembled wire request under REQUEST_BYTE_BUDGET so it never
+   * trips a provider's hard payload ceiling (OpenRouter: a plain 400, "The
+   * total text input size exceeds 8 MB"). The usual cause is inline base64
+   * images accumulating across a long visual session — each is cheap in
+   * tokens, so token-based compaction leaves them alone, but together they
+   * are megabytes on the wire. Drops image parts oldest-first from the wire
+   * array only (this.messages keeps every image_ref for persistence and for
+   * later turns after compaction), replacing each with a short marker, and
+   * stops as soon as the request fits. Mutates `wire` in place.
+   */
+  private capWireRequestBytes(wire: Record<string, unknown>[]): void {
+    const sizeOf = () => JSON.stringify(wire).length;
+    if (sizeOf() <= REQUEST_BYTE_BUDGET) return;
+
+    const imageBearers = wire.filter(
+      (m) => Array.isArray((m as { content?: unknown }).content) &&
+        ((m as { content: { type?: string }[] }).content).some((p) => p?.type === 'image_url')
+    ) as { content: { type?: string }[] }[];
+
+    let dropped = 0;
+    // Oldest first; leave the newest image-bearing message for last so the
+    // most recently seen screenshot survives if at all possible.
+    for (const m of imageBearers) {
+      if (sizeOf() <= REQUEST_BYTE_BUDGET) break;
+      m.content = m.content.map((p) => {
+        if (p?.type === 'image_url') {
+          dropped++;
+          return { type: 'text', text: '[earlier image omitted here to keep the request under the provider size limit]' };
+        }
+        return p;
+      });
+    }
+
+    if (dropped) {
+      this.trackActivity({
+        id: nextId('act'),
+        kind: 'thinking',
+        detail: `Request over ${Math.round(REQUEST_BYTE_BUDGET / (1024 * 1024))} MB — dropped ${dropped} earlier image${dropped === 1 ? '' : 's'} from this turn`,
+        status: 'done',
+      });
+    }
+  }
+
+  /**
+   * Permanently replace every inline image in this.messages except those in
+   * the most recent image-bearing message with a text marker. Last-resort
+   * recovery for a "request too large" error that compaction can't fix
+   * because the images sit in the protected recent tail. Returns how many
+   * were dropped.
+   */
+  private dropOlderImagesFromHistory(): number {
+    const idxWithImages = this.messages
+      .map((m, i) => (Array.isArray(m.content) && m.content.some((p) => p.type === 'image_ref') ? i : -1))
+      .filter((i) => i >= 0);
+    const keepFrom = idxWithImages[idxWithImages.length - 1];
+    let dropped = 0;
+    for (const i of idxWithImages) {
+      if (i === keepFrom) continue;
+      const m = this.messages[i];
+      if (!Array.isArray(m.content)) continue;
+      m.content = m.content.map((p) => {
+        if (p.type === 'image_ref') {
+          dropped++;
+          return { type: 'text', text: `[image ${path.basename(p.path)} dropped from history to fit the request size limit]` };
+        }
+        return p;
+      });
+    }
+    return dropped;
   }
 
   /**
@@ -2696,7 +2794,8 @@ export class AgentSession {
         return {
           kind: 'failed',
           message: `${PROVIDER_LABEL[cfg.provider]} error (${resp.status}): ${text.slice(0, 500)}`,
-          contextExceeded: isContextLengthError(text),
+          contextExceeded:
+            isContextLengthError(text) || isRequestTooLargeError(text, resp.status),
         };
       }
 
@@ -2889,6 +2988,12 @@ export class AgentSession {
         });
       }
 
+      // Last line of defence before the request goes out: a hard byte
+      // ceiling, separate from token-based compaction (which never sees
+      // oversized-on-the-wire-but-cheap-in-tokens payloads like stacked
+      // base64 images coming).
+      this.capWireRequestBytes(wireMessages);
+
       const attempt = await this.fetchCompletionWithRetry(cfg, activeModel, wireMessages, thinkId);
       clearInterval(tick);
 
@@ -2919,7 +3024,20 @@ export class AgentSession {
             });
             continue;
           }
-          // Nothing left to compact (already down to a minimal tail) — no further automatic recovery is possible.
+          // Compaction couldn't shrink it (the weight is all in the protected
+          // recent tail — typically stacked-up images). Drop older inline
+          // images from history for good as a last resort, so the task can
+          // continue rather than dead-end on the size limit.
+          if (this.dropOlderImagesFromHistory() > 0) {
+            this.trackActivity({
+              id: nextId('act'),
+              kind: 'compact',
+              detail: `Request too large on ${activeModel} — dropped older images from history and retrying (${this.contextRecoveryAttempts}/${MAX_CONTEXT_RECOVERY_ATTEMPTS})`,
+              status: 'done',
+            });
+            continue;
+          }
+          // Nothing left to compact or prune — no further automatic recovery is possible.
         }
         this.trackActivity({ id: thinkId, kind: 'thinking', detail: 'Thinking… failed', status: 'error' });
         this.flushMessage(attempt.message);

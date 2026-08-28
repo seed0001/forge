@@ -145,6 +145,9 @@ interface ForgeState {
   providerSettings: ProviderSettings | null;
   settingsSaving: boolean;
 
+  /** The "What's New" / changelog overlay. */
+  changelogOpen: boolean;
+
   /** Permission category overrides and the bash allowlist, app-wide. Loaded lazily alongside providerSettings. */
   permOverrides: PermissionOverrides | null;
   bashAllowlist: string[];
@@ -219,6 +222,8 @@ interface ForgeState {
 
   openSettings: () => void;
   closeSettings: () => void;
+  openChangelog: () => void;
+  closeChangelog: () => void;
   saveSettings: (values: Partial<ProviderSettings>) => Promise<boolean>;
   setTtsAutoSpeak: (enabled: boolean) => void;
 
@@ -317,6 +322,7 @@ export const useForge = create<ForgeState>((set, get) => {
     portalStatus: { state: 'disabled' },
 
     settingsOpen: false,
+    changelogOpen: false,
     providerSettings: null,
     settingsSaving: false,
 
@@ -982,6 +988,9 @@ export const useForge = create<ForgeState>((set, get) => {
     },
 
     closeSettings: () => set({ settingsOpen: false }),
+
+    openChangelog: () => set({ changelogOpen: true }),
+    closeChangelog: () => set({ changelogOpen: false }),
 
     setTtsAutoSpeak: (enabled) => {
       try {

@@ -177,8 +177,11 @@ input, textarea { font: inherit; color: inherit; }
 }
 .side-version {
   font-size: 10px; letter-spacing: 0.04em; color: var(--fg-3);
-  text-align: center;
+  text-align: center; align-self: center;
+  padding: 2px 8px; border-radius: var(--r-pill);
+  transition: color 120ms ease, background 120ms ease;
 }
+.side-version:hover { color: var(--fg-2); background: var(--bg-hover); }
 .side-foot .autonomy-trigger {
   width: 100%; justify-content: center; height: 26px;
   overflow: hidden; white-space: nowrap;
@@ -1003,6 +1006,21 @@ input, textarea { font: inherit; color: inherit; }
   flex: none; padding: var(--s2) var(--s4); border-top: 1px solid var(--line);
   font-size: 10px; color: var(--fg-3); font-family: var(--font-mono);
 }
+
+/* ── Changelog / What's New ───────────────────────────────────────────── */
+.changelog-body { flex: 1; overflow-y: auto; }
+.changelog-inner {
+  max-width: 720px; margin: 0 auto; padding: var(--s6) var(--s5) 25vh;
+}
+.changelog-inner h2 {
+  font-size: var(--t-md); margin: var(--s6) 0 var(--s2);
+  padding-top: var(--s4); border-top: 1px solid var(--line);
+}
+.changelog-inner h2:first-of-type { border-top: none; padding-top: 0; margin-top: var(--s2); }
+.changelog-inner h1 { font-size: var(--t-lg); margin-bottom: var(--s2); }
+.changelog-inner ul { margin: var(--s2) 0; padding-left: var(--s5); }
+.changelog-inner li { margin: var(--s2) 0; line-height: 1.5; color: var(--fg-2); }
+.changelog-inner strong { color: var(--fg); }
 
 /* ── Scheduler / Focus / Board ────────────────────────────────────────── */
 .sch-wrap { flex-direction: column; }

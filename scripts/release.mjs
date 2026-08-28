@@ -10,7 +10,10 @@
 //
 // Bump "version" in package.json BEFORE running this — it refuses to publish
 // over a tag that already exists, since re-publishing an existing version's
-// tag is how the split-release problem started last time.
+// tag is how the split-release problem started last time. Add a matching
+// "## <version>" section to CHANGELOG.md too: it becomes both the GitHub
+// release notes and the in-app "What's New" view (a missing section only
+// warns).
 
 import { execSync, spawnSync } from 'node:child_process';
 import fs from 'node:fs';
@@ -57,6 +60,27 @@ if (existing.some((r) => r.tag_name === tag)) {
       `over an existing tag is exactly how the last release ended up split ` +
       `across two drafts.`
   );
+}
+
+// ── 0b. Pull this version's notes out of CHANGELOG.md ───────────────────
+// The same text the in-app "What's New" view shows. A missing section is a
+// warning, not a failure — the release still goes out with generic notes.
+function changelogNotesFor(v) {
+  try {
+    const md = fs.readFileSync(path.join(root, 'CHANGELOG.md'), 'utf8');
+    const re = new RegExp(`^##\\s+${v.replace(/\\./g, '\\\\.')}\\b.*$`, 'm');
+    const start = md.search(re);
+    if (start === -1) return null;
+    const after = md.slice(start);
+    const nextHeading = after.slice(1).search(/^##\s/m);
+    return (nextHeading === -1 ? after : after.slice(0, nextHeading + 1)).trim();
+  } catch {
+    return null;
+  }
+}
+const releaseNotes = changelogNotesFor(version);
+if (!releaseNotes) {
+  console.warn(`\n\x1b[33mWARNING:\x1b[0m no "## ${version}" section in CHANGELOG.md — add one so the release (and the in-app What's New view) has notes.`);
 }
 
 // ── 1. Clear anything that could lock files mid-build ────────────────────
@@ -221,6 +245,12 @@ if (releases.length > 1) {
 
 // ── 6. Go live ────────────────────────────────────────────────────────────
 header(`Publishing release ${tag} (removing draft status)`);
+if (releaseNotes) {
+  // Same notes as the in-app What's New view, straight from CHANGELOG.md.
+  const notesFile = path.join(root, 'release', 'RELEASE_NOTES.md');
+  fs.writeFileSync(notesFile, releaseNotes, 'utf8');
+  run(`gh release edit ${tag} --repo ${owner}/${repo} --notes-file "${notesFile}"`);
+}
 run(`gh release edit ${tag} --repo ${owner}/${repo} --draft=false`);
 
 console.log(`\n\x1b[32mDone.\x1b[0m https://github.com/${owner}/${repo}/releases/tag/${tag}`);

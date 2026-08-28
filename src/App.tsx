@@ -17,6 +17,7 @@ import { FontPicker } from './components/FontPicker';
 import { ProviderSelector } from './components/ProviderSelector';
 import { ModelSelector } from './components/ModelSelector';
 import { SettingsOverlay } from './components/SettingsOverlay';
+import { ChangelogOverlay } from './components/ChangelogOverlay';
 import { IconGear } from './components/icons';
 
 const CODING_VIEWS = [
@@ -38,6 +39,7 @@ export default function App() {
   const init = useForge((s) => s.init);
   const setCenter = useForge((s) => s.setCenter);
   const openSettings = useForge((s) => s.openSettings);
+  const changelogOpen = useForge((s) => s.changelogOpen);
   const view = useActiveWorkspace();
 
   useEffect(() => {
@@ -97,6 +99,7 @@ export default function App() {
       </div>
       {view?.reviewing && <ReviewOverlay />}
       {view?.paintTarget && <PaintEditorOverlay />}
+      {changelogOpen && <ChangelogOverlay />}
       <SettingsOverlay />
     </div>
   );

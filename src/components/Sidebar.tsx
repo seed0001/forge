@@ -174,7 +174,13 @@ export function Sidebar() {
       )}
 
       <div className="side-foot">
-        <span className="side-version" title="Installed version">Forge v{__APP_VERSION__}</span>
+        <button
+          className="side-version"
+          onClick={() => useForge.getState().openChangelog()}
+          title="What's new — full changelog"
+        >
+          Forge v{__APP_VERSION__}
+        </button>
         <UpdateControl />
       </div>
 

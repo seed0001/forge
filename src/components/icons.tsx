@@ -57,6 +57,12 @@ export const IconDot = (p: P) => (
 export const IconBolt = (p: P) => (
   <svg {...stroke(p)} strokeLinejoin="round" fill="currentColor" stroke="none"><path d="M13 2.5L4.5 13.5h5.5L10 21.5l8.5-11.5h-5.5z" /></svg>
 );
+export const IconBrain = (p: P) => (
+  <svg {...stroke(p)}>
+    <path d="M9 4a2.5 2.5 0 0 0-2.5 2.5A2.5 2.5 0 0 0 4 9c0 1 .5 1.9 1.3 2.4A2.5 2.5 0 0 0 4 13.7 2.5 2.5 0 0 0 6.5 16 2.5 2.5 0 0 0 9 18.5 2 2 0 0 0 11 20V4.5A2 2 0 0 0 9 4z" />
+    <path d="M15 4a2.5 2.5 0 0 1 2.5 2.5A2.5 2.5 0 0 1 20 9c0 1-.5 1.9-1.3 2.4A2.5 2.5 0 0 1 20 13.7 2.5 2.5 0 0 1 17.5 16 2.5 2.5 0 0 1 15 18.5 2 2 0 0 1 13 20V4.5A2 2 0 0 1 15 4z" />
+  </svg>
+);
 export const IconArrowUp = (p: P) => (
   <svg {...stroke(p)} strokeWidth={2.2}><path d="M12 19V6" /><path d="M6.5 11.5L12 6l5.5 5.5" /></svg>
 );

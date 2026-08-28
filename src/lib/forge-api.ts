@@ -16,6 +16,7 @@ import type {
   SubagentCommandApproval,
   CatalogModel,
   ChatProvider,
+  ReasoningLevel,
   UpdateStatus,
   PortalStatus,
   ProviderSettings,
@@ -158,6 +159,10 @@ export interface ForgeApi {
     getCurrent: () => Promise<{ provider: ChatProvider; model: string }>;
     setCurrent: (modelId: string, provider: ChatProvider) => Promise<boolean>;
     setProvider: (provider: ChatProvider) => Promise<{ provider: ChatProvider; model: string }>;
+  };
+  reasoning: {
+    getCurrent: () => Promise<ReasoningLevel>;
+    setCurrent: (level: ReasoningLevel) => Promise<ReasoningLevel>;
   };
   updates: {
     check: () => Promise<boolean>;

@@ -1,5 +1,15 @@
-import { CHAT_PROVIDERS, DEFAULT_LLAMACPP_BASE_URL, DEFAULT_OLLAMA_BASE_URL, MODEL_ENV_KEY } from './ipc-channels';
-import type { ChatProvider } from './ipc-channels';
+import {
+  CHAT_PROVIDERS,
+  DEFAULT_LLAMACPP_BASE_URL,
+  DEFAULT_OLLAMA_BASE_URL,
+  MODEL_ENV_KEY,
+  REASONING_ENV_KEY,
+  REASONING_LEVELS,
+  REASONING_EFFORT,
+  DEFAULT_REASONING_LEVEL,
+  LOCAL_CHAT_PROVIDERS,
+} from './ipc-channels';
+import type { ChatProvider, ReasoningLevel } from './ipc-channels';
 
 /**
  * Shared provider-resolution logic — used by the main chat loop
@@ -30,6 +40,24 @@ export interface ChatProviderConfig {
   url: string;
   apiKey: string;
   model: string;
+  /** How hard to reason per turn — always set (defaults to the flash level). */
+  reasoning: ReasoningLevel;
+}
+
+/** The current global reasoning level, falling back to the default for a blank or unrecognized env value. */
+export function activeReasoningLevel(): ReasoningLevel {
+  const raw = process.env[REASONING_ENV_KEY];
+  return REASONING_LEVELS.some((l) => l.id === raw) ? (raw as ReasoningLevel) : DEFAULT_REASONING_LEVEL;
+}
+
+/**
+ * The `reasoning` request field for a given config, or null when it should be
+ * omitted (local runtimes, which don't understand it and may reject unknown
+ * fields). OpenRouter/FairRouter normalize `effort` per model.
+ */
+export function reasoningRequestField(cfg: ChatProviderConfig): { effort: 'low' | 'medium' | 'high' } | null {
+  if (LOCAL_CHAT_PROVIDERS.has(cfg.provider)) return null;
+  return { effort: REASONING_EFFORT[cfg.reasoning] };
 }
 
 export const PROVIDER_LABEL: Record<ChatProvider, string> = Object.fromEntries(
@@ -84,7 +112,7 @@ export function resolveChatProvider(): ChatProviderConfig | null {
   if (!model) return null;
   const apiKey = process.env[API_KEY_ENV_KEY[provider]] || '';
   if (PROVIDER_REQUIRES_KEY[provider] && !apiKey) return null;
-  return { provider, url: chatUrlFor(provider), apiKey, model };
+  return { provider, url: chatUrlFor(provider), apiKey, model, reasoning: activeReasoningLevel() };
 }
 
 /**

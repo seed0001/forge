@@ -7,7 +7,14 @@ import { computeHunks, countChanges } from './diff-service';
 import { nextId } from './diff-store';
 import { extFromMediaType, IMAGE_MIME_BY_EXT } from './media-types';
 import { listCatalogModels } from './models-service';
-import { OPENROUTER_URL, FAIRROUTER_URL, PROVIDER_LABEL, chatHeaders, resolveChatProvider } from './chat-provider';
+import {
+  OPENROUTER_URL,
+  FAIRROUTER_URL,
+  PROVIDER_LABEL,
+  chatHeaders,
+  resolveChatProvider,
+  reasoningRequestField,
+} from './chat-provider';
 import type { ChatProviderConfig } from './chat-provider';
 import { matchesAllowlist, isShellChained } from './perm-store';
 import { buildGuardrailNote, containsForeignScript, stripLeakedTags, looksCollapsed } from './guardrails';
@@ -2741,6 +2748,7 @@ export class AgentSession {
 
       let resp: Response;
       try {
+        const reasoning = reasoningRequestField(cfg);
         resp = await fetch(cfg.url, {
           method: 'POST',
           signal: this.controller.signal,
@@ -2751,6 +2759,7 @@ export class AgentSession {
             tools: this.tools,
             tool_choice: 'auto',
             usage: { include: true },
+            ...(reasoning ? { reasoning } : {}),
           }),
         });
       } catch (err) {

@@ -90,6 +90,8 @@ export const IPC = {
   modelsGetCurrent: 'models:get-current',
   modelsSetCurrent: 'models:set-current',
   providerSet: 'provider:set',
+  reasoningGetCurrent: 'reasoning:get-current',
+  reasoningSetCurrent: 'reasoning:set-current',
 
   updateCheck: 'update:check',
   updateDownload: 'update:download',
@@ -424,6 +426,32 @@ export const MODEL_ENV_KEY: Record<ChatProvider, string> = {
   ollama: 'OLLAMA_MODEL',
   llamacpp: 'LLAMACPP_MODEL',
 };
+
+/**
+ * How hard the model should think before each reply. Sent to the provider as
+ * the unified `reasoning` field (OpenRouter/FairRouter normalize it per
+ * model — an `effort` for OpenAI-style models, a proportional token budget
+ * for the rest). Local runtimes ignore it. Global, like the model choice.
+ */
+export type ReasoningLevel = 'flash' | 'thinking' | 'deep';
+
+/** Env var holding the current reasoning level (persisted in forge/.env alongside PROVIDER and the *_MODEL vars). */
+export const REASONING_ENV_KEY = 'REASONING_LEVEL';
+
+export const DEFAULT_REASONING_LEVEL: ReasoningLevel = 'flash';
+
+/** Level -> the `reasoning.effort` value sent on the wire. */
+export const REASONING_EFFORT: Record<ReasoningLevel, 'low' | 'medium' | 'high'> = {
+  flash: 'low',
+  thinking: 'medium',
+  deep: 'high',
+};
+
+export const REASONING_LEVELS: { id: ReasoningLevel; label: string; blurb: string }[] = [
+  { id: 'flash', label: 'Flash', blurb: 'A quick think before replying — lowest latency and cost. (Default)' },
+  { id: 'thinking', label: 'Thinking', blurb: 'A moderate reasoning budget — a balance of speed and depth.' },
+  { id: 'deep', label: 'Deep Thinking', blurb: 'A large reasoning budget for hard problems — slower and more expensive.' },
+];
 
 /** Which text-to-speech backend a voice-output request goes through. */
 export type TtsProvider = 'edge' | 'sapi' | 'xtts';

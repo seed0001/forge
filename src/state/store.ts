@@ -15,6 +15,7 @@ import type {
   SubagentCommandApproval,
   CatalogModel,
   ChatProvider,
+  ReasoningLevel,
   UpdateStatus,
   PortalStatus,
   ProviderSettings,
@@ -130,6 +131,9 @@ interface ForgeState {
   /** True once a list fetch has completed (success or failure) — lets the picker tell "never loaded" from "loaded, empty". */
   modelsLoadedOnce: boolean;
 
+  /** How hard the model reasons per turn — global, like the model choice. */
+  reasoningLevel: ReasoningLevel;
+
   /** Manual-only, app-wide — see electron/updater.ts for why nothing here runs on its own. */
   updateStatus: UpdateStatus;
 
@@ -174,6 +178,7 @@ interface ForgeState {
   loadModels: (forceRefresh?: boolean) => Promise<void>;
   setModel: (modelId: string, provider: ChatProvider) => Promise<void>;
   selectProvider: (provider: ChatProvider) => Promise<void>;
+  setReasoningLevel: (level: ReasoningLevel) => Promise<void>;
 
   checkForUpdates: () => Promise<void>;
   downloadUpdate: () => Promise<void>;
@@ -306,6 +311,7 @@ export const useForge = create<ForgeState>((set, get) => {
     modelsLoading: false,
     modelsError: null,
     modelsLoadedOnce: false,
+    reasoningLevel: 'flash',
 
     updateStatus: { state: 'idle' },
     portalStatus: { state: 'disabled' },
@@ -329,6 +335,7 @@ export const useForge = create<ForgeState>((set, get) => {
       void forge.models
         .getCurrent()
         .then(({ provider, model }) => set({ currentModel: model, currentProvider: provider }));
+      void forge.reasoning.getCurrent().then((level) => set({ reasoningLevel: level }));
       if (!subscribed) forge.updates.onStatus((status) => set({ updateStatus: status }));
       if (!subscribed) {
         forge.portal.onStatus((status) => set({ portalStatus: status }));
@@ -773,6 +780,13 @@ export const useForge = create<ForgeState>((set, get) => {
       set({ currentProvider: provider, currentModel: '' });
       const result = await forge.models.setProvider(provider);
       set({ currentProvider: result.provider, currentModel: result.model });
+    },
+
+    setReasoningLevel: async (level) => {
+      // Optimistic, like setModel — takes effect on the next agent turn everywhere.
+      set({ reasoningLevel: level });
+      const applied = await forge.reasoning.setCurrent(level);
+      set({ reasoningLevel: applied });
     },
 
     checkForUpdates: async () => {

@@ -16,6 +16,7 @@ import { FontPicker } from './components/FontPicker';
 import { AutonomySlider } from './components/AutonomySlider';
 import { ProviderSelector } from './components/ProviderSelector';
 import { ModelSelector } from './components/ModelSelector';
+import { ReasoningSelector } from './components/ReasoningSelector';
 import { UpdateControl } from './components/UpdateControl';
 import { SettingsOverlay } from './components/SettingsOverlay';
 import { IconGear } from './components/icons';
@@ -75,6 +76,7 @@ export default function App() {
                 <UpdateControl />
                 <ProviderSelector />
                 <ModelSelector />
+                <ReasoningSelector />
                 <AutonomySlider />
                 <FontPicker />
                 <button className="seg-icon" onClick={openSettings} title="Settings">

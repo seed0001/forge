@@ -9,6 +9,7 @@ import type {
   ApprovalDecision,
   ScheduleSpec,
   TtsProvider,
+  ReasoningLevel,
 } from './ipc-channels';
 
 /** Subscribe helper: events are broadcast for every workspace, tagged with its id. */
@@ -132,6 +133,10 @@ contextBridge.exposeInMainWorld('forge', {
     getCurrent: () => ipcRenderer.invoke(IPC.modelsGetCurrent),
     setCurrent: (modelId: string, provider: ChatProvider) => ipcRenderer.invoke(IPC.modelsSetCurrent, modelId, provider),
     setProvider: (provider: ChatProvider) => ipcRenderer.invoke(IPC.providerSet, provider),
+  },
+  reasoning: {
+    getCurrent: (): Promise<ReasoningLevel> => ipcRenderer.invoke(IPC.reasoningGetCurrent),
+    setCurrent: (level: ReasoningLevel): Promise<ReasoningLevel> => ipcRenderer.invoke(IPC.reasoningSetCurrent, level),
   },
   updates: {
     check: () => ipcRenderer.invoke(IPC.updateCheck),

@@ -10,12 +10,23 @@ import { transcribe } from './transcribe';
 import { synthesizeSpeech, listVoices as listTtsVoices } from './tts-service';
 import { startPortalServer, type PortalHandle } from './portal-server';
 import { activeProviderId } from './chat-provider';
-import { IPC, SETTINGS_KEYS, SECRET_SETTINGS_KEYS, SECRET_SENTINEL, MAX_TOOL_CALLS_LIMIT, MODEL_ENV_KEY } from './ipc-channels';
+import {
+  IPC,
+  SETTINGS_KEYS,
+  SECRET_SETTINGS_KEYS,
+  SECRET_SENTINEL,
+  MAX_TOOL_CALLS_LIMIT,
+  MODEL_ENV_KEY,
+  REASONING_ENV_KEY,
+  REASONING_LEVELS,
+  DEFAULT_REASONING_LEVEL,
+} from './ipc-channels';
 import type {
   ProjectHydration,
   ChatImage,
   ProviderSettings,
   ChatProvider,
+  ReasoningLevel,
   RoadmapItemStatus,
   WorkspaceKind,
   WorkspaceType,
@@ -765,6 +776,21 @@ app.whenReady().then(async () => {
     setEnvValue(envFile, 'PROVIDER', provider);
     const model = process.env[MODEL_ENV_KEY[provider]] || '';
     return { provider, model };
+  });
+
+  // How hard the model reasons per turn — global (not workspace-scoped),
+  // persisted like PROVIDER. An unrecognized/blank value reads back as the
+  // default so the picker always has a valid selection.
+  ipcMain.handle(IPC.reasoningGetCurrent, async (): Promise<ReasoningLevel> => {
+    const raw = process.env[REASONING_ENV_KEY];
+    return REASONING_LEVELS.some((l) => l.id === raw) ? (raw as ReasoningLevel) : DEFAULT_REASONING_LEVEL;
+  });
+
+  ipcMain.handle(IPC.reasoningSetCurrent, async (_e, level: ReasoningLevel): Promise<ReasoningLevel> => {
+    const next = REASONING_LEVELS.some((l) => l.id === level) ? level : DEFAULT_REASONING_LEVEL;
+    process.env[REASONING_ENV_KEY] = next;
+    setEnvValue(envFile, REASONING_ENV_KEY, next);
+    return next;
   });
 
   // settingsGet never returns a real credential value — only whether one is

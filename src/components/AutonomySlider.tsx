@@ -24,7 +24,8 @@ const LEVELS: { id: Autonomy; label: string; blurb: string; color: string }[] = 
   },
 ];
 
-export function AutonomySlider() {
+/** `dropUp` opens the menu above the trigger — for the composer, which sits at the bottom of the window. */
+export function AutonomySlider({ dropUp = false }: { dropUp?: boolean } = {}) {
   const view = useActiveWorkspace();
   const setAutonomy = useForge((s) => s.setAutonomy);
   const [open, setOpen] = useState(false);
@@ -65,7 +66,7 @@ export function AutonomySlider() {
       </button>
 
       {open && (
-        <div className="autonomy-menu">
+        <div className={`autonomy-menu${dropUp ? ' autonomy-menu--up' : ''}`}>
           <div className="autonomy-head">Autonomy</div>
           <div
             className="autonomy-track"

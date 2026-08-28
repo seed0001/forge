@@ -9,7 +9,8 @@ import { IconBrain } from './icons';
  * toolbar; the choice is sent as the provider's unified `reasoning` field on
  * every agent turn. Not workspace-scoped, same as the model choice.
  */
-export function ReasoningSelector() {
+/** `dropUp` opens the menu above the trigger — for the composer, which sits at the bottom of the window. */
+export function ReasoningSelector({ dropUp = false }: { dropUp?: boolean } = {}) {
   const level = useForge((s) => s.reasoningLevel);
   const setLevel = useForge((s) => s.setReasoningLevel);
   const [open, setOpen] = useState(false);
@@ -45,7 +46,7 @@ export function ReasoningSelector() {
       </button>
 
       {open && (
-        <div className="autonomy-menu" style={{ width: 300 }}>
+        <div className={`autonomy-menu${dropUp ? ' autonomy-menu--up' : ''}`} style={{ width: 300 }}>
           <div className="autonomy-head">Reasoning</div>
           <div className="side-tabs" style={{ marginBottom: 'var(--s2)' }}>
             {REASONING_LEVELS.map((l) => (

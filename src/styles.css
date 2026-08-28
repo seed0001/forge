@@ -167,6 +167,25 @@ input, textarea { font: inherit; color: inherit; }
 .newsession:hover { border-color: var(--fg-3); color: var(--fg); background: var(--bg-hover); }
 
 .sesslist { flex: 1; overflow-y: auto; padding: 0 var(--s3) var(--s4); }
+
+/* Pinned footer of the sidebar — version + the manual update control. */
+.side-foot {
+  flex: none; margin-top: auto;
+  display: flex; flex-direction: column; align-items: stretch; gap: var(--s2);
+  padding: var(--s3);
+  border-top: 1px solid var(--line);
+}
+.side-version {
+  font-size: 10px; letter-spacing: 0.04em; color: var(--fg-3);
+  text-align: center;
+}
+.side-foot .autonomy-trigger {
+  width: 100%; justify-content: center; height: 26px;
+  overflow: hidden; white-space: nowrap;
+}
+.side-foot .autonomy-trigger span {
+  overflow: hidden; text-overflow: ellipsis;
+}
 .sessgroup {
   font-size: 10px; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase;
   color: var(--fg-3); padding: var(--s3) var(--s1) var(--s2);
@@ -430,6 +449,12 @@ input, textarea { font: inherit; color: inherit; }
   border-radius: var(--r-lg);
   box-shadow: 0 16px 40px rgba(0, 0, 0, 0.55);
   padding: var(--s4) var(--s4) var(--s3);
+}
+/* Composer sits at the bottom of the window — its dropdowns open upward and
+   anchor to the trigger's left edge so they never clip off-screen. */
+.autonomy-menu--up {
+  top: auto; right: auto; bottom: calc(100% + 6px); left: 0;
+  box-shadow: 0 -16px 40px rgba(0, 0, 0, 0.55);
 }
 .autonomy-head {
   font-size: var(--t-xs); font-weight: 600; color: var(--fg-3);

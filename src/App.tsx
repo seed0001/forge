@@ -13,11 +13,8 @@ import { WorkspaceChooser } from './components/WorkspaceChooser';
 import { ReviewOverlay } from './components/ReviewOverlay';
 import { PaintEditorOverlay } from './components/PaintEditorOverlay';
 import { FontPicker } from './components/FontPicker';
-import { AutonomySlider } from './components/AutonomySlider';
 import { ProviderSelector } from './components/ProviderSelector';
 import { ModelSelector } from './components/ModelSelector';
-import { ReasoningSelector } from './components/ReasoningSelector';
-import { UpdateControl } from './components/UpdateControl';
 import { SettingsOverlay } from './components/SettingsOverlay';
 import { IconGear } from './components/icons';
 
@@ -73,11 +70,8 @@ export default function App() {
                 </div>
                 <div className="spacer" />
                 {view?.summary.rootPath && <div className="center-path">{view.summary.rootPath}</div>}
-                <UpdateControl />
                 <ProviderSelector />
                 <ModelSelector />
-                <ReasoningSelector />
-                <AutonomySlider />
                 <FontPicker />
                 <button className="seg-icon" onClick={openSettings} title="Settings">
                   <IconGear className="icon-sm" />

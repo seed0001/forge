@@ -11,6 +11,7 @@ import {
   IconGlobe,
 } from './icons';
 import { SessionList } from './SessionList';
+import { UpdateControl } from './UpdateControl';
 
 const HTML_RE = /\.html?$/i;
 
@@ -171,6 +172,11 @@ export function Sidebar() {
           </button>
         </div>
       )}
+
+      <div className="side-foot">
+        <span className="side-version" title="Installed version">Forge v{__APP_VERSION__}</span>
+        <UpdateControl />
+      </div>
 
       {ctxMenu && (
         <div className="ctxmenu" ref={menuRef} style={{ left: ctxMenu.x, top: ctxMenu.y }}>

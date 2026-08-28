@@ -8,6 +8,8 @@ import type { TtsProvider } from '../../electron/ipc-channels';
 import { Aurora } from './Aurora';
 import { Markdown } from './Markdown';
 import { ChatImageThumb } from './ChatImageThumb';
+import { AutonomySlider } from './AutonomySlider';
+import { ReasoningSelector } from './ReasoningSelector';
 import {
   IconCheckCircle,
   IconXCircle,
@@ -435,7 +437,8 @@ export function ChatView() {
               }
             />
             <div className="chiprow">
-              <span className="chip">read · edit · run</span>
+              <ReasoningSelector dropUp />
+              <AutonomySlider dropUp />
               <span className="chip">{view.summary.name}</span>
               <div className="spacer" />
               <button

@@ -3040,6 +3040,13 @@ export class AgentSession {
           results.set(call.id, await this.callTool(call.function.name, parsedArgs(call)));
         }
 
+        // stop() can land while that last tool call was still resolving (a
+        // killed shell command now returns promptly instead of hanging). It
+        // has already synthesized placeholder tool results for this whole
+        // batch — falling through to push ours on top would duplicate every
+        // tool_call_id and the next provider request would 400.
+        if (this.aborted) return;
+
         // Loop breaker: the exact same batch of calls (name+args), repeated
         // 3 times in a row, means nothing is changing between attempts —
         // stop rather than keep burning turns on it.

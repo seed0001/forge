@@ -269,7 +269,10 @@ export class Project {
     this.terminal.setCwd(rootPath);
     // Sessions are keyed to the folder, so opening a new one swaps the history
     // entirely — stop whatever every old session's agent was doing first.
-    for (const rt of this.runtimes.values()) rt.agent?.stop();
+    for (const rt of this.runtimes.values()) {
+      rt.agent?.stop();
+      rt.terminal.kill();
+    }
     this.runtimes.clear();
     for (const rt of this.focusAgents.values()) rt.agent.stop();
     this.focusAgents.clear();
@@ -386,6 +389,7 @@ export class Project {
   deleteSession(sessionId: string) {
     const rt = this.runtimes.get(sessionId);
     rt?.agent?.stop();
+    rt?.terminal.kill();
     for (const [, entry] of rt?.pendingApprovals ?? []) entry.resolve(false);
     this.flushSubagentApprovalsFor(sessionId);
     this.runtimes.delete(sessionId);
@@ -723,6 +727,7 @@ export class Project {
     void this.persist();
     this.emitRoadmap(sessionId);
     rt.agent?.stop();
+    rt.terminal.kill();
   }
 
   /** No-op if that session's turn is already active, or nothing is approved and waiting. */
@@ -1025,6 +1030,7 @@ export class Project {
     const rt = this.focusAgents.get(id);
     if (!rt) return;
     rt.agent.stop();
+    this.runtimes.get(rt.sessionId)?.terminal.kill();
     rt.status = 'stopped';
     this.emitFocus();
   }
@@ -1283,6 +1289,11 @@ export class Project {
     if (!sessionId) return;
     const rt = this.runtimes.get(sessionId);
     rt?.agent?.stop();
+    // Stopping the agent aborts its LLM call but does nothing to a shell
+    // command it already kicked off — that keeps running headless and the
+    // tool call it belongs to never resolves. Kill it here so Stop actually
+    // stops everything.
+    rt?.terminal.kill();
     // A command stuck waiting on the Operator must not hang forever once the run itself is dead.
     if (rt) {
       for (const [, entry] of rt.pendingApprovals) entry.resolve(false);
@@ -1301,7 +1312,10 @@ export class Project {
   }
 
   dispose() {
-    for (const rt of this.runtimes.values()) rt.agent?.stop();
+    for (const rt of this.runtimes.values()) {
+      rt.agent?.stop();
+      rt.terminal.kill();
+    }
     for (const rt of this.focusAgents.values()) rt.agent.stop();
     this.terminal.kill();
   }

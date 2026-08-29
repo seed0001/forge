@@ -350,7 +350,7 @@ export interface TermDataEvent {
 
 export interface ActivityEvent {
   id: string;
-  kind: 'read' | 'list' | 'run' | 'propose' | 'search' | 'generate' | 'analyze' | 'thinking' | 'done' | 'stopped' | 'compact' | 'roadmap';
+  kind: 'read' | 'list' | 'run' | 'propose' | 'search' | 'generate' | 'analyze' | 'thinking' | 'done' | 'stopped' | 'compact' | 'roadmap' | 'narrate';
   detail: string;
   /**
    * 'skipped' is a benign non-result — a file that simply does not exist.

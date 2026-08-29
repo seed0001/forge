@@ -1377,6 +1377,7 @@ input, textarea { font: inherit; color: inherit; }
 }
 .proc-step-detail.open { white-space: normal; overflow: visible; word-break: break-word; }
 .proc-step.error .proc-step-detail { color: var(--red); }
+.proc-step.narrate .proc-step-detail { color: var(--fg-1); font-style: italic; }
 .proc-livedot { animation: breathe 1.6s ease-in-out infinite; }
 
 .proc-collapsed {

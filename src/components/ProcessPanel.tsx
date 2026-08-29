@@ -14,6 +14,7 @@ import {
   IconSearch,
   IconEdit,
   IconRoadmap,
+  IconMessages,
 } from './icons';
 
 function fmtElapsed(ms: number): string {
@@ -28,6 +29,8 @@ function EventIcon({ e }: { e: ActivityEvent }) {
   if (e.status === 'skipped') return <IconMinusCircle className="icon-xs" style={{ color: 'var(--fg-3)' }} />;
   if (e.status === 'active') return <IconDot className="icon-xs" style={{ color: 'var(--amber)' }} />;
   switch (e.kind) {
+    case 'narrate':
+      return <IconMessages className="icon-xs" style={{ color: 'var(--fg-2)' }} />;
     case 'read':
     case 'list':
     case 'analyze':
@@ -57,7 +60,7 @@ function EventRow({ e }: { e: ActivityEvent }) {
   const [open, setOpen] = useState(false);
   const long = e.detail.length > 64;
   return (
-    <div className={`proc-step ${e.status}`}>
+    <div className={`proc-step ${e.kind} ${e.status}`}>
       <button className="proc-step-head" onClick={() => long && setOpen((o) => !o)} style={{ cursor: long ? 'pointer' : 'default' }}>
         <EventIcon e={e} />
         <span className={`proc-step-detail${open ? ' open' : ''}`}>{e.detail}</span>

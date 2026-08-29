@@ -2,6 +2,10 @@
 
 Every released version of Forge, newest first. Dates are when the build went out.
 
+## 0.2.39 — 2026-08-29
+
+- **The agent narrates what it's about to do, right in the Activity trail.** It already sent a one-or-two-sentence "here's what I'm about to do and why" note to the chat before each batch of tool calls; that same statement of intent now also shows up as its own row in the Activity panel, inline with the tool calls it describes — so a long tool-call loop reads as a followable story instead of a wall of silent `read`/`grep`/`run` rows. The style guidance was tightened too: on a long run the agent is told to narrate *more* often, not less, and to say so whenever the picture changes (found it, hit a dead end, new plan, new sub-task) before acting on it.
+
 ## 0.2.38 — 2026-08-29
 
 - **Fixed "the total text input size exceeds 8 MB" when exploring a large codebase.** `read_file` returned the whole file with no size limit, and since every turn re-sends the full conversation, reading a handful of big source files could push the request past OpenRouter's 8 MB text ceiling — even when all you asked for was "look at the codebase." A single `read_file` result is now capped at 200,000 characters, with a note pointing the agent at `grep` for the rest. Every other content tool was already clamped; this one wasn't.

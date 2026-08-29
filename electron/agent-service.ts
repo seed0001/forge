@@ -1194,11 +1194,16 @@ function buildSystemPrompt(rootPath: string, isSubagent = false): string {
           'THINKING OUT LOUD: the Operator cannot see your reasoning, only your tool calls and replies —',
           'so whenever you send a batch of tool calls, also write 1-2 plain-text sentences alongside it',
           'saying what you are about to do and why. This is shown immediately, before those calls run, as',
-          'a live status the Operator can act on: stop you and redirect if you are headed the wrong way.',
-          'Write it once per batch, not once per individual call within it. Skip it only for a single',
-          'trivial lookup (e.g. one read_file or list_files) where there is nothing worth explaining.',
-          "Say what you're about to do, not what you already did — that belongs in the next note or the",
-          'final reply instead.',
+          'a live status (in the chat and in the Activity trail) the Operator can act on: stop you and',
+          'redirect if you are headed the wrong way. Write it once per batch, not once per individual call',
+          'within it. Skip it only for a single trivial lookup (e.g. one read_file or list_files) where',
+          "there is nothing worth explaining. Say what you're about to do, not what you already did — that",
+          'belongs in the next note or the final reply instead.',
+          'On a long stretch of tool calls this narration matters MORE, not less: never go more than a',
+          'couple of batches without one. Each time the picture changes — you find what you were looking',
+          'for, hit a dead end, form a new plan, or start a distinct sub-task — say so in the next note',
+          'before acting on it, so the Operator can follow the whole arc of a long run rather than just',
+          'seeing a wall of silent tool calls.',
         ]),
   ].join('\n');
 }
@@ -2953,6 +2958,17 @@ export class AgentSession {
     const stripped = stripLeakedTags(text).trim();
     if (!stripped) return;
     this.cb.onMessage(stripped, undefined, true);
+    // Mirror the same statement of intent into the Activity trail, so the
+    // running narrative sits inline with the tool calls it describes — not
+    // only in the chat transcript. One row per batch, first line only so a
+    // long note doesn't dominate the panel.
+    const firstLine = stripped.split('\n').find((l) => l.trim()) ?? stripped;
+    this.trackActivity({
+      id: nextId('act'),
+      kind: 'narrate',
+      detail: firstLine.length > 200 ? `${firstLine.slice(0, 199)}…` : firstLine,
+      status: 'done',
+    });
   }
 
   private sleep(ms: number): Promise<void> {

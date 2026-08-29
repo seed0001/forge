@@ -1970,6 +1970,18 @@ export class AgentSession {
         return `ERROR: could not read ${rel} — ${result.detail}. Do not assume anything about this file's contents.`;
       }
       if (result.content.trim() === '') return `(${rel} exists and is empty)`;
+      // Hard cap on a single read so one large file can't push the running
+      // conversation past a provider's request-text ceiling (OpenRouter: 8 MB).
+      // Every turn re-sends the full history, so an uncapped read compounds.
+      const READ_FILE_CHAR_CAP = 200_000;
+      if (result.content.length > READ_FILE_CHAR_CAP) {
+        const shown = result.content.slice(0, READ_FILE_CHAR_CAP);
+        return (
+          `Contents of ${rel} (truncated — showing the first ${READ_FILE_CHAR_CAP} of ` +
+          `${result.content.length} chars; use grep to find a specific section):\n` +
+          untrusted(shown)
+        );
+      }
       return `Contents of ${rel}:\n${untrusted(result.content)}`;
     }
 

@@ -2,6 +2,10 @@
 
 Every released version of Forge, newest first. Dates are when the build went out.
 
+## 0.2.38 — 2026-08-29
+
+- **Fixed "the total text input size exceeds 8 MB" when exploring a large codebase.** `read_file` returned the whole file with no size limit, and since every turn re-sends the full conversation, reading a handful of big source files could push the request past OpenRouter's 8 MB text ceiling — even when all you asked for was "look at the codebase." A single `read_file` result is now capped at 200,000 characters, with a note pointing the agent at `grep` for the rest. Every other content tool was already clamped; this one wasn't.
+
 ## 0.2.37 — 2026-08-29
 
 - **Codex CLI can actually write files now.** 0.2.36 shipped it clamped to read-only unless you were on Auto autonomy, and — worse — the sandbox was baked into the Codex thread on its first turn, so flipping the setting afterwards did nothing on resume. Codex now gets workspace write access at every autonomy level, re-applied on every turn (so a permission change takes effect on the very next message). Its edits land straight on disk (shown in Activity + AUDIT.md, undoable via git) — `codex exec` is non-interactive and can't wait on the per-hunk review queue. Set **File edits → Always deny** (or Shell commands → Always deny) under Settings › Permissions to force Codex read-only.

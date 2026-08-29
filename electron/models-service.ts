@@ -1,5 +1,12 @@
-import { CHAT_PROVIDERS, DEFAULT_LLAMACPP_BASE_URL, DEFAULT_OLLAMA_BASE_URL } from './ipc-channels';
+import {
+  CHAT_PROVIDERS,
+  DEFAULT_LLAMACPP_BASE_URL,
+  DEFAULT_OLLAMA_BASE_URL,
+  CODEX_MODELS,
+  CODEX_CONTEXT_WINDOW,
+} from './ipc-channels';
 import type { CatalogModel, ChatProvider } from './ipc-channels';
+import { resolveCodexBin, codexLoginStatus } from './codex-runner';
 
 const OPENROUTER_MODELS_URL = 'https://openrouter.ai/api/v1/models';
 const FAIRROUTER_MODELS_URL = 'https://fairrouter.ai/v1/models';
@@ -124,11 +131,38 @@ const PROVIDER_LABEL: Record<ChatProvider, string> = Object.fromEntries(
   CHAT_PROVIDERS.map((p) => [p.id, p.label])
 ) as Record<ChatProvider, string>;
 
+/**
+ * Codex CLI has no live catalog — it's a fixed short list, and the "fetch" is
+ * really a health check. A missing binary or a logged-out CLI is surfaced as a
+ * thrown error, which the model selector renders inline (and, since every
+ * other provider's fetch is independent, never blocks their models).
+ */
+async function fetchCodexModels(): Promise<CatalogModel[]> {
+  if (!resolveCodexBin()) {
+    throw new Error('Codex CLI not found — install it, or set CODEX_BIN in Settings, then refresh.');
+  }
+  const status = codexLoginStatus();
+  if (!status.ok) {
+    throw new Error(`Codex CLI: ${status.detail}`);
+  }
+  return CODEX_MODELS.map((id) => ({
+    id,
+    name: id === 'default' ? 'Codex default (account-selected)' : id,
+    description: 'OpenAI Codex CLI — runs on your ChatGPT/Codex subscription.',
+    contextLength: CODEX_CONTEXT_WINDOW,
+    promptPrice: 0,
+    completionPrice: 0,
+    isFree: true,
+    provider: 'codex' as ChatProvider,
+  }));
+}
+
 const FETCHERS: Record<ChatProvider, () => Promise<CatalogModel[]>> = {
   openrouter: fetchOpenRouterModels,
   fairrouter: fetchFairRouterModels,
   ollama: fetchLocalModels('ollama', 'OLLAMA_BASE_URL', DEFAULT_OLLAMA_BASE_URL),
   llamacpp: fetchLocalModels('llamacpp', 'LLAMACPP_BASE_URL', DEFAULT_LLAMACPP_BASE_URL),
+  codex: fetchCodexModels,
 };
 
 async function listProviderModels(provider: ChatProvider, forceRefresh: boolean): Promise<CatalogModel[]> {

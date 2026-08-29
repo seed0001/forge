@@ -160,6 +160,7 @@ export interface ForgeApi {
     getCurrent: () => Promise<{ provider: ChatProvider; model: string }>;
     setCurrent: (modelId: string, provider: ChatProvider) => Promise<boolean>;
     setProvider: (provider: ChatProvider) => Promise<{ provider: ChatProvider; model: string }>;
+    codexLoginStatus: () => Promise<{ ok: boolean; detail: string }>;
   };
   reasoning: {
     getCurrent: () => Promise<ReasoningLevel>;

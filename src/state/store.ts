@@ -223,6 +223,9 @@ interface ForgeState {
   /** How hard the model reasons per turn — global, like the model choice. */
   reasoningLevel: ReasoningLevel;
 
+  /** Codex CLI install/login state, checked lazily (provider picker + Settings). null = not checked yet. */
+  codexLogin: { ok: boolean; detail: string } | null;
+
   /** Manual-only, app-wide — see electron/updater.ts for why nothing here runs on its own. */
   updateStatus: UpdateStatus;
 
@@ -271,6 +274,7 @@ interface ForgeState {
   setModel: (modelId: string, provider: ChatProvider) => Promise<void>;
   selectProvider: (provider: ChatProvider) => Promise<void>;
   setReasoningLevel: (level: ReasoningLevel) => Promise<void>;
+  checkCodexLogin: () => Promise<void>;
 
   checkForUpdates: () => Promise<void>;
   downloadUpdate: () => Promise<void>;
@@ -412,6 +416,7 @@ export const useForge = create<ForgeState>((set, get) => {
     modelsError: null,
     modelsLoadedOnce: false,
     reasoningLevel: 'flash',
+    codexLogin: null,
 
     updateStatus: { state: 'idle' },
     portalStatus: { state: 'disabled' },
@@ -883,6 +888,15 @@ export const useForge = create<ForgeState>((set, get) => {
       set({ currentProvider: provider, currentModel: '' });
       const result = await forge.models.setProvider(provider);
       set({ currentProvider: result.provider, currentModel: result.model });
+      if (result.provider === 'codex') void get().checkCodexLogin();
+    },
+
+    checkCodexLogin: async () => {
+      try {
+        set({ codexLogin: await forge.models.codexLoginStatus() });
+      } catch (err) {
+        set({ codexLogin: { ok: false, detail: err instanceof Error ? err.message : String(err) } });
+      }
     },
 
     setReasoningLevel: async (level) => {

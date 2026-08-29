@@ -16,6 +16,7 @@ import {
   reasoningRequestField,
 } from './chat-provider';
 import type { ChatProviderConfig } from './chat-provider';
+import { runCodexTurn, type CodexHandle, type CodexSandbox } from './codex-runner';
 import { matchesAllowlist, isShellChained } from './perm-store';
 import {
   fetchJsonGuarded,
@@ -54,7 +55,7 @@ import type {
   ProjectBudget,
   ReasoningLevel,
 } from './ipc-channels';
-import { MAX_TOOL_CALLS_DEFAULT, MAX_TOOL_CALLS_LIMIT } from './ipc-channels';
+import { MAX_TOOL_CALLS_DEFAULT, MAX_TOOL_CALLS_LIMIT, CODEX_CONTEXT_WINDOW } from './ipc-channels';
 import type { BugReportInput } from './bug-store';
 
 type Role = 'system' | 'user' | 'assistant' | 'tool';
@@ -1297,6 +1298,15 @@ export class AgentSession {
   /** True once this send() has announced "we hit the budget", so it says it once and then stops rather than every turn. */
   private budgetStopIssued = false;
 
+  /**
+   * The Codex CLI thread id for this session, once it has run on the `codex`
+   * provider — persisted (see project.ts) so follow-ups resume the same Codex
+   * thread. Null until the first Codex turn's `thread.started` event.
+   */
+  private codexThreadId: string | null = null;
+  /** The in-flight Codex child process handle, so stop() can kill it. Null when no Codex turn is running. */
+  private codexChild: CodexHandle | null = null;
+
   constructor(
     rootPath: string,
     cb: AgentCallbacks,
@@ -1347,6 +1357,16 @@ export class AgentSession {
   restoreHistory(history: Record<string, unknown>[]) {
     const preamble = this.messages.filter((m) => m.role === 'system');
     this.messages = [...preamble, ...(history as unknown as Message[])];
+  }
+
+  /** The Codex CLI thread id to persist with this session (null if it has never run on the codex provider). */
+  exportCodexThreadId(): string | null {
+    return this.codexThreadId;
+  }
+
+  /** Restore the persisted Codex thread id so the next codex turn resumes it. */
+  restoreCodexThreadId(id: string | null) {
+    this.codexThreadId = id;
   }
 
   /**
@@ -1742,6 +1762,9 @@ export class AgentSession {
   stop() {
     this.aborted = true;
     this.controller?.abort();
+    // A Codex turn is a subprocess, not a fetch — abort() doesn't touch it.
+    this.codexChild?.kill();
+    this.codexChild = null;
     // Subagents run their own independent loop and API calls — aborting only
     // this session's controller left them running unsupervised forever.
     for (const sub of this.activeSubagents) sub.stop();
@@ -2682,6 +2705,9 @@ export class AgentSession {
   async generateTitle(): Promise<string | null> {
     const cfg = resolveChatProvider();
     if (!cfg) return null;
+    // Codex has no plain chat-completions endpoint to ask for a title — the
+    // caller keeps its titleFrom(firstMessage) fallback.
+    if (cfg.provider === 'codex') return null;
 
     const firstUser = this.messages.find((m) => m.role === 'user');
     const firstReply = this.messages.find((m) => m.role === 'assistant' && typeof m.content === 'string' && m.content);
@@ -3078,6 +3104,56 @@ export class AgentSession {
     }
   }
 
+  /**
+   * One turn on the Codex CLI provider. Shells out to `codex exec --json`
+   * (resuming this session's thread if it has one), maps Codex's JSONL events
+   * onto the activity trail / terminal / chat, and remembers the new thread id.
+   * Codex does its own file edits on disk — in workspace-write mode they do
+   * NOT pass through Forge's diff-review queue, so that mode is only granted
+   * when Forge is already auto-applying edits (Auto autonomy).
+   */
+  private async runCodexTurn(userText: string, cfg: ChatProviderConfig) {
+    const editPerm = this.cb.getPermission('edit');
+    const bashPerm = this.cb.getPermission('bash');
+    const sandbox: CodexSandbox =
+      editPerm === 'allow' && bashPerm !== 'deny' ? 'workspace-write' : 'read-only';
+
+    const { done, handle } = runCodexTurn({
+      rootPath: this.rootPath,
+      prompt: userText,
+      threadId: this.codexThreadId,
+      sandbox,
+      model: cfg.model || undefined,
+      reasoning: cfg.reasoning,
+      isAborted: () => this.aborted,
+      onThreadId: (id) => {
+        this.codexThreadId = id;
+      },
+      onActivity: (evt) => this.trackActivity(evt),
+      onTerminal: (evt) => this.cb.onTerminal(evt),
+    });
+    this.codexChild = handle;
+
+    try {
+      const result = await done;
+      if (this.aborted) {
+        this.trackActivity({ id: nextId('act'), kind: 'stopped', detail: 'Stopped', status: 'error' });
+        return;
+      }
+      if (typeof result.promptTokens === 'number') {
+        this.cb.onUsage({ promptTokens: result.promptTokens, contextWindow: CODEX_CONTEXT_WINDOW });
+      }
+      if (result.error) {
+        this.trackActivity({ id: nextId('act'), kind: 'stopped', detail: 'Codex turn failed', status: 'error' });
+        this.flushMessage(result.error);
+        return;
+      }
+      this.flushMessage(result.text || '(Codex returned no text)');
+    } finally {
+      this.codexChild = null;
+    }
+  }
+
   private async runTurnLoop(
     userText: string,
     images?: ChatImage[],
@@ -3136,6 +3212,14 @@ export class AgentSession {
         'No model selected. Pick one from the model selector at the top of the chat pane, and make sure that ' +
           "provider's API key is set in Settings (or forge/.env)."
       );
+      this.cb.onStatus(false);
+      return;
+    }
+
+    // Codex CLI is a subprocess agent with its own tool loop — none of the
+    // message-array / tools / compaction / retry machinery below applies.
+    if (cfg.provider === 'codex') {
+      await this.runCodexTurn(userText, cfg);
       this.cb.onStatus(false);
       return;
     }

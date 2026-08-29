@@ -124,6 +124,27 @@ const PROVIDERS: ProviderDef[] = [
     ],
   },
   {
+    id: 'codex',
+    name: 'Codex CLI',
+    category: 'models',
+    blurb:
+      'OpenAI Codex CLI as a provider — it runs its own sandboxed agent loop as a subprocess. Authenticate ' +
+      'by running `codex login` in a terminal (it uses your ChatGPT/Codex subscription; do NOT set ' +
+      'CODEX_API_KEY). In Auto autonomy it can write files directly to disk, outside the diff-review queue; ' +
+      'otherwise it runs read-only.',
+    linkLabel: 'developers.openai.com/codex/cli',
+    linkHref: 'https://developers.openai.com/codex/cli',
+    fields: [
+      {
+        key: 'CODEX_BIN',
+        label: 'Binary path (optional)',
+        placeholder: 'Auto-detected — set only if `codex` is not on PATH',
+        secret: false,
+        required: false,
+      },
+    ],
+  },
+  {
     id: 'search',
     name: 'Web search',
     category: 'search',
@@ -180,6 +201,7 @@ const EMPTY: ProviderSettings = {
   OLLAMA_API_KEY: '',
   LLAMACPP_BASE_URL: '',
   LLAMACPP_API_KEY: '',
+  CODEX_BIN: '',
   SEARCH_API: '',
   TRANSCRIBE_API_KEY: '',
   TRANSCRIBE_BASE_URL: '',
@@ -207,6 +229,9 @@ export function SettingsOverlay() {
   const removeAllowlistPattern = useForge((s) => s.removeAllowlistPattern);
   const [allowlistDraft, setAllowlistDraft] = useState('');
 
+  const codexLogin = useForge((s) => s.codexLogin);
+  const checkCodexLogin = useForge((s) => s.checkCodexLogin);
+
   const [draft, setDraft] = useState<ProviderSettings>(EMPTY);
   const [revealed, setRevealed] = useState<Set<string>>(new Set());
   const [justSaved, setJustSaved] = useState(false);
@@ -215,6 +240,10 @@ export function SettingsOverlay() {
   useEffect(() => {
     if (saved) setDraft(saved);
   }, [saved]);
+
+  useEffect(() => {
+    if (open && category === 'models') void checkCodexLogin();
+  }, [open, category, checkCodexLogin]);
 
   const ttsProvider = (draft.TTS_PROVIDER as TtsProvider) || 'edge';
   const ttsVoiceKey =
@@ -349,6 +378,27 @@ export function SettingsOverlay() {
                 )}
               </div>
               <div className="settings-section-blurb">{provider.blurb}</div>
+
+              {provider.id === 'codex' && (
+                <div className="row" style={{ gap: 'var(--s2)', margin: 'var(--s2) 0' }}>
+                  <span
+                    className="settings-dot"
+                    style={{ background: codexLogin?.ok ? 'var(--green)' : 'var(--fg-3)' }}
+                  />
+                  <span className="settings-section-blurb" style={{ margin: 0 }}>
+                    {codexLogin ? codexLogin.detail : 'Checking Codex CLI…'}
+                  </span>
+                  <button
+                    type="button"
+                    className="settings-eye"
+                    onClick={() => void checkCodexLogin()}
+                    title="Re-check"
+                    tabIndex={-1}
+                  >
+                    <IconRefresh className="icon-xs" />
+                  </button>
+                </div>
+              )}
 
               {provider.fields.map((field) => {
                 const shown = revealed.has(field.key);

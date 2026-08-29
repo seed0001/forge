@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useForge } from '../state/store';
-import { LOCAL_CHAT_PROVIDERS } from '../../electron/ipc-channels';
+import { LOCAL_CHAT_PROVIDERS, AGENT_CLI_PROVIDERS } from '../../electron/ipc-channels';
 import { IconCheck, IconCpu, IconRefresh, IconSearch } from './icons';
 
 type Filter = 'all' | 'free' | 'paid';
@@ -131,9 +131,11 @@ export function ModelSelector() {
             )}
             {!modelsLoading && !modelsError && providerModels.length === 0 && (
               <div className="modelmenu-note">
-                {LOCAL_CHAT_PROVIDERS.has(currentProvider)
-                  ? "No models found — make sure it's running and reachable at the base URL set in Settings."
-                  : "No models yet — add this provider's API key in Settings."}
+                {AGENT_CLI_PROVIDERS.has(currentProvider)
+                  ? 'Codex CLI must be installed and logged in — run `codex login` in a terminal, then refresh.'
+                  : LOCAL_CHAT_PROVIDERS.has(currentProvider)
+                    ? "No models found — make sure it's running and reachable at the base URL set in Settings."
+                    : "No models yet — add this provider's API key in Settings."}
               </div>
             )}
             {!modelsLoading && !modelsError && providerModels.length > 0 && filtered.length === 0 && (

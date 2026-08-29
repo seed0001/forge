@@ -92,6 +92,7 @@ export const IPC = {
   providerSet: 'provider:set',
   reasoningGetCurrent: 'reasoning:get-current',
   reasoningSetCurrent: 'reasoning:set-current',
+  codexLoginStatus: 'codex:login-status',
 
   auditRead: 'audit:read',
 
@@ -420,8 +421,14 @@ export interface RoadmapItem {
   notes?: string;
 }
 
-/** Which chat-completion backend a model/request belongs to. */
-export type ChatProvider = 'openrouter' | 'fairrouter' | 'ollama' | 'llamacpp';
+/**
+ * Which backend a model/request belongs to. All but `codex` are
+ * OpenAI-compatible chat-completions endpoints the agent loop talks to
+ * directly; `codex` is the OpenAI Codex CLI, a subprocess agent that runs its
+ * own tool loop (see electron/codex-runner.ts) and is driven completely
+ * differently — see AGENT_CLI_PROVIDERS.
+ */
+export type ChatProvider = 'openrouter' | 'fairrouter' | 'ollama' | 'llamacpp' | 'codex';
 
 /**
  * Chat providers available in the provider/model pickers, in display order.
@@ -433,10 +440,30 @@ export const CHAT_PROVIDERS: { id: ChatProvider; label: string }[] = [
   { id: 'fairrouter', label: 'FairRouter' },
   { id: 'ollama', label: 'Ollama' },
   { id: 'llamacpp', label: 'llama.cpp' },
+  { id: 'codex', label: 'Codex CLI' },
 ];
 
 /** Local runtimes on the machine's own hardware — no API key required, no per-token cost. */
 export const LOCAL_CHAT_PROVIDERS = new Set<ChatProvider>(['ollama', 'llamacpp']);
+
+/**
+ * Providers that are not an HTTP chat-completions endpoint at all but a local
+ * CLI agent driven as a subprocess — the normal agent loop (message array,
+ * tools, compaction, dollar-cost accounting) does not apply; see
+ * electron/codex-runner.ts and AgentSession.runCodexTurn.
+ */
+export const AGENT_CLI_PROVIDERS = new Set<ChatProvider>(['codex']);
+
+/**
+ * Codex CLI model options in the selector. `--model` is optional and, on a
+ * ChatGPT/Codex-subscription login, explicit model slugs are rejected outright
+ * — so the default option is a sentinel meaning "let Codex pick" (no `-m`
+ * passed). Advanced users on an API-key setup can still override with a real
+ * slug via the CODEX_MODEL env var / Settings.
+ */
+export const CODEX_DEFAULT_MODEL = 'default';
+export const CODEX_MODELS = [CODEX_DEFAULT_MODEL] as const;
+export const CODEX_CONTEXT_WINDOW = 272_000;
 
 /** Per-provider env var holding which model is currently selected for it — each provider remembers its own last pick independently. */
 export const MODEL_ENV_KEY: Record<ChatProvider, string> = {
@@ -444,6 +471,7 @@ export const MODEL_ENV_KEY: Record<ChatProvider, string> = {
   fairrouter: 'FAIRROUTER_MODEL',
   ollama: 'OLLAMA_MODEL',
   llamacpp: 'LLAMACPP_MODEL',
+  codex: 'CODEX_MODEL',
 };
 
 /**
@@ -565,6 +593,8 @@ export interface ProviderSettings {
   OLLAMA_API_KEY: string;
   LLAMACPP_BASE_URL: string;
   LLAMACPP_API_KEY: string;
+  /** Optional path to the Codex CLI binary — blank means auto-discover (PATH, then the default install location). */
+  CODEX_BIN: string;
   SEARCH_API: string;
   TRANSCRIBE_API_KEY: string;
   TRANSCRIBE_BASE_URL: string;
@@ -586,6 +616,7 @@ export const SETTINGS_KEYS = [
   'OLLAMA_API_KEY',
   'LLAMACPP_BASE_URL',
   'LLAMACPP_API_KEY',
+  'CODEX_BIN',
   'SEARCH_API',
   'TRANSCRIBE_API_KEY',
   'TRANSCRIBE_BASE_URL',

@@ -133,6 +133,7 @@ contextBridge.exposeInMainWorld('forge', {
     getCurrent: () => ipcRenderer.invoke(IPC.modelsGetCurrent),
     setCurrent: (modelId: string, provider: ChatProvider) => ipcRenderer.invoke(IPC.modelsSetCurrent, modelId, provider),
     setProvider: (provider: ChatProvider) => ipcRenderer.invoke(IPC.providerSet, provider),
+    codexLoginStatus: (): Promise<{ ok: boolean; detail: string }> => ipcRenderer.invoke(IPC.codexLoginStatus),
   },
   reasoning: {
     getCurrent: (): Promise<ReasoningLevel> => ipcRenderer.invoke(IPC.reasoningGetCurrent),

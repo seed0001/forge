@@ -8,6 +8,7 @@ import {
   REASONING_EFFORT,
   DEFAULT_REASONING_LEVEL,
   LOCAL_CHAT_PROVIDERS,
+  CODEX_DEFAULT_MODEL,
 } from './ipc-channels';
 import type { ChatProvider, ReasoningLevel } from './ipc-channels';
 
@@ -27,6 +28,8 @@ const API_KEY_ENV_KEY: Record<ChatProvider, string> = {
   fairrouter: 'FAIRROUTER_API_KEY',
   ollama: 'OLLAMA_API_KEY',
   llamacpp: 'LLAMACPP_API_KEY',
+  // Codex authenticates via `codex login` (subscription), never an env key.
+  codex: '',
 };
 
 /** Only these two need a real credential before they're usable — local runtimes don't. */
@@ -81,6 +84,9 @@ export function chatUrlFor(provider: ChatProvider): string {
       return (process.env.OLLAMA_BASE_URL || DEFAULT_OLLAMA_BASE_URL).replace(/\/+$/, '') + '/chat/completions';
     case 'llamacpp':
       return (process.env.LLAMACPP_BASE_URL || DEFAULT_LLAMACPP_BASE_URL).replace(/\/+$/, '') + '/chat/completions';
+    case 'codex':
+      // Not an HTTP endpoint — Codex turns never fetch a URL (see codex-runner.ts).
+      return '';
   }
 }
 
@@ -108,6 +114,18 @@ export function chatHeaders(provider: ChatProvider, apiKey: string): Record<stri
  */
 export function resolveChatProvider(): ChatProviderConfig | null {
   const provider = activeProviderId();
+  // Codex CLI is a subprocess agent, not a chat endpoint — it's always
+  // resolvable once selected (no URL, no key, `--model` optional), and the
+  // turn runs through AgentSession.runCodexTurn rather than the normal loop.
+  if (provider === 'codex') {
+    return {
+      provider,
+      url: '',
+      apiKey: '',
+      model: process.env[MODEL_ENV_KEY.codex] || CODEX_DEFAULT_MODEL,
+      reasoning: activeReasoningLevel(),
+    };
+  }
   const model = process.env[MODEL_ENV_KEY[provider]] || '';
   if (!model) return null;
   const apiKey = process.env[API_KEY_ENV_KEY[provider]] || '';

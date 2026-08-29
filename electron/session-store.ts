@@ -31,6 +31,12 @@ export interface Session {
   elapsedMs?: number;
   /** How many times this session's conversation has been auto-compacted. */
   compactionCount?: number;
+  /**
+   * The Codex CLI thread/session id, when this session has been run on the
+   * `codex` provider — persisted so a follow-up turn (even after an app
+   * restart) resumes the same Codex thread via `codex exec resume <id>`.
+   */
+  codexThreadId?: string | null;
 }
 
 export interface SessionSummary {

@@ -2,6 +2,10 @@
 
 Every released version of Forge, newest first. Dates are when the build went out.
 
+## 0.2.36 — 2026-08-29
+
+- **Codex CLI is a provider now.** Pick "Codex CLI" from the provider dropdown and your turns run through OpenAI's `codex exec` instead of a chat-completions API — it uses your ChatGPT/Codex subscription (run `codex login` once in a terminal; nothing to paste into Settings). Codex runs its own sandboxed agent loop; its commands, reasoning, and file edits stream into the Activity panel, and each session remembers its Codex thread across turns and restarts. In **Auto** autonomy Codex writes files straight to disk (it can't be held for diff review — that's how `codex exec` works); in Manual/Balanced it stays read-only. Optional `CODEX_BIN` in Settings if `codex` isn't on your PATH.
+
 ## 0.2.35 — 2026-08-28
 
 - **The agent can no longer hang the turn on a bad `grep` pattern.** A regex from the model now runs on a separate thread that's killed after 4 seconds — a catastrophic-backtracking pattern comes back as an error the agent can react to instead of freezing the run with no way out.

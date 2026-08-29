@@ -41,6 +41,7 @@ import { readAuditLog } from './audit-service';
 import { WorkspaceManager } from './workspace-manager';
 import { saveAttachment, attachmentDirFor, readImageAsDataUrl } from './attachment-store';
 import { listCatalogModels } from './models-service';
+import { codexLoginStatus } from './codex-runner';
 import { initUpdater, checkForUpdates, downloadUpdate, installUpdate } from './updater';
 import { BrowserViewManager } from './browser-view-manager';
 import { loadPermissionOverrides, savePermissionOverrides, loadBashAllowlist, saveBashAllowlist } from './perm-store';
@@ -793,6 +794,12 @@ app.whenReady().then(async () => {
     process.env[REASONING_ENV_KEY] = next;
     setEnvValue(envFile, REASONING_ENV_KEY, next);
     return next;
+  });
+
+  // Whether the Codex CLI is installed and logged in — drives the Settings
+  // indicator and helps explain an empty Codex model list.
+  ipcMain.handle(IPC.codexLoginStatus, async (): Promise<{ ok: boolean; detail: string }> => {
+    return codexLoginStatus();
   });
 
   // The in-app Audit view: parse this workspace's AUDIT.md so the Operator

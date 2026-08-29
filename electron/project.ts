@@ -437,6 +437,7 @@ export class Project {
       const session = this.sessions.find((s) => s.id === sessionId);
       if (session) {
         session.messages = rt.agent.exportHistory();
+        session.codexThreadId = rt.agent.exportCodexThreadId();
         session.updatedAt = Date.now();
       }
     }
@@ -1300,7 +1301,10 @@ export class Project {
         startFocusAgent: (task, label, budgetMinutes) => this.startFocusAgent(task, label, budgetMinutes),
       }, false, findSession()?.title, this.workspaceLink);
       const session = findSession();
-      if (session) rt.agent.restoreHistory(session.messages);
+      if (session) {
+        rt.agent.restoreHistory(session.messages);
+        rt.agent.restoreCodexThreadId(session.codexThreadId ?? null);
+      }
     }
     return rt.agent;
   }

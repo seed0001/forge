@@ -3108,15 +3108,20 @@ export class AgentSession {
    * One turn on the Codex CLI provider. Shells out to `codex exec --json`
    * (resuming this session's thread if it has one), maps Codex's JSONL events
    * onto the activity trail / terminal / chat, and remembers the new thread id.
-   * Codex does its own file edits on disk — in workspace-write mode they do
-   * NOT pass through Forge's diff-review queue, so that mode is only granted
-   * when Forge is already auto-applying edits (Auto autonomy).
+   *
+   * Codex runs its own sandbox + approval loop and, under `codex exec`, is
+   * non-interactive — it can't hand an edit to Forge's diff-review queue and
+   * wait, the way the built-in tools do. So Codex gets write access to the
+   * workspace by default (Manual/Balanced/Auto all allow it to actually do
+   * its job); it's clamped to read-only ONLY when the Operator has explicitly
+   * set the File edits (or Shell commands) permission to "Always deny" for
+   * this project. Its edits land straight on disk — visible in the Activity
+   * panel and AUDIT.md, undoable via git, but not held for per-hunk review.
    */
   private async runCodexTurn(userText: string, cfg: ChatProviderConfig) {
-    const editPerm = this.cb.getPermission('edit');
-    const bashPerm = this.cb.getPermission('bash');
-    const sandbox: CodexSandbox =
-      editPerm === 'allow' && bashPerm !== 'deny' ? 'workspace-write' : 'read-only';
+    const editDenied = this.cb.getPermission('edit') === 'deny';
+    const bashDenied = this.cb.getPermission('bash') === 'deny';
+    const sandbox: CodexSandbox = editDenied || bashDenied ? 'read-only' : 'workspace-write';
 
     const { done, handle } = runCodexTurn({
       rootPath: this.rootPath,

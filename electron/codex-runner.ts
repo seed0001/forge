@@ -187,20 +187,24 @@ export function runCodexTurn(opts: CodexTurnOptions): { done: Promise<CodexTurnR
 
     const args = opts.threadId
       ? ['exec', 'resume', opts.threadId, '--json', '--skip-git-repo-check']
-      : ['exec', '--json', '--sandbox', opts.sandbox, '--skip-git-repo-check'];
+      : ['exec', '--json', '--skip-git-repo-check'];
     // 'default'/'' means "let Codex choose" — a subscription login rejects
     // explicit slugs, so only forward a real one.
     if (opts.model && opts.model !== 'default') args.push('-m', opts.model);
-    // `--sandbox` is rejected after `resume`; the first turn's sandbox sticks
-    // for the life of the thread, which is fine — autonomy rarely changes
-    // mid-conversation and a fresh thread picks up any change.
+    // Sandbox is passed as a `-c` override rather than the `--sandbox` flag:
+    // `--sandbox` is rejected outright by `exec resume`, and even on a fresh
+    // thread the flag's value would be baked into the thread so a later
+    // permission change couldn't take effect on resume. `-c sandbox_mode=…`
+    // works on both paths and is re-applied every turn, so flipping the File
+    // edits permission is honoured on the very next message.
+    args.push('-c', `sandbox_mode="${opts.sandbox}"`);
     args.push('-c', `model_reasoning_effort="${REASONING_EFFORT[opts.reasoning]}"`, '-');
 
     void audit(
       opts.rootPath,
       'request',
       `codex ${opts.threadId ? 'resume' : 'exec'}${opts.model ? ` · ${opts.model}` : ''}`,
-      `sandbox ${opts.threadId ? '(inherited)' : opts.sandbox} · effort ${REASONING_EFFORT[opts.reasoning]}`
+      `sandbox ${opts.sandbox} · effort ${REASONING_EFFORT[opts.reasoning]}`
     );
 
     const child = spawn(bin, args, {

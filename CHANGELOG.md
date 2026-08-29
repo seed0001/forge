@@ -2,9 +2,13 @@
 
 Every released version of Forge, newest first. Dates are when the build went out.
 
+## 0.2.37 — 2026-08-29
+
+- **Codex CLI can actually write files now.** 0.2.36 shipped it clamped to read-only unless you were on Auto autonomy, and — worse — the sandbox was baked into the Codex thread on its first turn, so flipping the setting afterwards did nothing on resume. Codex now gets workspace write access at every autonomy level, re-applied on every turn (so a permission change takes effect on the very next message). Its edits land straight on disk (shown in Activity + AUDIT.md, undoable via git) — `codex exec` is non-interactive and can't wait on the per-hunk review queue. Set **File edits → Always deny** (or Shell commands → Always deny) under Settings › Permissions to force Codex read-only.
+
 ## 0.2.36 — 2026-08-29
 
-- **Codex CLI is a provider now.** Pick "Codex CLI" from the provider dropdown and your turns run through OpenAI's `codex exec` instead of a chat-completions API — it uses your ChatGPT/Codex subscription (run `codex login` once in a terminal; nothing to paste into Settings). Codex runs its own sandboxed agent loop; its commands, reasoning, and file edits stream into the Activity panel, and each session remembers its Codex thread across turns and restarts. In **Auto** autonomy Codex writes files straight to disk (it can't be held for diff review — that's how `codex exec` works); in Manual/Balanced it stays read-only. Optional `CODEX_BIN` in Settings if `codex` isn't on your PATH.
+- **Codex CLI is a provider now.** Pick "Codex CLI" from the provider dropdown and your turns run through OpenAI's `codex exec` instead of a chat-completions API — it uses your ChatGPT/Codex subscription (run `codex login` once in a terminal; nothing to paste into Settings). Codex runs its own sandboxed agent loop; its commands, reasoning, and file edits stream into the Activity panel, and each session remembers its Codex thread across turns and restarts. Optional `CODEX_BIN` in Settings if `codex` isn't on your PATH.
 
 ## 0.2.35 — 2026-08-28
 

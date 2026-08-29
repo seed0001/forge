@@ -130,8 +130,9 @@ const PROVIDERS: ProviderDef[] = [
     blurb:
       'OpenAI Codex CLI as a provider — it runs its own sandboxed agent loop as a subprocess. Authenticate ' +
       'by running `codex login` in a terminal (it uses your ChatGPT/Codex subscription; do NOT set ' +
-      'CODEX_API_KEY). In Auto autonomy it can write files directly to disk, outside the diff-review queue; ' +
-      'otherwise it runs read-only.',
+      'CODEX_API_KEY). Codex writes to the workspace at every autonomy level — its edits go straight to disk ' +
+      '(shown in Activity and AUDIT.md, undoable via git), not the per-hunk review queue. Set File edits → ' +
+      'Always deny under Permissions to force it read-only.',
     linkLabel: 'developers.openai.com/codex/cli',
     linkHref: 'https://developers.openai.com/codex/cli',
     fields: [

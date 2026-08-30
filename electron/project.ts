@@ -30,6 +30,7 @@ import type {
   ProjectBudget,
   WorkspaceKind,
   Autonomy,
+  Mode,
   RoadmapItem,
   RoadmapItemStatus,
   SubagentCommandApproval,
@@ -58,11 +59,21 @@ const AUTONOMY_PERMISSION_DEFAULTS: Record<PermissionCategory, Record<Autonomy, 
 };
 
 /**
- * How a category resolves for the current turn: an explicit Operator
- * override (set in Settings) always wins; otherwise it falls back to the
- * table above, keyed by the workspace's own autonomy level.
+ * How a category resolves for the current turn:
+ *
+ * 1. Plan mode hard-denies the two write categories ('bash', 'edit')
+ *    outright — this beats every autonomy level and every Operator override,
+ *    because Plan mode's whole point is that nothing gets changed. 'webfetch'
+ *    (research) is left to resolve normally.
+ * 2. Otherwise an explicit Operator override (set in Settings) always wins.
+ * 3. Otherwise it falls back to the table above, keyed by the autonomy level.
  */
-export function resolvePermission(category: PermissionCategory, autonomy: Autonomy): PermissionLevel {
+export function resolvePermission(
+  category: PermissionCategory,
+  autonomy: Autonomy,
+  mode: Mode = 'build'
+): PermissionLevel {
+  if (mode === 'plan' && (category === 'bash' || category === 'edit')) return 'deny';
   const override = getCachedPermissionOverrides()[category];
   return override ?? AUTONOMY_PERMISSION_DEFAULTS[category][autonomy];
 }
@@ -217,6 +228,13 @@ export class Project {
   unseenCompletion = false;
   /** How much this workspace's agents may do before they must stop and ask — shared across every session, since they all act on the same project on disk. */
   autonomy: Autonomy = 'balanced';
+  /**
+   * Plan (read + research only) vs Build (full access). Every project starts in
+   * Plan so a session begins by gathering requirements; the Operator flips it to
+   * Build from the composer when ready. Runtime-only, like autonomy — resets to
+   * 'plan' on restart.
+   */
+  mode: Mode = 'plan';
   /** null until the Operator picks Coding or Browsing from the chooser screen. */
   kind: WorkspaceKind | null = null;
   /** Where a Browsing workspace saves markdown clips — deliberately separate from rootPath (which reloads sessions when changed); picking this never touches chat/sessions. */
@@ -495,6 +513,7 @@ export class Project {
       unseenCompletion: this.unseenCompletion,
       activeSessionId: this.activeSessionId,
       autonomy: this.autonomy,
+      mode: this.mode,
       budget: this.budget,
       runningSessionIds: this.runningSessionIds,
       kind: this.kind,
@@ -504,6 +523,11 @@ export class Project {
 
   setAutonomy(level: Autonomy) {
     this.autonomy = level;
+    this.emit.status(this.id);
+  }
+
+  setMode(mode: Mode) {
+    this.mode = mode;
     this.emit.status(this.id);
   }
 
@@ -1139,7 +1163,8 @@ export class Project {
         setBudget: (limitUsd, allowOverage) => this.setBudget(limitUsd, allowOverage),
         runShell: (requestId, command) =>
           this.runtime(sessionId).terminal.run(requestId, 'agent', command, (evt) => this.recordTerminal(evt)),
-        getPermission: (category) => resolvePermission(category, this.autonomy),
+        getPermission: (category) => resolvePermission(category, this.autonomy, this.mode),
+        getMode: () => this.mode,
         requestActionApproval: (category, description) => this.requestApproval(sessionId, description, category),
         getBashAllowlist: () => getCachedBashAllowlist(),
         requestSubagentCommandApproval: (command, subLabel) => this.requestSubagentApproval(sessionId, command, subLabel),
@@ -1287,7 +1312,8 @@ export class Project {
         setBudget: (limitUsd, allowOverage) => this.setBudget(limitUsd, allowOverage),
         runShell: (requestId, command) =>
           rt.terminal.run(requestId, 'agent', command, (evt) => this.recordTerminal(evt)),
-        getPermission: (category) => resolvePermission(category, this.autonomy),
+        getPermission: (category) => resolvePermission(category, this.autonomy, this.mode),
+        getMode: () => this.mode,
         requestActionApproval: (category, description) =>
           this.isAlwaysAllowed(sessionId, category) ? Promise.resolve(true) : this.requestApproval(sessionId, description, category),
         getBashAllowlist: () => getCachedBashAllowlist(),

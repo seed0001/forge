@@ -807,6 +807,26 @@ input, textarea { font: inherit; color: inherit; }
 .composer-img-remove:hover { background: var(--red-bg); color: var(--red); }
 
 .chiprow { display: flex; align-items: center; gap: var(--s2); margin-top: 10px; }
+
+/* Plan / Build — a two-segment pill in the composer chiprow. Plan reads as the
+   quiet default; Build lights up amber to signal "he can change things now". */
+.modetoggle {
+  display: inline-flex; height: 28px; border-radius: 9px; overflow: hidden;
+  border: 1px solid var(--line); background: var(--bg-raised);
+}
+.modetoggle-seg {
+  display: flex; align-items: center; gap: var(--s1);
+  height: 100%; padding: 0 10px;
+  font-size: var(--t-xs); font-weight: 600; color: var(--fg-3);
+  transition: color 120ms ease, background 120ms ease;
+}
+.modetoggle-seg:hover { color: var(--fg); background: var(--bg-hover); }
+.modetoggle-seg + .modetoggle-seg { border-left: 1px solid var(--line); }
+.modetoggle-seg.on { color: var(--fg); background: var(--bg-active); }
+.modetoggle-seg.on:last-child {
+  background: var(--amber-bg); color: var(--amber);
+}
+
 .chip {
   height: 22px; padding: 0 var(--s2); border-radius: 8px;
   font-size: var(--t-xs); display: inline-flex; align-items: center; gap: var(--s1);

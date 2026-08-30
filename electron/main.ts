@@ -408,6 +408,13 @@ app.whenReady().then(async () => {
     return project.summary();
   });
 
+  ipcMain.handle(IPC.wsSetMode, async (_e, projectId: string, mode: 'plan' | 'build') => {
+    const project = manager.findProject(projectId);
+    if (!project) return null;
+    project.setMode(mode);
+    return project.summary();
+  });
+
   ipcMain.handle(IPC.wsSetKind, async (_e, projectId: string, kind: WorkspaceKind) => {
     const project = manager.findProject(projectId);
     if (!project) return null;

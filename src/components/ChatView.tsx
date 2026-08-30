@@ -9,6 +9,7 @@ import { Aurora } from './Aurora';
 import { Markdown } from './Markdown';
 import { ChatImageThumb } from './ChatImageThumb';
 import { AutonomySlider } from './AutonomySlider';
+import { ModeToggle } from './ModeToggle';
 import { ReasoningSelector } from './ReasoningSelector';
 import {
   IconCheckCircle,
@@ -452,6 +453,7 @@ export function ChatView() {
               }
             />
             <div className="chiprow">
+              <ModeToggle />
               <ReasoningSelector dropUp />
               <AutonomySlider dropUp />
               {view.summary.budget?.limitUsd != null && (

@@ -12,6 +12,7 @@ import type {
   WorkspaceType,
   SessionSummary,
   Autonomy,
+  Mode,
   CommandApproval,
   SubagentCommandApproval,
   CatalogModel,
@@ -49,6 +50,7 @@ export interface ForgeApi {
     hydrate: (id: string) => Promise<ProjectHydration | null>;
     markSeen: (id: string) => Promise<ProjectSummary | null>;
     setAutonomy: (id: string, level: Autonomy) => Promise<ProjectSummary | null>;
+    setMode: (id: string, mode: Mode) => Promise<ProjectSummary | null>;
     setKind: (id: string, kind: WorkspaceKind) => Promise<ProjectSummary | null>;
     setClipsFolder: (id: string) => Promise<ProjectSummary | null>;
     setActive: (id: string) => Promise<boolean>;

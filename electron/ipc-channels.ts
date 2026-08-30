@@ -6,6 +6,7 @@ export const IPC = {
   wsHydrate: 'workspace:hydrate',
   wsMarkSeen: 'workspace:mark-seen',
   wsSetAutonomy: 'workspace:set-autonomy',
+  wsSetMode: 'workspace:set-mode',
   wsUpdated: 'workspace:updated',
 
   // Real Workspace-level (the new top-level container) CRUD — not yet wired
@@ -170,6 +171,20 @@ export interface BrowserNavState {
  */
 export type Autonomy = 'manual' | 'balanced' | 'auto';
 
+/**
+ * The working stance for a project, orthogonal to the autonomy level.
+ *
+ * - 'plan': the agent gathers requirements and researches. It can read files
+ *   and use the network (web_search / webfetch / search_dev_sources), but every
+ *   tool that writes or creates — propose_edit / edit_file / run_command /
+ *   generate_image / generate_music — is forced off, regardless of autonomy.
+ * - 'build': full tool access, governed by the autonomy level as normal.
+ *
+ * A fresh project starts in 'plan'. Switching is a single deliberate act by the
+ * Operator (a composer toggle); the agent can only ask for it, never flip it.
+ */
+export type Mode = 'plan' | 'build';
+
 /** Which permission categories the agent's actions fall into. */
 export type PermissionCategory = 'bash' | 'edit' | 'webfetch';
 
@@ -224,6 +239,8 @@ export interface ProjectSummary {
   unseenCompletion: boolean;
   activeSessionId: string | null;
   autonomy: Autonomy;
+  /** Plan (read + research only) vs Build (full access). Starts at 'plan'. */
+  mode: Mode;
   /** The project's spending cap and running spend against it. */
   budget: ProjectBudget;
   /** Every session in this project whose agent is currently working — each session runs independently, so more than one can be live at once. */

@@ -50,6 +50,7 @@ import type {
   RoadmapItem,
   PermissionCategory,
   PermissionLevel,
+  Mode,
   FocusMessage,
   FocusAgentSummary,
   ProjectBudget,
@@ -134,6 +135,13 @@ export interface AgentCallbacks {
    * back to the current autonomy level's default for that category.
    */
   getPermission: (category: PermissionCategory) => PermissionLevel;
+  /**
+   * Read fresh each call — the Operator flips this from the composer mid-task.
+   * 'plan' means read + research only: getPermission already forces 'bash' and
+   * 'edit' to 'deny', and callTool additionally blocks the asset-generation
+   * tools. 'build' is normal. See ipc-channels.ts's Mode.
+   */
+  getMode: () => Mode;
   /** Only when a category resolves to 'ask': blocks until the Operator approves, denies, or always-allows this action. */
   requestActionApproval: (category: PermissionCategory, description: string) => Promise<boolean>;
   /**
@@ -1032,6 +1040,11 @@ function untrusted(body: string): string {
 }
 
 
+/** Standard refusal for a create/generate tool called while the project is in Plan mode. */
+const PLAN_MODE_BLOCKED = (tool: string): string =>
+  `ERROR: ${tool} is disabled in Plan mode — Plan mode is for reading and research only. ` +
+  `Finish the plan and ask the Operator to switch to Build mode.`;
+
 function buildSystemPrompt(rootPath: string, isSubagent = false): string {
   return [
     isSubagent
@@ -1864,6 +1877,7 @@ export class AgentSession {
         setBudget: this.cb.setBudget, // Never used (set_budget isn't a subagent tool), but keeps the callback shape whole.
         runShell: this.cb.runShell,
         getPermission: this.cb.getPermission,
+        getMode: this.cb.getMode, // A subagent inherits Plan/Build from the project it runs in.
         // 'bash' goes through the same distinct, fail-closed subagent channel as before.
         // 'webfetch' has no equivalent subagent-specific channel yet, so an 'ask' resolution
         // is treated as allowed for a subagent — 'deny' still blocks it outright either way,
@@ -2500,6 +2514,7 @@ export class AgentSession {
     }
 
     if (name === 'generate_image') {
+      if (this.cb.getMode() === 'plan') return PLAN_MODE_BLOCKED('generate_image');
       const prompt = String(args.prompt ?? '').trim();
       if (!prompt) return 'ERROR: generate_image requires a "prompt".';
       const gate = await this.checkWebfetchGate(`generate_image: "${prompt.slice(0, 80)}"`);
@@ -2640,6 +2655,7 @@ export class AgentSession {
     }
 
     if (name === 'generate_music') {
+      if (this.cb.getMode() === 'plan') return PLAN_MODE_BLOCKED('generate_music');
       const prompt = String(args.prompt ?? '').trim();
       if (!prompt) return 'ERROR: generate_music requires a "prompt".';
       const gate = await this.checkWebfetchGate(`generate_music: "${prompt.slice(0, 80)}"`);
@@ -3320,6 +3336,30 @@ export class AgentSession {
       // Ephemeral for this one request only — never spliced into this.messages,
       // so it can never be persisted, re-sent verbatim, or accumulate turn over turn.
       const wireMessages = await this.messagesForRequest();
+
+      // Plan vs Build — read fresh every turn, since the Operator can flip it
+      // mid-task from the composer. In Plan mode the write/run/generate tools
+      // return errors on their own (getPermission + callTool); this note tells
+      // the agent that up front so it plans instead of trying and bouncing.
+      if (this.cb.getMode() === 'plan') {
+        wireMessages.push({
+          role: 'system',
+          content:
+            'MODE: PLAN. You are gathering requirements and researching — not building yet. ' +
+            'You can read files, list directories, glob/grep, and use the network ' +
+            '(web_search / webfetch / search_dev_sources). You CANNOT edit files, run shell ' +
+            'commands, or generate images/music — those tools are disabled this turn and will ' +
+            'return an error; do not attempt them or look for a workaround. Use propose_roadmap ' +
+            'for a multi-step plan. Once you understand what the Operator wants built well enough ' +
+            'to start, summarise the plan and ask them to switch you to Build mode — you cannot ' +
+            'switch it yourself. They may also switch at any time.',
+        });
+      } else {
+        wireMessages.push({
+          role: 'system',
+          content: 'MODE: BUILD. Full tool access, governed by the autonomy level.',
+        });
+      }
 
       // Project working-memory files and the knowledge base are both read
       // fresh every turn (cheap — a small file read and an in-memory-cached

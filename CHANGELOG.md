@@ -2,6 +2,10 @@
 
 Every released version of Forge, newest first. Dates are when the build went out.
 
+## 0.2.42 — 2026-08-30
+
+- **Plan / Build mode.** A new toggle in the composer, next to the autonomy slider. Every project now starts in **Plan** mode: the agent can read files, list/glob/grep, and research on the web, but every tool that changes something — `propose_edit`, `edit_file`, `run_command`, `generate_image`, `generate_music` — is turned off, no matter the autonomy level. He's told up front that he's planning, so he gathers what he needs and then lays out the plan and asks you to switch. Flip the toggle to **Build** (any time) and he has full access again, governed by autonomy as before. Subagents and Focus agents inherit the project's mode. The setting is per-project and resets to Plan on restart, same as the autonomy level.
+
 ## 0.2.41 — 2026-08-30
 
 - **Reopening a project no longer shows a red "Hit a problem" glow when nothing failed.** Stopping the agent yourself recorded its closing activity row as an `error`, so the ambient field read that as a crashed run every time the project was loaded again. A manual stop is now recorded as what it is — you halting the agent, not a failure — and the mood derivation ignores the stop marker (and narration rows) when deciding whether the last run ended badly.

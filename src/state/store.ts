@@ -11,6 +11,7 @@ import type {
   ProjectSummary,
   SessionSummary,
   Autonomy,
+  Mode,
   CommandApproval,
   SubagentCommandApproval,
   CatalogModel,
@@ -253,6 +254,7 @@ interface ForgeState {
   selectWorkspace: (id: string) => Promise<void>;
   pickFolder: (id: string) => Promise<void>;
   setAutonomy: (level: Autonomy) => Promise<void>;
+  setMode: (mode: Mode) => Promise<void>;
   setWorkspaceKind: (kind: WorkspaceKind) => Promise<void>;
   decideApproval: (decision: ApprovalDecision) => Promise<void>;
   decideSubagentApproval: (requestId: string, approved: boolean) => Promise<void>;
@@ -717,6 +719,14 @@ export const useForge = create<ForgeState>((set, get) => {
       // Optimistic: the confirming wsUpdated broadcast lands a moment later.
       patch(id, (v) => ({ ...v, summary: { ...v.summary, autonomy: level } }));
       await forge.workspaces.setAutonomy(id, level);
+    },
+
+    setMode: async (mode) => {
+      const id = get().activeId;
+      if (!id) return;
+      // Optimistic: the confirming wsUpdated broadcast lands a moment later.
+      patch(id, (v) => ({ ...v, summary: { ...v.summary, mode } }));
+      await forge.workspaces.setMode(id, mode);
     },
 
     setWorkspaceKind: async (kind) => {

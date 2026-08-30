@@ -29,6 +29,7 @@ contextBridge.exposeInMainWorld('forge', {
     markSeen: (id: string) => ipcRenderer.invoke(IPC.wsMarkSeen, id),
     setAutonomy: (id: string, level: 'manual' | 'balanced' | 'auto') =>
       ipcRenderer.invoke(IPC.wsSetAutonomy, id, level),
+    setMode: (id: string, mode: 'plan' | 'build') => ipcRenderer.invoke(IPC.wsSetMode, id, mode),
     setKind: (id: string, kind: WorkspaceKind) => ipcRenderer.invoke(IPC.wsSetKind, id, kind),
     setClipsFolder: (id: string) => ipcRenderer.invoke(IPC.wsSetClipsFolder, id),
     setActive: (id: string) => ipcRenderer.invoke(IPC.wsSetActive, id),

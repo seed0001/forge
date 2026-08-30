@@ -2,6 +2,10 @@
 
 Every released version of Forge, newest first. Dates are when the build went out.
 
+## 0.2.46 — 2026-08-29
+
+- **The side panels now have visible scrollbars.** The Activity, Roadmap, Focus, and Sessions panels always could scroll, but the scrollbar thumb (`#262626` on a near-black panel) was almost invisible — so a panel with more content than fits just looked like it was cut off at the bottom with no way down. The thumb is now a clearly visible grey, slightly wider, with a faint track behind it, and every scroll area reserves its gutter so content doesn't jump when the bar appears. Each panel is also hard-capped to the window height as a belt-and-suspenders guard so its body can never grow past the viewport unscrolled.
+
 ## 0.2.45 — 2026-08-29
 
 - **The agent now describes Forge's own features accurately instead of guessing.** Asked "how does your scheduler work?", it had no grounding on its host app and answered by describing a *different* product's scheduler — inventing capabilities and citing an unrelated docs page. The system prompt now carries an authoritative **ABOUT FORGE** section (the scheduler, roadmap, Focus agents, knowledge base, autonomy/Plan-Build/permissions, the diff-review queue), and a grounding rule that questions about how Forge works are answered *only* from that section or from Forge's own source — never from general knowledge or a web search about a similarly-named feature in another tool. If it doesn't know a detail, it says so.

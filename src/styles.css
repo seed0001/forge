@@ -57,10 +57,16 @@ body {
 }
 button { font: inherit; color: inherit; cursor: pointer; border: none; background: none; padding: 0; }
 input, textarea { font: inherit; color: inherit; }
-::-webkit-scrollbar { width: 10px; height: 10px; }
-::-webkit-scrollbar-thumb { background: #262626; border-radius: var(--r-pill); border: 3px solid transparent; background-clip: content-box; }
-::-webkit-scrollbar-thumb:hover { background: #35353599; background-clip: content-box; }
-::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar { width: 12px; height: 12px; }
+/* Visible against the near-black panels even at a glance — the old #262626 on
+   #070707 was nearly imperceptible, so overflowing panels read as "no scrollbar,
+   content just cut off". */
+::-webkit-scrollbar-thumb { background: #4a4a4d; border-radius: var(--r-pill); border: 3px solid transparent; background-clip: content-box; min-height: 32px; }
+::-webkit-scrollbar-thumb:hover { background: #5c5c60; background-clip: content-box; }
+::-webkit-scrollbar-track { background: #17171899; border-radius: var(--r-pill); }
+/* Reserve the gutter so appearing/disappearing scrollbars don't shift content. */
+.proc-panel-body, .focus-panel-body, .rmside-body, .sesslist, .chat-scroll,
+.audit-body, .changelog-body, .tree, .term-body { scrollbar-gutter: stable; }
 
 .mono { font-family: var(--font-mono); }
 .row { display: flex; align-items: center; }
@@ -125,7 +131,7 @@ input, textarea { font: inherit; color: inherit; }
 }
 
 .sidebar {
-  width: 230px; flex: none; display: flex; flex-direction: column; min-width: 0;
+  width: 230px; flex: none; display: flex; flex-direction: column; min-width: 0; min-height: 0; max-height: 100%;
   background: var(--bg-panel); border: 1px solid var(--line); border-radius: var(--r-lg); overflow: hidden;
 }
 .side-head { height: 40px; flex: none; display: flex; align-items: center; gap: var(--s2); padding: 0 var(--s3); }
@@ -1244,7 +1250,7 @@ input, textarea { font: inherit; color: inherit; }
 
 /* ── Focus agent panel ─────────────────────────────────────────────────── */
 .focus-panel {
-  width: 300px; flex: none; display: flex; flex-direction: column; min-height: 0;
+  width: 300px; flex: none; display: flex; flex-direction: column; min-height: 0; max-height: 100%;
   background: var(--bg-panel); border: 1px solid var(--line); border-radius: var(--r-lg); overflow: hidden;
 }
 .focus-panel-head {
@@ -1295,7 +1301,7 @@ input, textarea { font: inherit; color: inherit; }
 
 /* ── Roadmap side panel ───────────────────────────────────────────────── */
 .rmside {
-  width: 300px; flex: none; display: flex; flex-direction: column; min-height: 0;
+  width: 300px; flex: none; display: flex; flex-direction: column; min-height: 0; max-height: 100%;
   background: var(--bg-panel); border: 1px solid var(--line); border-radius: var(--r-lg); overflow: hidden;
 }
 .rmside-head {
@@ -1364,7 +1370,7 @@ input, textarea { font: inherit; color: inherit; }
 
 /* ── Activity / process panel ─────────────────────────────────────────── */
 .proc-panel {
-  width: 320px; flex: none; display: flex; flex-direction: column; min-height: 0;
+  width: 320px; flex: none; display: flex; flex-direction: column; min-height: 0; max-height: 100%;
   background: var(--bg-panel); border: 1px solid var(--line); border-radius: var(--r-lg); overflow: hidden;
 }
 .proc-panel-head {

@@ -85,9 +85,12 @@ export function deriveMood(opts: {
       return { phase: 'review', colors: PALETTES.review, intensity: 0.42, speed: 0.6, label: LABELS.review };
     }
     // Only surface red when the run actually ENDED badly. An error earlier in a
-    // run that then recovered is history, not the current state — and a missing
-    // file ('skipped') is never an error at all.
-    const last = current ?? activity[activity.length - 1];
+    // run that then recovered is history, not the current state; a missing file
+    // ('skipped') is never an error at all; and a manual stop ('stopped') is you
+    // halting the agent, not a failure — so it must not paint the field red when
+    // the project is reopened later.
+    const meaningful = activity.filter((e) => e.kind !== 'stopped' && e.kind !== 'narrate');
+    const last = current && current.kind !== 'stopped' ? current : meaningful[meaningful.length - 1];
     if (last?.status === 'error') {
       return { phase: 'error', colors: PALETTES.error, intensity: 0.5, speed: 1, label: LABELS.error };
     }

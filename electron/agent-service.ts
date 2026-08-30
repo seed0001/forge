@@ -1804,7 +1804,10 @@ export class AgentSession {
     this.trackActivity({ id: nextId('act'), kind: 'stopped', detail: 'Stopped by you', status: 'error' });
     const summary = this.buildActivitySummary();
     if (summary) {
-      this.cb.onActivity({ id: nextId('act'), kind: 'done', detail: summary, status: 'error', summary: true });
+      // A manual stop isn't a failure — the closing summary row stays 'done'
+      // (the distinct 'stopped' row above already marks that you halted it), so
+      // reopening the project later doesn't read as a crash.
+      this.cb.onActivity({ id: nextId('act'), kind: 'done', detail: summary, status: 'done', summary: true });
     }
     this.cb.onStatus(false);
   }

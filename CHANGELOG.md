@@ -2,6 +2,10 @@
 
 Every released version of Forge, newest first. Dates are when the build went out.
 
+## 0.2.41 — 2026-08-30
+
+- **Reopening a project no longer shows a red "Hit a problem" glow when nothing failed.** Stopping the agent yourself recorded its closing activity row as an `error`, so the ambient field read that as a crashed run every time the project was loaded again. A manual stop is now recorded as what it is — you halting the agent, not a failure — and the mood derivation ignores the stop marker (and narration rows) when deciding whether the last run ended badly.
+
 ## 0.2.40 — 2026-08-29
 
 - **You can give the agent a persona.** New **Settings › Agent › Persona** box takes a free-text note on the voice the agent should write in — say "dry and a little sardonic, short sentences, the occasional wry aside" — and it's spliced into the system prompt as a `PERSONA` block so replies get some flavor. Leave it blank for the default neutral voice. It's told to let the persona colour phrasing only, never to bend facts, grounding, or the safety rules. Stored as `AGENT_PERSONA` in `forge/.env`; takes effect on the next request, no restart.

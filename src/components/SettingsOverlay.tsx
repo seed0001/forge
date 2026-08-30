@@ -193,6 +193,15 @@ const PROVIDERS: ProviderDef[] = [
       },
     ],
   },
+  {
+    id: 'portal-auth',
+    name: 'Portal password',
+    category: 'portal',
+    blurb:
+      'Required before the phone portal can be enabled. Anyone who opens the portal link is asked for this ' +
+      'password before they can see or use any project.',
+    fields: [{ key: 'PORTAL_PASSWORD', label: 'Password', placeholder: 'Choose a password', secret: true }],
+  },
 ];
 
 const EMPTY: ProviderSettings = {
@@ -215,6 +224,7 @@ const EMPTY: ProviderSettings = {
   MAX_TOOL_CALLS: '',
   MAX_COST_PER_TASK_USD: '',
   AGENT_PERSONA: '',
+  PORTAL_PASSWORD: '',
 };
 
 export function SettingsOverlay() {

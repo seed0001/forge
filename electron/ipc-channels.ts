@@ -633,6 +633,8 @@ export interface ProviderSettings {
    * are collapsed to spaces on save so it stays a valid .env value).
    */
   AGENT_PERSONA: string;
+  /** Required before the phone portal's Enable button will actually start anything — see electron/main.ts's enablePortal. */
+  PORTAL_PASSWORD: string;
 }
 
 export const SETTINGS_KEYS = [
@@ -655,6 +657,7 @@ export const SETTINGS_KEYS = [
   'MAX_TOOL_CALLS',
   'MAX_COST_PER_TASK_USD',
   'AGENT_PERSONA',
+  'PORTAL_PASSWORD',
 ] as const satisfies readonly (keyof ProviderSettings)[];
 
 /**
@@ -672,6 +675,7 @@ export const SECRET_SETTINGS_KEYS = [
   'LLAMACPP_API_KEY',
   'SEARCH_API',
   'TRANSCRIBE_API_KEY',
+  'PORTAL_PASSWORD',
 ] as const satisfies readonly (keyof ProviderSettings)[];
 
 /**

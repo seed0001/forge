@@ -78,14 +78,12 @@ function send(channel: string, ...args: unknown[]) {
 }
 
 /**
- * The phone portal mirrors ONE project (the active project of the same
- * workspace this desktop app opens on startup) — set once that project
- * exists, in app.whenReady. Declared up here because the WorkspaceManager's
- * emit callbacks (which fire from deep inside agent turns) are wired before
- * that project is created.
+ * The phone portal can reach every open workspace/project/session — see
+ * portal-server.ts. Declared up here because the WorkspaceManager's emit
+ * callbacks (which fire from deep inside agent turns) are wired before the
+ * portal is ever enabled.
  */
 let portal: PortalHandle | null = null;
-let portalProjectId: string | null = null;
 /** Which WORKSPACE was focused last — tracked so it can be persisted and restored across restarts, and (via its active project) reported to the renderer's first load via IPC.wsGetInitialActive. */
 let activeWorkspaceId: string | null = null;
 let portalTunnelProc: ReturnType<typeof spawn> | null = null;
@@ -136,12 +134,12 @@ const manager = new WorkspaceManager({
   activity: (projectId, sessionId, evt) => send(IPC.agentActivity, projectId, sessionId, evt),
   message: (projectId, sessionId, msg) => {
     send(IPC.agentMessage, projectId, sessionId, msg);
-    if (projectId === portalProjectId) portal?.broadcastMessage(msg);
+    portal?.broadcastMessage(projectId, sessionId, msg);
   },
   status: (projectId) => {
     const project = manager.findProject(projectId);
     if (project) send(IPC.wsUpdated, project.summary());
-    if (project && projectId === portalProjectId) portal?.broadcastStatus(project.status === 'running');
+    if (project) portal?.broadcastStatus(projectId, project.summary().runningSessionIds);
   },
   diffProposed: (projectId, diff) => send(IPC.diffProposed, projectId, diff),
   diffUpdated: (projectId, diff) => send(IPC.diffUpdated, projectId, diff),
@@ -231,14 +229,12 @@ function startPortalTunnel(port: number) {
 /** Idempotent — a second call while already running/starting is a no-op. */
 function enablePortal() {
   if (portal || portalStatus.state === 'starting') return;
-  const target = manager.findProject(portalProjectId ?? '') ?? manager.list()[0]?.activeProject;
-  if (!target) {
-    setPortalStatus({ state: 'unavailable', reason: 'No project open yet.' });
+  if (!process.env.PORTAL_PASSWORD) {
+    setPortalStatus({ state: 'unavailable', reason: 'Set a phone portal password in Settings first.' });
     return;
   }
-  portalProjectId = target.id;
   const portalPort = Number(process.env.PORTAL_PORT) || 5333;
-  portal = startPortalServer(() => manager.findProject(portalProjectId!) ?? null, portalPort);
+  portal = startPortalServer(manager, () => process.env.PORTAL_PASSWORD ?? '', portalPort);
   startPortalTunnel(portalPort);
 }
 
@@ -342,11 +338,6 @@ app.whenReady().then(async () => {
 
   const activeIdx = Math.min(Math.max(index.activeWorkspaceIndex, 0), restoredWorkspaces.length - 1);
   activeWorkspaceId = restoredWorkspaces[activeIdx]?.id ?? restoredWorkspaces[0]?.id ?? null;
-
-  // Remembers which project the portal would mirror once enabled — the
-  // server and tunnel themselves only ever start in response to the
-  // Operator's own click in Settings (see enablePortal), never here.
-  portalProjectId = (activeWorkspaceId ? manager.get(activeWorkspaceId) : undefined)?.activeProjectId ?? null;
 
   createWindow();
   initUpdater((status) => send(IPC.updateStatus, status));

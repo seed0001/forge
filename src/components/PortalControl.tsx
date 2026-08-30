@@ -46,9 +46,10 @@ export function PortalControl() {
         </div>
       </div>
       <div className="settings-section-blurb">
-        Chat with this workspace from your phone's browser, using the same agent, tools, and permission
+        Chat with any of your projects from your phone's browser, using the same agent, tools, and permission
         settings as the desktop app. Off by default — enabling it starts a local server and a temporary
-        public tunnel for as long as it stays on.
+        public tunnel for as long as it stays on. The link opens to a password login, then a picker for which
+        project and chat to use — set the password above first.
       </div>
 
       {status.state === 'disabled' && (

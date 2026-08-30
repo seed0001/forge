@@ -2,6 +2,10 @@
 
 Every released version of Forge, newest first. Dates are when the build went out.
 
+## 0.2.53 — 2026-08-30
+
+- **The phone portal now logs in and lets you pick which project and chat you're in.** It used to drop you straight into whatever one project/session the desktop app happened to have active, with no password beyond the tunnel URL itself being secret. It now opens to a password login (set from Settings → Phone portal, before Enable will even start anything), then a Projects screen (cards for every open project, plus "+ New" to start a blank one) and a Chats screen per project (every session as a card, plus "+ New chat"). Picking a project or chat, or creating a new one, is scoped to the phone's own connection — it never touches the desktop app's active tab/session, using the same session-scoped `sendToSession`/`newBackgroundSession` paths built originally for the scheduler. Login sessions are cookie-based (30 days, in-memory on the portal server), with a lockout after repeated wrong passwords.
+
 ## 0.2.52 — 2026-08-30
 
 - **The agent no longer claims a reminder is set (or has fired) without checking.** On the Codex provider, "set a reminder" got an immediate "Done!" even when nothing was ever created, and a later "how much time is left?" got a confidently wrong "it should have already fired" — neither claim was ever checked against anything real. Codex is now required to read back an actual result file, written by Forge the instant its request is approved, before reporting success or failure — verified with a live test that forces a real failure and confirms Codex now reports it honestly instead of lying. It's also given a live scheduler-status file so it answers "how much time is left" / "did it fire" from real state instead of guessing from how the conversation felt.

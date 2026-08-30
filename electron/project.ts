@@ -435,7 +435,7 @@ export class Project {
    * call returns would race on its shared message array; the caller just
    * tries again next poll.
    */
-  async sendToSession(sessionId: string, text: string): Promise<boolean> {
+  async sendToSession(sessionId: string, text: string, source: 'desktop' | 'portal' = 'desktop'): Promise<boolean> {
     const session = this.sessions.find((s) => s.id === sessionId);
     if (!session) return false;
     if (this.runtimes.get(sessionId)?.running) return false;
@@ -445,8 +445,13 @@ export class Project {
     session.updatedAt = Date.now();
     this.emit.message(this.id, sessionId, msg);
     this.emit.sessions(this.id);
-    void this.ensureAgent(sessionId).send(text);
+    void this.ensureAgent(sessionId).send(text, undefined, source);
     return true;
+  }
+
+  /** One specific session's chat, regardless of which is active — the phone portal reads a session's history without disturbing activeSessionId. */
+  getSessionChat(sessionId: string): ChatMessage[] {
+    return this.sessions.find((s) => s.id === sessionId)?.chat ?? [];
   }
 
   selectSession(sessionId: string): boolean {

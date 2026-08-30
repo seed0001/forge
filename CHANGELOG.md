@@ -2,6 +2,10 @@
 
 Every released version of Forge, newest first. Dates are when the build went out.
 
+## 0.2.45 — 2026-08-29
+
+- **The agent now describes Forge's own features accurately instead of guessing.** Asked "how does your scheduler work?", it had no grounding on its host app and answered by describing a *different* product's scheduler — inventing capabilities and citing an unrelated docs page. The system prompt now carries an authoritative **ABOUT FORGE** section (the scheduler, roadmap, Focus agents, knowledge base, autonomy/Plan-Build/permissions, the diff-review queue), and a grounding rule that questions about how Forge works are answered *only* from that section or from Forge's own source — never from general knowledge or a web search about a similarly-named feature in another tool. If it doesn't know a detail, it says so.
+
 ## 0.2.44 — 2026-08-29
 
 - **Edge-case hardening of the chat loop and Stop button.** First pass of a systematic edge-case test campaign (tracked in `EDGE-CASES.md`), fixing five real bugs found by tracing abnormal paths:

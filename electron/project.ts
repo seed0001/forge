@@ -6,7 +6,7 @@ import { writeFile } from './fs-service';
 import { isAuditLogPath } from './audit-service';
 import { slugify, type ExtractedPage } from './page-extract';
 import { oneOffCompletion, activeReasoningLevel } from './chat-provider';
-import { runCodexTurn } from './codex-runner';
+import { runCodexTurn, type CodexApprovalBridge } from './codex-app-server';
 import { getCachedPermissionOverrides, getCachedBashAllowlist } from './perm-store';
 import { loadScheduledTasks, saveScheduledTasks, computeNextRun } from './scheduler-store';
 import { loadFocusBoard, saveFocusBoard } from './focus-board';
@@ -161,7 +161,7 @@ interface SessionRuntime {
   pendingFollowups: string[];
 }
 
-/** One background Codex builder run — a workspace-write delegate_build handoff, see Workspace.startBuilder. */
+/** One background Codex builder run — a delegate_build handoff, see Workspace.startBuilder. Same read-only-sandbox + Operator-approval-gated safety as every other Codex turn; only its own thread/context is separate from the companion's. */
 interface BuilderRuntime {
   parentSessionId: string;
   task: string;
@@ -708,18 +708,40 @@ export class Project {
    * silently rewrite or truncate its own mutation history with nobody ever
    * looking.
    */
-  async applyEditAuto(diff: PendingDiff) {
-    if (!this.rootPath) return;
+  async applyEditAuto(diff: PendingDiff): Promise<PendingDiff> {
+    if (!this.rootPath) return diff;
     if (isAuditLogPath(this.rootPath, diff.path)) {
       this.diffs.add(diff);
       this.emit.diffProposed(this.id, diff);
       this.emit.status(this.id);
-      return;
+      return this.diffs.awaitDecision(diff.id);
     }
     this.diffs.add(diff);
     const settled = await this.diffs.decide(this.rootPath, diff.id, 'all', 'accepted');
     if (settled) this.emit.diffUpdated(this.id, settled);
     this.emit.status(this.id);
+    return settled ?? diff;
+  }
+
+  /**
+   * Used by the Codex approval bridge (codex-app-server.ts) — proposes a
+   * diff through the exact same permission/review machinery as
+   * proposeEditInternal (agent-service.ts), but RESOLVES once the diff is
+   * fully decided instead of ending the caller's turn immediately. Codex's
+   * own turn is genuinely paused waiting on the JSON-RPC response, unlike
+   * the native tool loop's propose_edit (which ends its turn and relies on
+   * resumeAfterReview to continue later) — so blocking here is correct, not
+   * a hack.
+   */
+  async requestEditApproval(diff: PendingDiff): Promise<PendingDiff> {
+    if (!this.rootPath) return diff;
+    const editPerm = resolvePermission('edit', this.autonomy, this.mode);
+    if (editPerm === 'deny') return diff; // every hunk stays 'pending' — caller reads that as "not accepted"
+    if (editPerm === 'allow') return this.applyEditAuto(diff);
+    this.diffs.add(diff);
+    this.emit.diffProposed(this.id, diff);
+    this.emit.status(this.id);
+    return this.diffs.awaitDecision(diff.id);
   }
 
   /**
@@ -1146,11 +1168,15 @@ export class Project {
   }
 
   /**
-   * Hand a build task to a background Codex builder — workspace-write, its own
-   * persisted Codex thread, non-blocking. Called by the companion's
-   * delegate_build tool (see COMPANION-ARCHITECTURE.md). Activity and the final
-   * result fold into the PARENT (companion) session's chat so the Operator
-   * sees it inline while they keep talking. One builder at a time per session.
+   * Hand a build task to a background Codex builder — its own persisted
+   * Codex thread, non-blocking, so the companion's own turn ends at once and
+   * the Operator can keep chatting. Called by the companion's delegate_build
+   * tool (see COMPANION-ARCHITECTURE.md). Its edits/commands go through the
+   * exact same read-only-sandbox + approval bridge as the companion's own
+   * turns — the Operator sees the same review/approval prompts for
+   * background work as for anything typed directly in chat. Activity and the
+   * final result fold into the PARENT (companion) session's chat. One
+   * builder at a time per session.
    */
   startBuilder(parentSessionId: string, task: string): { ok: boolean; error?: string } {
     if (!this.rootPath) return { ok: false, error: 'no workspace folder open' };
@@ -1167,11 +1193,19 @@ export class Project {
 
     const brief =
       (freshThread
-        ? "You are Forge's background BUILDER — a workspace-write Codex agent. The companion (which the " +
-          'Operator talks to) has handed you a task. Do the whole thing: make the edits, run the ' +
-          'builds/tests you need, and finish. Work on disk directly. When done, report concisely what ' +
-          'you changed (files, commands) and anything the Operator should know.\n\n'
+        ? "You are Forge's background BUILDER. The companion (which the Operator talks to) has handed " +
+          'you a task. Do the whole thing: make the edits, run the builds/tests you need, and finish. ' +
+          'Edits and commands go through the same Operator review/approval as everything else in Forge ' +
+          "— propose them and wait, don't assume they landed. When done, report concisely what you " +
+          'changed (files, commands) and anything the Operator should know.\n\n'
         : '') + `Task from the companion:\n${task}`;
+
+    const approvals: CodexApprovalBridge = {
+      getPermission: (category) => resolvePermission(category, this.autonomy, this.mode),
+      requestActionApproval: (category, description) =>
+        this.isAlwaysAllowed(parentSessionId, category) ? Promise.resolve(true) : this.requestApproval(parentSessionId, description, category),
+      requestEditApproval: (diff) => this.requestEditApproval(diff),
+    };
 
     const runId = nextId('build');
     const pushActivity = (evt: ActivityEvent) => {
@@ -1192,13 +1226,13 @@ export class Project {
       rootPath,
       prompt: brief,
       threadId: parentAgent.builderThreadId(),
-      sandbox: 'workspace-write',
       model: process.env.CODEX_MODEL || undefined,
       reasoning: activeReasoningLevel(),
       isAborted: () => aborted,
       onThreadId: (id) => parentAgent.setBuilderThreadId(id),
       onActivity: pushActivity,
       onTerminal: (evt) => this.recordTerminal(evt),
+      approvals,
     });
 
     const rt: BuilderRuntime = {
@@ -1304,6 +1338,7 @@ export class Project {
         getBashAllowlist: () => getCachedBashAllowlist(),
         requestSubagentCommandApproval: (command, subLabel) => this.requestSubagentApproval(sessionId, command, subLabel),
         applyEditAuto: (diff) => this.applyEditAuto(diff),
+        requestEditApproval: (diff) => this.requestEditApproval(diff),
         getSessionCostUsd: () => findSession()?.costUsd ?? 0,
         postToBoard: (from, text, inReplyTo) => this.postToBoard(from, text, { inReplyTo }),
         readBoard: (sinceId, limit) => this.readBoard(sinceId, limit),
@@ -1454,6 +1489,7 @@ export class Project {
         getBashAllowlist: () => getCachedBashAllowlist(),
         requestSubagentCommandApproval: (command, label) => this.requestSubagentApproval(sessionId, command, label),
         applyEditAuto: (diff) => this.applyEditAuto(diff),
+        requestEditApproval: (diff) => this.requestEditApproval(diff),
         getSessionCostUsd: () => findSession()?.costUsd ?? 0,
         postToBoard: (from, text, inReplyTo) => this.postToBoard(from, text, { inReplyTo }),
         readBoard: (sinceId, limit) => this.readBoard(sinceId, limit),

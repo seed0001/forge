@@ -16,7 +16,7 @@ import {
   reasoningRequestField,
 } from './chat-provider';
 import type { ChatProviderConfig } from './chat-provider';
-import { runCodexTurn, type CodexHandle, type CodexSandbox } from './codex-runner';
+import { runCodexTurn, type CodexHandle, type CodexApprovalBridge } from './codex-app-server';
 import { matchesAllowlist, isShellChained } from './perm-store';
 import {
   fetchJsonGuarded,
@@ -157,8 +157,19 @@ export interface AgentCallbacks {
   requestSubagentCommandApproval?: (command: string, label: string) => Promise<boolean>;
   /** Patterns that auto-approve a matching, non-chained bash command without prompting, when 'bash' resolves to 'ask'. Read fresh each call. */
   getBashAllowlist: () => string[];
-  /** When 'edit' resolves to 'allow': writes a proposed edit straight to disk instead of queuing it for review. */
-  applyEditAuto: (diff: PendingDiff) => Promise<void>;
+  /** When 'edit' resolves to 'allow': writes a proposed edit straight to disk instead of queuing it for review. Resolves with the settled diff. */
+  applyEditAuto: (diff: PendingDiff) => Promise<PendingDiff>;
+  /**
+   * Used by the Codex approval bridge (codex-app-server.ts) instead of
+   * propose_edit's own tool-call path: proposes a diff through the normal
+   * allow/ask/deny permission machinery and RESOLVES once it is fully
+   * decided, rather than ending the caller's turn immediately the way
+   * propose_edit does. Codex's own turn is genuinely paused waiting on this
+   * (a JSON-RPC response it can't proceed without), so blocking here is
+   * correct — unlike the native tool loop, which relies on resumeAfterReview
+   * to continue a LATER turn instead.
+   */
+  requestEditApproval: (diff: PendingDiff) => Promise<PendingDiff>;
   /** This session's cumulative real dollar cost so far (main thread, subagents, title, compaction) — read fresh by the cost_summary tool. */
   getSessionCostUsd: () => number;
   /** Posts to the workspace's shared cross-agent message board. `from` is the calling agent's own label (this.agentLabel), not something the model supplies. */
@@ -184,8 +195,9 @@ export interface AgentCallbacks {
   startFocusAgent?: (task: string, label: string, budgetMinutes?: number) => FocusAgentSummary;
   /**
    * delegate_build fires this — hands a self-contained build task to the
-   * background Codex BUILDER (workspace-write, its own thread). Returns
-   * immediately so the companion turn ends and the Operator can keep chatting;
+   * background Codex BUILDER (its own thread, same review/approval-gated
+   * safety as the companion). Returns immediately so the companion turn
+   * ends and the Operator can keep chatting;
    * the builder streams its own activity and folds its result back into the
    * chat when done. Only present on the primary session's callbacks.
    */
@@ -868,10 +880,11 @@ const DELEGATE_BUILD_TOOL = {
   function: {
     name: 'delegate_build',
     description:
-      'Hand a concrete build task to the background Codex builder — a workspace-write agent that edits/' +
-      'builds/tests on disk while you keep talking to the Operator. Use this in BUILD mode when the ' +
-      'Operator wants real work done now. This call returns immediately; the builder runs in the ' +
-      'background and its progress and result appear in the chat. Give it a complete, self-contained ' +
+      'Hand a concrete build task to the background Codex builder — an agent that edits/builds/tests on ' +
+      'disk (subject to the same Operator review/approval as everything else) while you keep talking to ' +
+      'the Operator. Use this in BUILD mode when the Operator wants real work done now. This call ' +
+      'returns immediately; the builder runs in the background and its progress and result appear in ' +
+      'the chat. Give it a complete, self-contained ' +
       'brief: the goal, the relevant context from this conversation, and what "done" looks like. In ' +
       'PLAN mode this is disabled — plan first, then ask the Operator to switch to Build mode.',
     parameters: {
@@ -1166,8 +1179,8 @@ const ABOUT_FORGE: string[] = [
  * and describes ChatGPT/Codex features when asked about memory, scheduling,
  * etc. This frames it as Forge's companion and hands it Forge's own facts,
  * the Operator's persona, rules, and project knowledge — the same material
- * the HTTP loop injects every turn. Sent once per thread; `codex exec resume`
- * carries it forward on later turns.
+ * the HTTP loop injects every turn. Sent once per thread; resuming that
+ * thread (`thread/resume`) carries it forward on later turns.
  */
 function buildCodexPreamble(
   rootPath: string,
@@ -1548,15 +1561,19 @@ export class AgentSession {
   private budgetStopIssued = false;
 
   /**
-   * The Codex CLI thread for the COMPANION — the read-only conversational
-   * agent the Operator talks to. Persisted (project.ts) so follow-ups resume
-   * it. Null until the first companion Codex turn's `thread.started` event.
+   * The Codex CLI thread for the COMPANION — the agent the Operator talks
+   * to directly. Persisted (project.ts) so follow-ups resume it. Null until
+   * the first companion Codex turn's `thread/start` response. Same
+   * read-only-sandbox + Operator-approval-gated safety as the builder below
+   * — the split exists purely so a background build can run concurrently
+   * without blocking the conversation, not because one is more trusted.
    */
   private codexThreadId: string | null = null;
   /**
-   * The Codex CLI thread for the BUILDER — the workspace-write background
-   * agent `delegate_build` hands work to. Separate identity and context from
-   * the companion; also persisted and resumed across builds.
+   * The Codex CLI thread for the BUILDER — the background agent
+   * `delegate_build` hands work to, so it can run at the same time as the
+   * Operator keeps chatting with the companion above. Separate identity and
+   * context from the companion; also persisted and resumed across builds.
    */
   private codexBuilderThreadId: string | null = null;
   /** The in-flight Codex child process handle, so stop() can kill it. Null when no Codex turn is running. */
@@ -2133,6 +2150,7 @@ export class AgentSession {
             : Promise.resolve(true),
         getBashAllowlist: this.cb.getBashAllowlist,
         applyEditAuto: this.cb.applyEditAuto,
+        requestEditApproval: this.cb.requestEditApproval,
         getSessionCostUsd: this.cb.getSessionCostUsd,
         postToBoard: this.cb.postToBoard,
         readBoard: this.cb.readBoard,
@@ -3539,28 +3557,30 @@ export class AgentSession {
   }
 
   /**
-   * One turn on the Codex CLI provider. Shells out to `codex exec --json`
-   * (resuming this session's thread if it has one), maps Codex's JSONL events
-   * onto the activity trail / terminal / chat, and remembers the new thread id.
+   * One turn on the Codex CLI provider. Drives the shared `codex app-server`
+   * JSON-RPC daemon (codex-app-server.ts), resuming this session's thread if
+   * it has one, and maps its notifications onto the activity trail /
+   * terminal / chat.
    *
-   * Codex runs its own sandbox + approval loop and, under `codex exec`, is
-   * non-interactive — it can't hand an edit to Forge's diff-review queue and
-   * wait, the way the built-in tools do. So Codex gets write access to the
-   * workspace by default (Manual/Balanced/Auto all allow it to actually do
-   * its job); it's clamped to read-only ONLY when the Operator has explicitly
-   * set the File edits (or Shell commands) permission to "Always deny" for
-   * this project. Its edits land straight on disk — visible in the Activity
-   * panel and AUDIT.md, undoable via git, but not held for per-hunk review.
+   * Every Codex thread runs sandboxed read-only — confirmed empirically that
+   * this is what actually makes Codex ask before a mutating action, rather
+   * than silently perform anything a more permissive sandbox would allow.
+   * Forge's own edit/bash permission levels (getPermission) then decide
+   * whether that ask is auto-answered or actually shown to the Operator, via
+   * the approvals bridge below — the exact same PendingDiff/
+   * requestActionApproval machinery the native tool loop uses, so a Codex
+   * edit or command shows the identical review/approval prompt.
    */
   private async runCodexTurn(userText: string, cfg: ChatProviderConfig) {
-    // The primary Codex agent is the COMPANION — always read-only. It reads the
-    // project to answer and plans; it never edits. Real work goes to a
-    // background builder via delegate_build (workspace-write, its own thread).
-    const sandbox: CodexSandbox = 'read-only';
+    const approvals: CodexApprovalBridge = {
+      getPermission: this.cb.getPermission,
+      requestActionApproval: this.cb.requestActionApproval,
+      requestEditApproval: this.cb.requestEditApproval,
+    };
 
     // On a fresh Codex thread, prepend Forge's identity + context so the
     // companion answers as Forge (persona, ABOUT FORGE, rules, knowledge base),
-    // not as a generic Codex assistant. `codex exec resume` carries this
+    // not as a generic Codex assistant. Resuming the thread carries this
     // forward, so later turns send the message alone.
     let prompt = userText;
     if (!this.codexThreadId) {
@@ -3585,7 +3605,6 @@ export class AgentSession {
       rootPath: this.rootPath,
       prompt,
       threadId: this.codexThreadId,
-      sandbox,
       model: cfg.model || undefined,
       reasoning: cfg.reasoning,
       isAborted: () => this.aborted,
@@ -3594,6 +3613,7 @@ export class AgentSession {
       },
       onActivity: (evt) => this.trackActivity(evt),
       onTerminal: (evt) => this.cb.onTerminal(evt),
+      approvals,
     });
     this.codexChild = handle;
 

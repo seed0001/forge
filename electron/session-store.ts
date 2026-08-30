@@ -34,13 +34,15 @@ export interface Session {
   /**
    * The Codex CLI thread/session id, when this session has been run on the
    * `codex` provider — persisted so a follow-up turn (even after an app
-   * restart) resumes the same Codex thread via `codex exec resume <id>`.
+   * restart) resumes the same Codex thread (`thread/resume`).
    */
   codexThreadId?: string | null;
   /**
-   * The Codex CLI thread for this session's background BUILDER (workspace-write),
-   * separate from the companion thread above. Persisted so a later delegate_build
-   * resumes the same builder thread. See COMPANION-ARCHITECTURE.md.
+   * The Codex CLI thread for this session's background BUILDER, separate
+   * from the companion thread above so a build can run concurrently with
+   * the conversation — not a different trust level; both are gated by the
+   * same review/approval. Persisted so a later delegate_build resumes the
+   * same builder thread. See COMPANION-ARCHITECTURE.md.
    */
   codexBuilderThreadId?: string | null;
 }

@@ -17,9 +17,20 @@ export function nextId(prefix: string) {
 export class DiffStore {
   private pending = new Map<string, PendingDiff>();
   private checkpoints: Checkpoint[] = [];
+  /** Resolvers registered by awaitDecision(), fired by decide() once every hunk of that diff is settled — see the Codex approval bridge (codex-app-server.ts), the only caller that needs to block on one specific diff's outcome. */
+  private decisionWaiters = new Map<string, Array<(diff: PendingDiff) => void>>();
 
   add(diff: PendingDiff) {
     this.pending.set(diff.id, diff);
+  }
+
+  /** Resolves once every hunk of this diff has been decided (accepted or rejected), whether that happens via the Operator or an auto-apply. Register right after add() — before any await — so there's no window for the decision to land first. */
+  awaitDecision(diffId: string): Promise<PendingDiff> {
+    return new Promise((resolve) => {
+      const arr = this.decisionWaiters.get(diffId) ?? [];
+      arr.push(resolve);
+      this.decisionWaiters.set(diffId, arr);
+    });
   }
 
   get(id: string) {
@@ -88,8 +99,16 @@ export class DiffStore {
     }
 
     const allDecided = diff.hunks.every((h) => diff.decisions[h.index] && diff.decisions[h.index] !== 'pending');
-    if (allDecided) this.pending.delete(diffId);
-    else this.pending.set(diffId, diff);
+    if (allDecided) {
+      this.pending.delete(diffId);
+      const waiters = this.decisionWaiters.get(diffId);
+      if (waiters) {
+        this.decisionWaiters.delete(diffId);
+        for (const w of waiters) w(diff);
+      }
+    } else {
+      this.pending.set(diffId, diff);
+    }
 
     return diff;
   }

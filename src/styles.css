@@ -580,6 +580,26 @@ input, textarea { font: inherit; color: inherit; }
 
 /* ── Rendered markdown ─────────────────────────────────────────────────── */
 .md { line-height: var(--leading); color: var(--fg); overflow-wrap: anywhere; }
+.md-raw-fallback { white-space: pre-wrap; font-family: inherit; margin: 0; }
+
+.error-boundary {
+  border: 1px solid var(--danger, #b4413c);
+  border-radius: 8px;
+  padding: var(--s3, 12px);
+  margin: var(--s3, 12px) 0;
+  background: color-mix(in srgb, var(--danger, #b4413c) 8%, transparent);
+  font-size: 0.9em;
+}
+.error-boundary-title { margin: 0 0 4px; font-weight: 600; }
+.error-boundary-detail { margin: 0 0 8px; opacity: 0.8; font-family: var(--font-mono, monospace); word-break: break-word; }
+.error-boundary-retry {
+  border: 1px solid var(--border, #444);
+  background: var(--bg, transparent);
+  color: inherit;
+  border-radius: 6px;
+  padding: 4px 10px;
+  cursor: pointer;
+}
 .md > *:first-child { margin-top: 0; }
 .md > *:last-child { margin-bottom: 0; }
 .md p { margin: 0 0 var(--s3); }

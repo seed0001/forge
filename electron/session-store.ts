@@ -108,7 +108,20 @@ export async function loadSessions(rootPath: string | null): Promise<Session[]> 
     const parsed = JSON.parse(raw) as { sessions?: Session[] };
     const sessions = Array.isArray(parsed.sessions) ? parsed.sessions : [];
     // Backward compat: sessions saved before this field existed have no roadmap.
-    return sessions.map((s) => ({ ...s, roadmap: s.roadmap ?? [] }));
+    return sessions.map((s) => ({
+      ...s,
+      roadmap: s.roadmap ?? [],
+      // A run cannot survive a restart. Any activity row still marked 'active'
+      // was interrupted by the app closing (or a crash) — settle it so the UI
+      // doesn't render a frozen "Thinking…" ticker on reopen.
+      activity: Array.isArray(s.activity)
+        ? s.activity.map((e) =>
+            e.status === 'active'
+              ? { ...e, status: 'error' as const, detail: `${e.detail} (interrupted)` }
+              : e
+          )
+        : s.activity,
+    }));
   } catch {
     return [];
   }

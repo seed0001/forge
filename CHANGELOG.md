@@ -2,6 +2,15 @@
 
 Every released version of Forge, newest first. Dates are when the build went out.
 
+## 0.2.44 — 2026-08-29
+
+- **Edge-case hardening of the chat loop and Stop button.** First pass of a systematic edge-case test campaign (tracked in `EDGE-CASES.md`), fixing five real bugs found by tracing abnormal paths:
+  - **Stopping the agent, then immediately sending a new message, could leave two turn-loops running at once** — the new message reset the internal "stopped" flag while the old loop was still unwinding, and both then mutated the same conversation. Turns now carry a generation token; a stopped turn stays dead no matter what starts after it.
+  - **The Activity trail kept showing "Thinking… 12s" (and half-finished tool rows) after you hit Stop or after a crash.** Every in-flight row is now settled the instant a turn ends by any path, and the thinking ticker is stopped directly by Stop rather than left to a cleanup step that could be skipped.
+  - **Hitting Stop when the agent was already idle** wrote a phantom "Stopped by you" row and a bogus run summary. Stop is now a no-op when nothing is running, and double-clicking it is clean.
+  - **Quitting or crashing mid-turn dropped your last message** from the visible history along with anything the agent had done that turn — the conversation was only checkpointed when the agent went quiet. Your message is now saved the moment you send it, and a session reopened after a crash no longer shows a frozen "Thinking…" row.
+  - **A malformed reply from the model could white-screen the whole app** — there was no React error boundary anywhere. Added one around the app (with a "try again") and around message rendering (falls back to raw text), so one bad message can't take down the window.
+
 ## 0.2.43 — 2026-08-29
 
 - **The agent can use git.** New `git` tool: he runs one git command in the project root as an argv array — `["commit", "-m", "..."]`, `["diff", "--staged"]`, `["switch", "-c", "feature"]`. Read-only commands (`status`, `diff`, `log`, `show`, `blame`, and bare `branch`/`tag` listings) always run, even in Plan mode. Anything that changes the repo goes through the same approval gate and Plan-mode block as `run_command`, is written to `AUDIT.md`, and can be auto-approved via the bash allowlist. Network commands — `push`, `pull`, `fetch`, `clone`, `remote`, `submodule` — are blocked outright; he stages and commits locally and tells you it's ready to push. Nothing is run through a shell, so args are never word-split or chained. Subagents and Focus agents get the tool too.

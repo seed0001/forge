@@ -1368,6 +1368,10 @@ export class Project {
     this.emit.message(this.id, sessionId, msg);
     this.emit.sessions(this.id);
     this.unseenCompletion = false;
+    // Checkpoint the user's message now, not just when the turn ends — a quit
+    // or crash mid-turn would otherwise drop it from the visible history along
+    // with whatever the agent had done so far this turn.
+    void this.persist();
 
     // A message sent while a turn is already running is NOT dropped (that used
     // to lose the Operator's answer silently). It's echoed to the chat above

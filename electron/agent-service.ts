@@ -1298,6 +1298,15 @@ function flattenTree(nodes: FileNode[], depth = 0): string[] {
 export class AgentSession {
   private messages: Message[] = [];
   private aborted = false;
+  /**
+   * Bumped at the start of every turn (send()). A running turn loop captures
+   * this value and bails the instant it changes — so a turn the Operator
+   * stopped can never resurrect itself when a fresh send() resets `aborted` to
+   * false. send() is not safe to genuinely run twice at once on one session;
+   * this makes the older invocation inert rather than racing the newer one on
+   * shared state (this.messages, the think ticker, onStatus).
+   */
+  private generation = 0;
   private controller: AbortController | null = null;
   private rootPath: string;
   private cb: AgentCallbacks;
@@ -1376,6 +1385,15 @@ export class AgentSession {
   private bytesRecoveryTried = false;
   /** The per-turn "Thinking… Ns" ticker, tracked on the instance so send()'s finally can always kill it — a leaked interval keeps the UI pinned on "thinking" forever. */
   private activeThinkTick: ReturnType<typeof setInterval> | null = null;
+  /**
+   * Every activity row currently showing status 'active', keyed by id. A turn
+   * ending by ANY path (finish, stop, crash, turn-limit) settles these so the
+   * trail never keeps a spinner running after the agent has actually stopped —
+   * the "it says Thinking… but it isn't" failure.
+   */
+  private liveRows = new Map<string, ActivityEvent>();
+  /** True only between send()'s start and the matching finally — so stop() on an idle session is a no-op instead of emitting a phantom "Stopped by you" row. */
+  private turnRunning = false;
   /** True for a turn where the project budget is spent (and no overage authorized): the agent may reply in words but every tool except set_budget is blocked. Recomputed at the top of each turn. */
   private budgetLocked = false;
   /** True once this send() has announced "we hit the budget", so it says it once and then stops rather than every turn. */
@@ -1843,6 +1861,9 @@ export class AgentSession {
   }
 
   stop() {
+    // Stop on a session that isn't running: don't emit a phantom "Stopped by
+    // you" row or a spurious closing summary.
+    if (!this.turnRunning) return;
     this.aborted = true;
     this.controller?.abort();
     // A Codex turn is a subprocess, not a fetch — abort() doesn't touch it.
@@ -1851,6 +1872,11 @@ export class AgentSession {
     // Subagents run their own independent loop and API calls — aborting only
     // this session's controller left them running unsupervised forever.
     for (const sub of this.activeSubagents) sub.stop();
+
+    // Every in-flight row (the "Thinking… 12s" ticker, a half-finished grep)
+    // is settled here and now — not left for send()'s finally, which the
+    // generation guard can skip, and not left spinning in the trail.
+    this.settleLiveRows('interrupted');
 
     // A tool-call batch aborted mid-flight can leave the trailing assistant
     // message's tool_calls without matching 'tool' result messages — every
@@ -3027,6 +3053,8 @@ export class AgentSession {
    * not tallied.
    */
   private trackActivity(evt: ActivityEvent) {
+    if (evt.status === 'active') this.liveRows.set(evt.id, evt);
+    else this.liveRows.delete(evt.id);
     this.cb.onActivity(evt);
     if (evt.status === 'active' || evt.kind === 'thinking') return;
     this.activityTally[evt.kind] = (this.activityTally[evt.kind] ?? 0) + 1;
@@ -3119,6 +3147,20 @@ export class AgentSession {
 
   private sleep(ms: number): Promise<void> {
     return new Promise((resolve) => setTimeout(resolve, ms));
+  }
+
+  /**
+   * Settle every activity row still marked 'active' and stop the think ticker.
+   * Called when a turn ends by any path. `status` is 'error' for an
+   * interruption/crash, 'done' for a clean end that happened to leave a
+   * straggler.
+   */
+  private settleLiveRows(note: string, status: 'error' | 'done' = 'error') {
+    for (const [, evt] of this.liveRows) {
+      this.cb.onActivity({ ...evt, status, detail: `${evt.detail} — ${note}` });
+    }
+    this.liveRows.clear();
+    this.clearThinkTick();
   }
 
   /** Stop the per-turn thinking ticker. Safe to call repeatedly and when there is none. */
@@ -3255,10 +3297,15 @@ export class AgentSession {
    * clears the ticker and reports the run as finished.
    */
   async send(userText: string, images?: ChatImage[], source: 'desktop' | 'portal' = 'desktop') {
+    const gen = ++this.generation;
+    this.turnRunning = true;
     this.cb.onStatus(true);
     try {
-      await this.runTurnLoop(userText, images, source);
+      await this.runTurnLoop(userText, images, source, gen);
     } catch (err) {
+      // A newer turn has taken over — this stale invocation must not touch the
+      // chat, the activity trail, or onStatus any more.
+      if (this.generation !== gen) return;
       this.clearThinkTick();
       await audit(
         this.rootPath,
@@ -3273,9 +3320,21 @@ export class AgentSession {
         );
       }
     } finally {
-      this.clearThinkTick();
-      this.cb.onStatus(false);
+      // Only the turn that is still current gets to clear the ticker and mark
+      // the session idle — otherwise a stopped-then-resent turn's unwind would
+      // yank the newer turn's "running" state out from under it.
+      if (this.generation === gen) {
+        this.turnRunning = false;
+        // Clean end: any row still 'active' here is a straggler, not a failure.
+        this.settleLiveRows('done', 'done');
+        this.cb.onStatus(false);
+      }
     }
+  }
+
+  /** A turn loop is defunct once the Operator stopped it or a newer turn (send()) superseded it. */
+  private turnDefunct(gen: number): boolean {
+    return this.aborted || this.generation !== gen;
   }
 
   /**
@@ -3335,10 +3394,12 @@ export class AgentSession {
 
   private async runTurnLoop(
     userText: string,
-    images?: ChatImage[],
-    source: 'desktop' | 'portal' = 'desktop'
+    images: ChatImage[] | undefined,
+    source: 'desktop' | 'portal',
+    gen: number
   ) {
     this.aborted = false;
+    this.liveRows.clear();
     this.activityTally = {};
     this.activityErrors = 0;
     this.activityAdded = 0;
@@ -3399,7 +3460,7 @@ export class AgentSession {
     // message-array / tools / compaction / retry machinery below applies.
     if (cfg.provider === 'codex') {
       await this.runCodexTurn(userText, cfg);
-      this.cb.onStatus(false);
+      if (this.generation === gen) this.cb.onStatus(false);
       return;
     }
 
@@ -3417,7 +3478,7 @@ export class AgentSession {
         ? Math.min(configuredMaxTurns, MAX_TOOL_CALLS_LIMIT)
         : MAX_TOOL_CALLS_DEFAULT;
     for (let turn = 0; turn < MAX_TURNS; turn++) {
-      if (this.aborted) return;
+      if (this.turnDefunct(gen)) return;
 
       // A lightweight, free progress check every few turns — no extra API
       // call, unlike a generated scratchpad — so a task that's wandering has
@@ -3454,6 +3515,7 @@ export class AgentSession {
       // Ephemeral for this one request only — never spliced into this.messages,
       // so it can never be persisted, re-sent verbatim, or accumulate turn over turn.
       const wireMessages = await this.messagesForRequest();
+      if (this.turnDefunct(gen)) return this.settleLiveRows('interrupted');
 
       // Plan vs Build — read fresh every turn, since the Operator can flip it
       // mid-task from the composer. In Plan mode the write/run/generate tools
@@ -3639,6 +3701,7 @@ export class AgentSession {
 
       const attempt = await this.fetchCompletionWithRetry(cfg, activeModel, wireMessages, thinkId);
       this.clearThinkTick();
+      if (this.turnDefunct(gen)) return;
 
       if (attempt.kind === 'aborted') {
         this.trackActivity({ id: thinkId, kind: 'thinking', detail: 'Stopped', status: 'error' });
@@ -3778,6 +3841,8 @@ export class AgentSession {
         }
       }
 
+      if (this.turnDefunct(gen)) return;
+
       const choice = data.choices?.[0];
       const message: Message = choice?.message ?? { role: 'assistant', content: '(no response)' };
       this.messages.push(message);
@@ -3834,7 +3899,7 @@ export class AgentSession {
 
         // Every other tool call keeps running one at a time, as before.
         for (const call of otherCalls) {
-          if (this.aborted) return;
+          if (this.turnDefunct(gen)) return;
           results.set(call.id, await this.callTool(call.function.name, parsedArgs(call)));
         }
 
@@ -3843,7 +3908,7 @@ export class AgentSession {
         // has already synthesized placeholder tool results for this whole
         // batch — falling through to push ours on top would duplicate every
         // tool_call_id and the next provider request would 400.
-        if (this.aborted) return;
+        if (this.turnDefunct(gen)) return;
 
         // Loop breaker: the exact same batch of calls (name+args), repeated
         // 3 times in a row, means nothing is changing between attempts —
@@ -3920,11 +3985,13 @@ export class AgentSession {
         }
       }
 
+      if (this.turnDefunct(gen)) return;
       this.flushMessage(replyText || '(agent returned no text)');
       this.cb.onStatus(false);
       return;
     }
 
+    if (this.turnDefunct(gen)) return;
     this.flushMessage('Stopped after reaching the turn limit for this task.');
     this.cb.onStatus(false);
   }

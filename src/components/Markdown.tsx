@@ -3,6 +3,7 @@ import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import rehypeHighlight from 'rehype-highlight';
 import { IconCheck, IconCopy } from './icons';
+import { ErrorBoundary } from './ErrorBoundary';
 
 function textOf(node: ReactNode): string {
   if (node == null || node === false) return '';
@@ -63,6 +64,21 @@ function CodeBlock({ children, language }: { children: ReactNode; language: stri
  * output is untrusted, and react-markdown escapes it by default.
  */
 export const Markdown = memo(function Markdown({ children }: { children: string }) {
+  return (
+    <ErrorBoundary
+      label="markdown"
+      fallback={
+        // Malformed markdown must never take the thread down with it — show the
+        // raw text verbatim instead.
+        <pre className="md md-raw-fallback">{children}</pre>
+      }
+    >
+      <MarkdownInner>{children}</MarkdownInner>
+    </ErrorBoundary>
+  );
+});
+
+const MarkdownInner = memo(function MarkdownInner({ children }: { children: string }) {
   return (
     <div className="md">
       <ReactMarkdown

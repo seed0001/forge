@@ -18,7 +18,14 @@ import {
 import type { ChatProviderConfig } from './chat-provider';
 import { runCodexTurn, type CodexHandle, type CodexApprovalBridge } from './codex-app-server';
 import { matchesAllowlist, isShellChained } from './perm-store';
-import { parseScheduleTaskInput, SCHEDULE_REQUEST_FILENAME, type ScheduleTaskInput } from './scheduler-store';
+import {
+  parseScheduleTaskInput,
+  describeScheduleSpec,
+  SCHEDULE_REQUEST_FILENAME,
+  SCHEDULE_RESULT_FILENAME,
+  SCHEDULE_STATUS_FILENAME,
+  type ScheduleTaskInput,
+} from './scheduler-store';
 import {
   fetchJsonGuarded,
   fetchTextGuarded,
@@ -212,6 +219,8 @@ export interface AgentCallbacks {
    * callbacks, same as startFocusAgent/startBuilder.
    */
   createSchedule?: (label: string, prompt: string, schedule: ScheduleSpec) => ScheduledTask;
+  /** list_scheduled_tasks fires this — the real, current list, so a question like "how much time is left on X" is answered from actual state instead of guessed from elapsed conversation time. Only present on the primary session's callbacks. */
+  listSchedules?: () => ScheduledTask[];
 }
 
 /**
@@ -1076,11 +1085,14 @@ const SCHEDULE_TASK_TOOL = {
   function: {
     name: 'schedule_task',
     description:
-      'Create a recurring or one-time scheduled task: a fixed prompt that fires automatically into its own ' +
-      'background session on a cron or interval schedule — the same mechanism as the Scheduler panel, without ' +
-      'making the Operator open it. Use this whenever they ask for a reminder or anything that should happen ' +
-      'automatically later ("every morning at 6am, remind me to...", "check on this every 30 minutes"). Pass ' +
-      'EXACTLY ONE of cron or interval_minutes.',
+      'Create a scheduled task: a fixed prompt that fires automatically into its own background session — the ' +
+      'same mechanism as the Scheduler panel, without making the Operator open it. Use this whenever they ask ' +
+      'for a reminder or anything that should happen automatically later. For a ONE-TIME reminder ("remind me ' +
+      'in 10 minutes", "in an hour") use in_minutes — it fires once and is gone, it is NOT the same as a short ' +
+      'interval_minutes (which repeats forever). For something recurring ("every morning at 6am", "check on ' +
+      'this every 30 minutes") use cron or interval_minutes instead. Pass EXACTLY ONE of cron, interval_minutes, ' +
+      'or in_minutes. The return value is the actual created task — trust only that, never assume this call ' +
+      'succeeded just because you made it.',
     parameters: {
       type: 'object',
       properties: {
@@ -1096,15 +1108,34 @@ const SCHEDULE_TASK_TOOL = {
           type: 'string',
           description:
             'A 5-field cron expression (minute hour day month weekday) — e.g. "0 6 * * *" for every day at 6am. ' +
-            'Omit if using interval_minutes instead.',
+            'Recurring. Omit if using interval_minutes or in_minutes instead.',
         },
         interval_minutes: {
           type: 'number',
-          description: 'Fire every N minutes instead of a cron schedule. Omit if using cron instead.',
+          description: 'Fire every N minutes, forever, instead of a cron schedule. Recurring. Omit if using cron or in_minutes instead.',
+        },
+        in_minutes: {
+          type: 'number',
+          description:
+            'Fire exactly ONCE, N minutes from now, then stop existing — for "remind me in N minutes/hours" ' +
+            '(convert hours to minutes yourself). Omit if using cron or interval_minutes instead.',
         },
       },
       required: ['label', 'prompt'],
     },
+  },
+} as const;
+
+const LIST_SCHEDULED_TASKS_TOOL = {
+  type: 'function',
+  function: {
+    name: 'list_scheduled_tasks',
+    description:
+      'List every scheduled task that actually exists right now — id, label, schedule, enabled, next run ' +
+      'time, last run time/result. Call this before answering ANY question about an existing reminder or ' +
+      'scheduled task ("how much time is left on X", "did Y already fire", "is X still active") — never ' +
+      'estimate or guess from how much time has passed in the conversation.',
+    parameters: { type: 'object', properties: {}, required: [] },
   },
 } as const;
 
@@ -1118,6 +1149,7 @@ const TOOLS = [
   PROPOSE_ROADMAP_TOOL,
   COMPLETE_ROADMAP_ITEM_TOOL,
   SCHEDULE_TASK_TOOL,
+  LIST_SCHEDULED_TASKS_TOOL,
 ];
 const SUBAGENT_TOOLS = BASE_TOOLS;
 
@@ -1220,7 +1252,10 @@ const ABOUT_FORGE: string[] = [
   '  run obeys the same autonomy, mode, and permissions as the project — nothing lands unreviewed',
   '  that would not land unreviewed in a normal session. There is no separate "goals" feature. You',
   '  can create one yourself (schedule_task, or your own instructions if that tool is not in your',
-  '  list) instead of telling the Operator to open the Scheduler panel by hand.',
+  '  list) instead of telling the Operator to open the Scheduler panel by hand — a one-time reminder',
+  '  ("in 10 minutes") is a real, separate schedule kind, not a short recurring interval. Check',
+  '  list_scheduled_tasks (or your own instructions) for the real state before answering any question',
+  '  about an existing one — never estimate time-left or whether it fired from conversation context.',
   '- Roadmap: propose_roadmap offers an ordered checklist of milestones; the Operator approves',
   '  items one at a time and you are handed them in order. Focus agents (spawn_focus_agent) are',
   '  independent background agents with a time budget, for unattended multi-step work.',
@@ -1258,19 +1293,38 @@ function buildCodexPreamble(
     '',
     ...ABOUT_FORGE,
     '',
-    "CREATING A SCHEDULED TASK: you have no schedule_task tool — you only have file read/write and shell,",
-    "not Forge's function-calling tools. So when the Operator wants a reminder or anything recurring,",
-    `write a file at exactly this path, relative to the workspace root: ${SCHEDULE_REQUEST_FILENAME}`,
-    'Content must be JSON, exactly one of "cron" or "interval_minutes", e.g.:',
-    '{"label": "Morning dog walk", "prompt": "Remind the Operator to let the dog outside and give him',
-    'fresh water.", "cron": "0 6 * * *"}',
-    '— "cron" is a standard 5-field expression (minute hour day month weekday); "interval_minutes" (a',
-    'plain number) fires every N minutes instead. "prompt" is what gets sent to whichever agent picks',
-    'this up when it fires, so phrase it as an instruction, not a note back to the Operator. Forge checks',
-    'for this file automatically every ~20 seconds, creates the real scheduled task from it, deletes the',
-    'file, and posts a confirmation (or the reason it failed) into this chat — you do not need to tell',
-    'the Operator to open the Scheduler panel themselves, and you should not report success until you',
-    'actually see that confirmation.',
+    "CREATING A SCHEDULED TASK OR REMINDER: you have no schedule_task tool — you only have file",
+    "read/write and shell, not Forge's function-calling tools. So when the Operator wants a reminder or",
+    `anything scheduled, write a file at exactly this path, relative to the workspace root: ${SCHEDULE_REQUEST_FILENAME}`,
+    'Content must be JSON with "label" and "prompt", plus EXACTLY ONE of:',
+    '  "in_minutes": 10          — ONE-TIME: fires once, N minutes from now, then removes itself. Use',
+    '                              this for "remind me in N minutes/hours" — it is NOT the same as a',
+    '                              short interval, which repeats forever.',
+    '  "cron": "0 6 * * *"       — RECURRING: a standard 5-field cron expression (minute hour day month',
+    '                              weekday), e.g. every day at 6am.',
+    '  "interval_minutes": 30   — RECURRING: fires every N minutes, forever.',
+    'Example for "remind me in 10 minutes to let the dog out":',
+    '{"label": "Let the dog out", "prompt": "Remind the Operator to let the dog out.", "in_minutes": 10}',
+    '"prompt" is what gets sent to whichever agent picks this up when it fires — phrase it as an',
+    'instruction, not a note back to the Operator.',
+    '',
+    'THIS WRITE DOES NOT MEAN THE REMINDER EXISTS YET, AND YOU MUST NOT SAY IT DOES. Writing the request',
+    `file only proposes it — Forge processes it and writes a RESULT file at ${SCHEDULE_RESULT_FILENAME}`,
+    'the instant that write is approved, deleting the request file either way. Before replying, read_file',
+    `${SCHEDULE_RESULT_FILENAME} — it should exist within a couple seconds of the write landing; if it`,
+    'is not there yet, wait a moment and read again (a few tries is enough). Relay what it actually says',
+    '({"ok":true,...} or {"ok":false,"error":"..."}) — a real cron/interval mistake, a declined edit, or',
+    'anything else can make this fail silently from your point of view otherwise. Never tell the Operator',
+    'a reminder is set, still counting down, or has fired, without having just read that result yourself',
+    'this turn — "I wrote the file" is not "the reminder exists" and guessing either one is exactly the',
+    'kind of confident-sounding wrong answer that breaks their trust in you.',
+    '',
+    `CHECKING ON AN EXISTING REMINDER: read ${SCHEDULE_STATUS_FILENAME} — it always reflects the current`,
+    'list of scheduled tasks (id, label, schedule, enabled, nextRunAt as an epoch-ms timestamp, lastRunAt,',
+    'lastResult), rewritten every time anything actually changes. Compute "how much time is left" yourself',
+    'from nextRunAt and the current time; do not estimate it from how long the conversation has felt. A',
+    'one-time reminder disappears from this file entirely once it has fired — that IS the confirmation it',
+    'fired, not something to infer from elapsed time either.',
   ];
   if (ctx.persona.trim()) {
     parts.push(
@@ -2645,9 +2699,23 @@ export class AgentSession {
       const parsed = parseScheduleTaskInput(args as ScheduleTaskInput);
       if (!parsed.ok) return `ERROR: schedule_task ${parsed.error}.`;
       const task = this.cb.createSchedule(parsed.label, parsed.prompt, parsed.schedule);
-      const when = parsed.schedule.kind === 'cron' ? `cron "${parsed.schedule.expr}"` : `every ${parsed.schedule.minutes} minute(s)`;
+      const when = describeScheduleSpec(parsed.schedule);
       this.trackActivity({ id: nextId('act'), kind: 'thinking', detail: `Scheduled: ${task.label}`, status: 'done' });
-      return `Scheduled "${task.label}" (${when}). It'll fire automatically from now on — the Operator can review or edit it any time in the Scheduler panel.`;
+      const recurs = parsed.schedule.kind !== 'once';
+      return `Scheduled "${task.label}" (${when}). ${recurs ? "It'll fire automatically from now on" : 'It will fire once, then remove itself'} — the Operator can review or edit it any time in the Scheduler panel.`;
+    }
+
+    if (name === 'list_scheduled_tasks') {
+      if (!this.cb.listSchedules) return 'ERROR: scheduling is not available from this context.';
+      const tasks = this.cb.listSchedules();
+      if (!tasks.length) return 'No scheduled tasks exist right now.';
+      const now = Date.now();
+      const lines = tasks.map((t) => {
+        const when = describeScheduleSpec(t.schedule);
+        const eta = t.nextRunAt ? `${Math.max(0, Math.round((t.nextRunAt - now) / 60_000))} minute(s) from now` : 'never (disabled or spent)';
+        return `- "${t.label}" (${when}) — enabled: ${t.enabled}, next run: ${eta}, last result: ${t.lastResult ?? 'never run yet'}`;
+      });
+      return untrusted(lines.join('\n'));
     }
 
     if (name === 'log_lesson') {

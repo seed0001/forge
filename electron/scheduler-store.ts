@@ -66,6 +66,8 @@ export interface ScheduleTaskInput {
   prompt?: unknown;
   cron?: unknown;
   interval_minutes?: unknown;
+  /** Fire once, this many minutes from when the request is processed — e.g. "remind me in 10 minutes" (not a recurring schedule; see ScheduleSpec's 'once' kind). */
+  in_minutes?: unknown;
 }
 
 export type ParsedScheduleTask =
@@ -85,14 +87,23 @@ export function parseScheduleTaskInput(input: ScheduleTaskInput): ParsedSchedule
 
   const cron = typeof input.cron === 'string' ? input.cron.trim() : '';
   const intervalRaw = typeof input.interval_minutes === 'number' ? input.interval_minutes : Number(input.interval_minutes);
+  const inMinutesRaw = typeof input.in_minutes === 'number' ? input.in_minutes : Number(input.in_minutes);
   const hasCron = cron !== '';
   const hasInterval = Number.isFinite(intervalRaw) && intervalRaw > 0;
-  if (hasCron === hasInterval) return { ok: false, error: 'requires EXACTLY ONE of "cron" or "interval_minutes"' };
+  const hasOnce = Number.isFinite(inMinutesRaw) && inMinutesRaw > 0;
+  const optionCount = Number(hasCron) + Number(hasInterval) + Number(hasOnce);
+  if (optionCount !== 1) {
+    return { ok: false, error: 'requires EXACTLY ONE of "cron" (recurring), "interval_minutes" (recurring), or "in_minutes" (fires once)' };
+  }
   if (hasCron && !isValidCronExpr(cron)) {
     return { ok: false, error: `"${cron}" is not a valid 5-field cron expression (minute hour day month weekday)` };
   }
 
-  const schedule: ScheduleSpec = hasCron ? { kind: 'cron', expr: cron } : { kind: 'interval', minutes: Math.round(intervalRaw) };
+  const schedule: ScheduleSpec = hasCron
+    ? { kind: 'cron', expr: cron }
+    : hasInterval
+      ? { kind: 'interval', minutes: Math.round(intervalRaw) }
+      : { kind: 'once', at: Date.now() + Math.round(inMinutesRaw) * 60_000 };
   return { ok: true, label, prompt, schedule };
 }
 
@@ -101,12 +112,50 @@ export function parseScheduleTaskInput(input: ScheduleTaskInput): ParsedSchedule
  * function-calling tools, only read/write/shell) can write to instead of
  * telling the Operator to use the Scheduler panel by hand. Written through
  * Codex's normal file-edit path, so it's gated by the same edit
- * permission/review as any other Codex write. project.ts's tickScheduler
- * polls for it every tick and deletes it once processed (success or not) —
- * see buildCodexPreamble in agent-service.ts for the exact contract Codex is
- * told to follow.
+ * permission/review as any other Codex write. project.ts processes it the
+ * instant that write is approved (not waiting for the next tick — see
+ * requestEditApproval), and also on every scheduler tick as a fallback, and
+ * deletes it once processed (success or not) — see buildCodexPreamble in
+ * agent-service.ts for the exact contract Codex is told to follow.
  */
 export const SCHEDULE_REQUEST_FILENAME = '.forge-schedule-request.json';
+
+/**
+ * Written by project.ts immediately after processing a schedule-request
+ * file — {"ok":true,...} or {"ok":false,"error":"..."}. Codex is required
+ * (buildCodexPreamble) to read this back and relay its actual content
+ * before claiming a reminder was created, instead of assuming its own file
+ * write succeeded — the whole point being that "I wrote the file" and "the
+ * task was actually created" are two different, independently-verifiable
+ * facts, and only the second one is true confirmation.
+ */
+export const SCHEDULE_RESULT_FILENAME = '.forge-schedule-result.json';
+
+/**
+ * Always reflects the CURRENT list of this project's scheduled tasks —
+ * rewritten by project.ts every time the list actually changes (create,
+ * update, delete, or fire). Codex has no way to query live scheduler state
+ * (it can't call listSchedules() the way the native tool loop's
+ * AgentCallbacks can) — this file is its only grounded way to answer
+ * "how much time is left on X" or "did Y fire yet" instead of guessing from
+ * how much wall-clock time has passed in the conversation, which is exactly
+ * how it previously claimed a reminder had "already fired" when nothing had
+ * ever been created at all.
+ */
+export const SCHEDULE_STATUS_FILENAME = '.forge-schedule-status.json';
+
+/** The subset of ScheduledTask fields worth telling Codex about via SCHEDULE_STATUS_FILENAME — omits sessionId, which is internal. */
+export function summarizeSchedulesForStatusFile(tasks: ScheduledTask[]): Array<Record<string, unknown>> {
+  return tasks.map((t) => ({
+    id: t.id,
+    label: t.label,
+    schedule: t.schedule,
+    enabled: t.enabled,
+    nextRunAt: t.nextRunAt,
+    lastRunAt: t.lastRunAt,
+    lastResult: t.lastResult,
+  }));
+}
 
 /**
  * Next minute-boundary timestamp at or after `from` matching a cron
@@ -154,5 +203,13 @@ export function nextCronRun(expr: string, from: number): number | null {
 
 export function computeNextRun(schedule: ScheduleSpec, from: number): number | null {
   if (schedule.kind === 'interval') return from + schedule.minutes * 60_000;
+  if (schedule.kind === 'once') return schedule.at > from ? schedule.at : null;
   return nextCronRun(schedule.expr, from + 60_000);
+}
+
+/** Human-readable schedule description — "cron ...", "every N minute(s)", or "once at <time>" — shared by the schedule_task tool result, the Codex schedule-request confirmation, and the Scheduler panel's list view, so they can never describe the same ScheduleSpec differently. */
+export function describeScheduleSpec(schedule: ScheduleSpec): string {
+  if (schedule.kind === 'cron') return `cron "${schedule.expr}"`;
+  if (schedule.kind === 'interval') return `every ${schedule.minutes} minute(s)`;
+  return `once at ${new Date(schedule.at).toLocaleString()}`;
 }

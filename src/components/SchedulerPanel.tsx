@@ -13,7 +13,9 @@ import {
 } from './icons';
 
 function describeSchedule(schedule: ScheduleSpec): string {
-  return schedule.kind === 'cron' ? `cron: ${schedule.expr}` : `every ${schedule.minutes}m`;
+  if (schedule.kind === 'cron') return `cron: ${schedule.expr}`;
+  if (schedule.kind === 'interval') return `every ${schedule.minutes}m`;
+  return `once at ${new Date(schedule.at).toLocaleString()}`;
 }
 
 function fmtWhen(ts: number | null): string {

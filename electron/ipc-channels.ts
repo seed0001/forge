@@ -704,11 +704,17 @@ export interface ProjectHydration {
 
 /**
  * A scheduled task fires a fixed prompt into its own dedicated background
- * session on a cron or interval schedule — see electron/scheduler-store.ts
- * for the cron matcher and next-run computation, and workspace.ts's
- * tickScheduler for what actually fires it.
+ * session on a cron or interval schedule, or exactly once at a fixed time —
+ * see electron/scheduler-store.ts for the cron matcher and next-run
+ * computation, and workspace.ts's tickScheduler for what actually fires it.
+ * A 'once' task is removed automatically after it fires (see
+ * Project.tickScheduler) — it is not disabled in place like a spent cron
+ * task, since there is nothing left for it to ever do again.
  */
-export type ScheduleSpec = { kind: 'cron'; expr: string } | { kind: 'interval'; minutes: number };
+export type ScheduleSpec =
+  | { kind: 'cron'; expr: string }
+  | { kind: 'interval'; minutes: number }
+  | { kind: 'once'; at: number };
 
 export interface ScheduledTask {
   id: string;

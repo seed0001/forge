@@ -14,7 +14,11 @@ import {
   saveScheduledTasks,
   computeNextRun,
   parseScheduleTaskInput,
+  describeScheduleSpec,
+  summarizeSchedulesForStatusFile,
   SCHEDULE_REQUEST_FILENAME,
+  SCHEDULE_RESULT_FILENAME,
+  SCHEDULE_STATUS_FILENAME,
   type ScheduleTaskInput,
 } from './scheduler-store';
 import { loadFocusBoard, saveFocusBoard } from './focus-board';
@@ -480,6 +484,7 @@ export class Project {
     if (!this.activeSessionId) this.newSession();
     this.schedules = this.rootPath ? await loadScheduledTasks(this.rootPath) : [];
     this.board = this.rootPath ? await loadFocusBoard(this.rootPath) : [];
+    void this.writeScheduleStatusFile();
   }
 
   /** Exports every session that currently has a live agent, not just the active one — a background session's history must persist too. */
@@ -742,6 +747,19 @@ export class Project {
    * a hack.
    */
   async requestEditApproval(diff: PendingDiff): Promise<PendingDiff> {
+    const resolved = await this.resolveEditApproval(diff);
+    // If this write was the Codex schedule-request file, process it the
+    // instant it lands rather than waiting up to ~20s for the next
+    // scheduler tick — Codex is told to wait on the confirmation this
+    // produces (SCHEDULE_RESULT_FILENAME) before reporting success, so a
+    // slow pickup here would just mean it waits (or gives up) unnecessarily.
+    if (this.rootPath && diff.path === path.join(this.rootPath, SCHEDULE_REQUEST_FILENAME)) {
+      void this.checkScheduleRequestFile();
+    }
+    return resolved;
+  }
+
+  private async resolveEditApproval(diff: PendingDiff): Promise<PendingDiff> {
     if (!this.rootPath) return diff;
     const editPerm = resolvePermission('edit', this.autonomy, this.mode);
     if (editPerm === 'deny') return diff; // every hunk stays 'pending' — caller reads that as "not accepted"
@@ -976,10 +994,19 @@ export class Project {
 
   private emitSchedules() {
     this.emit.schedulerUpdated(this.id, this.schedules);
+    void this.writeScheduleStatusFile();
   }
 
   private persistSchedules() {
     return this.rootPath ? saveScheduledTasks(this.rootPath, this.schedules) : Promise.resolve();
+  }
+
+  /** Keeps SCHEDULE_STATUS_FILENAME in the project root in sync with this.schedules — see its docstring in scheduler-store.ts for why Codex needs this. */
+  private async writeScheduleStatusFile(): Promise<void> {
+    if (!this.rootPath) return;
+    const filePath = path.join(this.rootPath, SCHEDULE_STATUS_FILENAME);
+    const body = JSON.stringify(summarizeSchedulesForStatusFile(this.schedules), null, 2);
+    await fs.writeFile(filePath, body, 'utf8').catch(() => {});
   }
 
   createSchedule(label: string, prompt: string, schedule: ScheduleSpec): ScheduledTask {
@@ -1048,10 +1075,19 @@ export class Project {
   tickScheduler() {
     if (!this.rootPath) return;
     const now = Date.now();
+    const spent: string[] = [];
     for (const task of this.schedules) {
       if (!task.enabled || task.nextRunAt === null || task.nextRunAt > now) continue;
       task.nextRunAt = computeNextRun(task.schedule, now);
+      // A 'once' task has nothing left to ever do after this — remove it
+      // instead of leaving a dead, permanently-dormant entry in the list.
+      if (task.schedule.kind === 'once' && task.nextRunAt === null) spent.push(task.id);
       void this.fireSchedule(task);
+    }
+    if (spent.length) {
+      this.schedules = this.schedules.filter((t) => !spent.includes(t.id));
+      void this.persistSchedules();
+      this.emitSchedules();
     }
     void this.checkScheduleRequestFile();
   }
@@ -1061,37 +1097,46 @@ export class Project {
    * Forge's function-calling tools), so it's told (buildCodexPreamble in
    * agent-service.ts) to write SCHEDULE_REQUEST_FILENAME instead — a normal
    * file write, gated by the same edit review/approval as anything else it
-   * touches. Picked up here on the same tick as everything else so a request
-   * lands within ~20s of being approved, whether or not anything is due to
-   * fire. The file is removed either way (success or a bad request) so a
-   * malformed one can never be retried in a loop.
+   * touches. Called the instant that write is approved (requestEditApproval)
+   * and again on every tick as a fallback in case that hook is ever missed.
+   * The request file is removed either way (success or a bad request) so a
+   * malformed one can never be retried in a loop, and a result file is
+   * always written in its place — Codex is required to read that back and
+   * relay its actual content rather than assume its own write succeeded.
    */
   private async checkScheduleRequestFile() {
     if (!this.rootPath) return;
-    const filePath = path.join(this.rootPath, SCHEDULE_REQUEST_FILENAME);
+    const requestPath = path.join(this.rootPath, SCHEDULE_REQUEST_FILENAME);
+    const resultPath = path.join(this.rootPath, SCHEDULE_RESULT_FILENAME);
     let raw: string;
     try {
-      raw = await fs.readFile(filePath, 'utf8');
+      raw = await fs.readFile(requestPath, 'utf8');
     } catch {
       return; // the normal case — no request pending
     }
-    await fs.rm(filePath, { force: true }).catch(() => {});
+    await fs.rm(requestPath, { force: true }).catch(() => {});
 
     let input: ScheduleTaskInput;
     try {
       input = JSON.parse(raw);
     } catch {
-      this.reportScheduleRequestResult(`${SCHEDULE_REQUEST_FILENAME} wasn't valid JSON — nothing was scheduled.`);
+      await this.writeScheduleResult(resultPath, { ok: false, error: `${SCHEDULE_REQUEST_FILENAME} was not valid JSON` });
       return;
     }
     const parsed = parseScheduleTaskInput(input);
     if (!parsed.ok) {
-      this.reportScheduleRequestResult(`Couldn't create the scheduled task from ${SCHEDULE_REQUEST_FILENAME}: ${parsed.error}.`);
+      await this.writeScheduleResult(resultPath, { ok: false, error: parsed.error });
       return;
     }
-    this.createSchedule(parsed.label, parsed.prompt, parsed.schedule);
-    const when = parsed.schedule.kind === 'cron' ? `cron "${parsed.schedule.expr}"` : `every ${parsed.schedule.minutes} minute(s)`;
-    this.reportScheduleRequestResult(`Scheduled "${parsed.label}" (${when}).`);
+    const task = this.createSchedule(parsed.label, parsed.prompt, parsed.schedule);
+    const when = describeScheduleSpec(parsed.schedule);
+    await this.writeScheduleResult(resultPath, { ok: true, id: task.id, label: task.label, when, nextRunAt: task.nextRunAt });
+    this.reportScheduleRequestResult(`Scheduled "${task.label}" (${when}).`);
+  }
+
+  private async writeScheduleResult(resultPath: string, result: Record<string, unknown>): Promise<void> {
+    await fs.writeFile(resultPath, JSON.stringify(result, null, 2), 'utf8').catch(() => {});
+    if (result.ok === false) this.reportScheduleRequestResult(`Couldn't create the scheduled task: ${result.error}.`);
   }
 
   /** Posts a **Scheduler:** confirmation/error into whichever session is currently active — the one the Operator was talking to when they asked for the reminder. */
@@ -1556,6 +1601,7 @@ export class Project {
         startFocusAgent: (task, label, budgetMinutes) => this.startFocusAgent(task, label, budgetMinutes),
         startBuilder: (task) => this.startBuilder(sessionId, task),
         createSchedule: (label, prompt, schedule) => this.createSchedule(label, prompt, schedule),
+        listSchedules: () => this.listSchedules(),
       }, false, findSession()?.title, this.workspaceLink);
       const session = findSession();
       if (session) {

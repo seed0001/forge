@@ -1096,6 +1096,89 @@ const PLAN_MODE_BLOCKED = (tool: string): string =>
   `ERROR: ${tool} is disabled in Plan mode — Plan mode is for reading and research only. ` +
   `Finish the plan and ask the Operator to switch to Build mode.`;
 
+/**
+ * Authoritative description of Forge's own features. Shared verbatim between
+ * the HTTP-loop system prompt (buildSystemPrompt) and the Codex-companion
+ * preamble (buildCodexPreamble) so both answer "how does Forge's X work?"
+ * from the same source of truth rather than from a similarly-named feature in
+ * another product.
+ */
+const ABOUT_FORGE: string[] = [
+  'ABOUT FORGE — the desktop app you are embedded in. This is the authoritative description; use it,',
+  'not assumptions, when the Operator asks how a part of Forge works:',
+  '- A workspace holds one or more projects; each project has chat sessions, its own autonomy',
+  '  level, its own Plan/Build mode, and a permission config (edit / bash / webfetch, each',
+  '  allow / ask / deny).',
+  '- Scheduler: a scheduled task is a fixed prompt that fires automatically into its own dedicated',
+  '  background session, on a cron expression (5-field: minute hour day month weekday, with *, ',
+  '  numbers, comma lists, */step, a-b ranges) or a simple "every N minutes" interval. One global',
+  '  timer in the main process ticks every open project; there is no per-task timer. A run reuses',
+  '  the same background session each time; if that session is still busy from the previous run,',
+  '  this run is skipped and retried on the next tick (runs never overlap or queue). A scheduled',
+  '  run obeys the same autonomy, mode, and permissions as the project — nothing lands unreviewed',
+  '  that would not land unreviewed in a normal session. There is no separate "goals" feature.',
+  '- Roadmap: propose_roadmap offers an ordered checklist of milestones; the Operator approves',
+  '  items one at a time and you are handed them in order. Focus agents (spawn_focus_agent) are',
+  '  independent background agents with a time budget, for unattended multi-step work.',
+  '- Knowledge base: memory_topic / memory_record store durable project (or workspace) facts that',
+  '  survive compaction and restart and are re-injected into context each turn within a budget.',
+  '- Edits never touch disk directly by default — they queue as a per-hunk reviewable diff, unless',
+  '  the Operator set the edit permission to allow (then they auto-apply, still logged/undoable).',
+  '- The provider/model is set in Settings or via set_model; media tools always route via OpenRouter.',
+];
+
+/**
+ * The identity + context block prepended to the FIRST message of a Codex
+ * companion thread (see AgentSession.runCodexTurn). Codex runs OpenAI's own
+ * agent under its own system prompt, so left to itself it answers as "Codex"
+ * and describes ChatGPT/Codex features when asked about memory, scheduling,
+ * etc. This frames it as Forge's companion and hands it Forge's own facts,
+ * the Operator's persona, rules, and project knowledge — the same material
+ * the HTTP loop injects every turn. Sent once per thread; `codex exec resume`
+ * carries it forward on later turns.
+ */
+function buildCodexPreamble(
+  rootPath: string,
+  ctx: { persona: string; rules: string; knowledgeBase: string; projectFiles: string }
+): string {
+  const parts: string[] = [
+    'You are the companion agent inside Forge, a desktop pair-programming app. You happen to run',
+    'via the OpenAI Codex CLI, but you ARE Forge\'s companion — not a generic OpenAI or "Codex"',
+    'assistant, and not ChatGPT. When the Operator asks about your capabilities, your memory,',
+    'scheduling, or how any part of this app works, answer about FORGE (see ABOUT FORGE below), in',
+    'your own voice — never about ChatGPT or the Codex product, which are different systems.',
+    `The open workspace is rooted at: ${rootPath}`,
+    '',
+    'GROUNDING: never describe or judge code you have not read this session. A filename is not',
+    'evidence of contents. Prefer "I have not looked at X yet" over a confident guess.',
+    '',
+    ...ABOUT_FORGE,
+  ];
+  if (ctx.persona.trim()) {
+    parts.push(
+      '',
+      'PERSONA — the Operator has given you a voice. Let it colour how you phrase things without ever',
+      'bending facts, grounding, or safety:',
+      ctx.persona.trim()
+    );
+  }
+  if (ctx.rules.trim()) {
+    parts.push(
+      '',
+      "[TRUSTED: Operator rules — the Operator's own standing instructions, authoritative]",
+      ctx.rules.trim(),
+      '[/TRUSTED]'
+    );
+  }
+  if (ctx.projectFiles.trim()) {
+    parts.push('', 'Current project working-memory files:', ctx.projectFiles.trim());
+  }
+  if (ctx.knowledgeBase.trim()) {
+    parts.push('', 'Project knowledge base:', ctx.knowledgeBase.trim());
+  }
+  return parts.join('\n');
+}
+
 function buildSystemPrompt(rootPath: string, isSubagent = false): string {
   return [
     isSubagent
@@ -1135,27 +1218,7 @@ function buildSystemPrompt(rootPath: string, isSubagent = false): string {
     '  Devin…). Those are different systems; describing one of them as if it were Forge is a',
     '  fabrication. If the ABOUT FORGE section does not cover the detail asked, say so plainly.',
     '',
-    'ABOUT FORGE — the desktop app you are embedded in. This is the authoritative description; use it,',
-    'not assumptions, when the Operator asks how a part of Forge works:',
-    '- A workspace holds one or more projects; each project has chat sessions, its own autonomy',
-    '  level, its own Plan/Build mode, and a permission config (edit / bash / webfetch, each',
-    '  allow / ask / deny).',
-    '- Scheduler: a scheduled task is a fixed prompt that fires automatically into its own dedicated',
-    '  background session, on a cron expression (5-field: minute hour day month weekday, with *, ',
-    '  numbers, comma lists, */step, a-b ranges) or a simple "every N minutes" interval. One global',
-    '  timer in the main process ticks every open project; there is no per-task timer. A run reuses',
-    '  the same background session each time; if that session is still busy from the previous run,',
-    '  this run is skipped and retried on the next tick (runs never overlap or queue). A scheduled',
-    '  run obeys the same autonomy, mode, and permissions as the project — nothing lands unreviewed',
-    '  that would not land unreviewed in a normal session. There is no separate "goals" feature.',
-    '- Roadmap: propose_roadmap offers an ordered checklist of milestones; the Operator approves',
-    '  items one at a time and you are handed them in order. Focus agents (spawn_focus_agent) are',
-    '  independent background agents with a time budget, for unattended multi-step work.',
-    '- Knowledge base: memory_topic / memory_record store durable project (or workspace) facts that',
-    '  survive compaction and restart and are re-injected into context each turn within a budget.',
-    '- Edits never touch disk directly by default — they queue as a per-hunk reviewable diff, unless',
-    '  the Operator set the edit permission to allow (then they auto-apply, still logged/undoable).',
-    '- The provider/model is set in Settings or via set_model; media tools always route via OpenRouter.',
+    ...ABOUT_FORGE,
     '',
     'TOOLS:',
     '- list_files shows names only — never contents. It is a starting point, never a source of',
@@ -3405,9 +3468,32 @@ export class AgentSession {
     const bashDenied = this.cb.getPermission('bash') === 'deny';
     const sandbox: CodexSandbox = editDenied || bashDenied ? 'read-only' : 'workspace-write';
 
+    // On a fresh Codex thread, prepend Forge's identity + context so the
+    // companion answers as Forge (persona, ABOUT FORGE, rules, knowledge base),
+    // not as a generic Codex assistant. `codex exec resume` carries this
+    // forward, so later turns send the message alone.
+    let prompt = userText;
+    if (!this.codexThreadId) {
+      const [rules, kb, projectFiles] = await Promise.all([
+        readRules().catch(() => ''),
+        this.contextStore
+          .resolveForPrompt(CONTEXT_CHAR_BUDGET)
+          .then((p) => p.text)
+          .catch(() => ''),
+        this.buildProjectFilesNote().catch(() => null),
+      ]);
+      const preamble = buildCodexPreamble(this.rootPath, {
+        persona: process.env.AGENT_PERSONA ?? '',
+        rules: rules ?? '',
+        knowledgeBase: kb ?? '',
+        projectFiles: projectFiles ?? '',
+      });
+      prompt = `${preamble}\n\n---\n\nOperator: ${userText}`;
+    }
+
     const { done, handle } = runCodexTurn({
       rootPath: this.rootPath,
-      prompt: userText,
+      prompt,
       threadId: this.codexThreadId,
       sandbox,
       model: cfg.model || undefined,

@@ -2,6 +2,10 @@
 
 Every released version of Forge, newest first. Dates are when the build went out.
 
+## 0.2.48 — 2026-08-30
+
+- **The Codex companion now knows it's Forge.** Running on the `codex` provider, turns went straight to `codex exec` with just your message — so it answered as "Codex", ignored your persona, and described ChatGPT/Codex's own features when asked about memory or scheduling. The first message of every Codex thread now carries a Forge preamble: who it is (Forge's companion, not a generic Codex assistant), your persona, the authoritative ABOUT FORGE description, your standing rules, and the project's knowledge base + working-memory files — the same context the other providers get every turn. `codex exec resume` carries it forward, so later messages stay lean. First step toward the companion + background-builder architecture (see `COMPANION-ARCHITECTURE.md`).
+
 ## 0.2.47 — 2026-08-29
 
 - **The Activity panel no longer gets stuck on "Running…" after a turn finishes.** The turn card only stopped showing "Running…" (and its ticking clock) when it received a run-summary event — and that event was skipped whenever there was nothing to summarise, which is exactly the case for a Codex turn or a quick text-only reply. Every way a turn can end now emits a closing marker (empty when there's genuinely nothing to summarise, so it doesn't add a visible line), `stop()` and the turn's own cleanup both guarantee one, and the renderer independently closes any still-open turn card the moment the run goes idle.

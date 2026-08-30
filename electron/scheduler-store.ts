@@ -56,6 +56,59 @@ export function isValidCronExpr(expr: string): boolean {
 }
 
 /**
+ * Raw fields for a new scheduled task, as they arrive from either the
+ * native tool loop's schedule_task call or a Codex schedule-request file
+ * (SCHEDULE_REQUEST_FILENAME below) — untyped, since both sources are just
+ * parsed JSON/tool-call args that haven't been validated yet.
+ */
+export interface ScheduleTaskInput {
+  label?: unknown;
+  prompt?: unknown;
+  cron?: unknown;
+  interval_minutes?: unknown;
+}
+
+export type ParsedScheduleTask =
+  | { ok: true; label: string; prompt: string; schedule: ScheduleSpec }
+  | { ok: false; error: string };
+
+/**
+ * Validates a new-task request from either source above into a real
+ * ScheduleSpec, or a human-readable reason it can't be created — shared so
+ * the two entry points (agent-service.ts's schedule_task tool, project.ts's
+ * schedule-request-file check) can't drift into different validation rules.
+ */
+export function parseScheduleTaskInput(input: ScheduleTaskInput): ParsedScheduleTask {
+  const label = typeof input.label === 'string' ? input.label.trim() : '';
+  const prompt = typeof input.prompt === 'string' ? input.prompt.trim() : '';
+  if (!label || !prompt) return { ok: false, error: 'requires both "label" and "prompt"' };
+
+  const cron = typeof input.cron === 'string' ? input.cron.trim() : '';
+  const intervalRaw = typeof input.interval_minutes === 'number' ? input.interval_minutes : Number(input.interval_minutes);
+  const hasCron = cron !== '';
+  const hasInterval = Number.isFinite(intervalRaw) && intervalRaw > 0;
+  if (hasCron === hasInterval) return { ok: false, error: 'requires EXACTLY ONE of "cron" or "interval_minutes"' };
+  if (hasCron && !isValidCronExpr(cron)) {
+    return { ok: false, error: `"${cron}" is not a valid 5-field cron expression (minute hour day month weekday)` };
+  }
+
+  const schedule: ScheduleSpec = hasCron ? { kind: 'cron', expr: cron } : { kind: 'interval', minutes: Math.round(intervalRaw) };
+  return { ok: true, label, prompt, schedule };
+}
+
+/**
+ * Well-known project-root filename Codex (which has no access to Forge's
+ * function-calling tools, only read/write/shell) can write to instead of
+ * telling the Operator to use the Scheduler panel by hand. Written through
+ * Codex's normal file-edit path, so it's gated by the same edit
+ * permission/review as any other Codex write. project.ts's tickScheduler
+ * polls for it every tick and deletes it once processed (success or not) —
+ * see buildCodexPreamble in agent-service.ts for the exact contract Codex is
+ * told to follow.
+ */
+export const SCHEDULE_REQUEST_FILENAME = '.forge-schedule-request.json';
+
+/**
  * Next minute-boundary timestamp at or after `from` matching a cron
  * expression, or null if none falls within the search horizon.
  *

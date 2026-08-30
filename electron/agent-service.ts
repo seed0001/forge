@@ -18,6 +18,7 @@ import {
 import type { ChatProviderConfig } from './chat-provider';
 import { runCodexTurn, type CodexHandle, type CodexApprovalBridge } from './codex-app-server';
 import { matchesAllowlist, isShellChained } from './perm-store';
+import { parseScheduleTaskInput, SCHEDULE_REQUEST_FILENAME, type ScheduleTaskInput } from './scheduler-store';
 import {
   fetchJsonGuarded,
   fetchTextGuarded,
@@ -55,6 +56,8 @@ import type {
   FocusAgentSummary,
   ProjectBudget,
   ReasoningLevel,
+  ScheduleSpec,
+  ScheduledTask,
 } from './ipc-channels';
 import { MAX_TOOL_CALLS_DEFAULT, MAX_TOOL_CALLS_LIMIT, CODEX_CONTEXT_WINDOW } from './ipc-channels';
 import type { BugReportInput } from './bug-store';
@@ -202,6 +205,13 @@ export interface AgentCallbacks {
    * chat when done. Only present on the primary session's callbacks.
    */
   startBuilder?: (task: string) => { ok: boolean; error?: string };
+  /**
+   * schedule_task fires this — creates a real scheduled task (see
+   * project.ts's createSchedule) instead of telling the Operator to use the
+   * Scheduler panel by hand. Only present on the primary session's
+   * callbacks, same as startFocusAgent/startBuilder.
+   */
+  createSchedule?: (label: string, prompt: string, schedule: ScheduleSpec) => ScheduledTask;
 }
 
 /**
@@ -1061,7 +1071,54 @@ const SET_BUDGET_TOOL = {
   },
 } as const;
 
-const TOOLS = [...BASE_TOOLS, ADD_RULE_TOOL, SET_BUDGET_TOOL, DELEGATE_BUILD_TOOL, SPAWN_TOOL, SPAWN_FOCUS_TOOL, PROPOSE_ROADMAP_TOOL, COMPLETE_ROADMAP_ITEM_TOOL];
+const SCHEDULE_TASK_TOOL = {
+  type: 'function',
+  function: {
+    name: 'schedule_task',
+    description:
+      'Create a recurring or one-time scheduled task: a fixed prompt that fires automatically into its own ' +
+      'background session on a cron or interval schedule — the same mechanism as the Scheduler panel, without ' +
+      'making the Operator open it. Use this whenever they ask for a reminder or anything that should happen ' +
+      'automatically later ("every morning at 6am, remind me to...", "check on this every 30 minutes"). Pass ' +
+      'EXACTLY ONE of cron or interval_minutes.',
+    parameters: {
+      type: 'object',
+      properties: {
+        label: { type: 'string', description: 'Short human-readable name for this task, shown in the Scheduler panel.' },
+        prompt: {
+          type: 'string',
+          description:
+            'The exact message sent to the background session when this fires — phrase it as an instruction to ' +
+            'the agent that will act on it (e.g. "Remind the Operator to let the dog out and give him fresh ' +
+            'water."), not as a note back to the Operator.',
+        },
+        cron: {
+          type: 'string',
+          description:
+            'A 5-field cron expression (minute hour day month weekday) — e.g. "0 6 * * *" for every day at 6am. ' +
+            'Omit if using interval_minutes instead.',
+        },
+        interval_minutes: {
+          type: 'number',
+          description: 'Fire every N minutes instead of a cron schedule. Omit if using cron instead.',
+        },
+      },
+      required: ['label', 'prompt'],
+    },
+  },
+} as const;
+
+const TOOLS = [
+  ...BASE_TOOLS,
+  ADD_RULE_TOOL,
+  SET_BUDGET_TOOL,
+  DELEGATE_BUILD_TOOL,
+  SPAWN_TOOL,
+  SPAWN_FOCUS_TOOL,
+  PROPOSE_ROADMAP_TOOL,
+  COMPLETE_ROADMAP_ITEM_TOOL,
+  SCHEDULE_TASK_TOOL,
+];
 const SUBAGENT_TOOLS = BASE_TOOLS;
 
 interface WebResult {
@@ -1161,7 +1218,9 @@ const ABOUT_FORGE: string[] = [
   '  the same background session each time; if that session is still busy from the previous run,',
   '  this run is skipped and retried on the next tick (runs never overlap or queue). A scheduled',
   '  run obeys the same autonomy, mode, and permissions as the project — nothing lands unreviewed',
-  '  that would not land unreviewed in a normal session. There is no separate "goals" feature.',
+  '  that would not land unreviewed in a normal session. There is no separate "goals" feature. You',
+  '  can create one yourself (schedule_task, or your own instructions if that tool is not in your',
+  '  list) instead of telling the Operator to open the Scheduler panel by hand.',
   '- Roadmap: propose_roadmap offers an ordered checklist of milestones; the Operator approves',
   '  items one at a time and you are handed them in order. Focus agents (spawn_focus_agent) are',
   '  independent background agents with a time budget, for unattended multi-step work.',
@@ -1198,6 +1257,20 @@ function buildCodexPreamble(
     'evidence of contents. Prefer "I have not looked at X yet" over a confident guess.',
     '',
     ...ABOUT_FORGE,
+    '',
+    "CREATING A SCHEDULED TASK: you have no schedule_task tool — you only have file read/write and shell,",
+    "not Forge's function-calling tools. So when the Operator wants a reminder or anything recurring,",
+    `write a file at exactly this path, relative to the workspace root: ${SCHEDULE_REQUEST_FILENAME}`,
+    'Content must be JSON, exactly one of "cron" or "interval_minutes", e.g.:',
+    '{"label": "Morning dog walk", "prompt": "Remind the Operator to let the dog outside and give him',
+    'fresh water.", "cron": "0 6 * * *"}',
+    '— "cron" is a standard 5-field expression (minute hour day month weekday); "interval_minutes" (a',
+    'plain number) fires every N minutes instead. "prompt" is what gets sent to whichever agent picks',
+    'this up when it fires, so phrase it as an instruction, not a note back to the Operator. Forge checks',
+    'for this file automatically every ~20 seconds, creates the real scheduled task from it, deletes the',
+    'file, and posts a confirmation (or the reason it failed) into this chat — you do not need to tell',
+    'the Operator to open the Scheduler panel themselves, and you should not report success until you',
+    'actually see that confirmation.',
   ];
   if (ctx.persona.trim()) {
     parts.push(
@@ -2565,6 +2638,16 @@ export class AgentSession {
       });
       this.trackActivity({ id: actId, kind: 'thinking', detail: `Added a rule: ${saved}`, status: 'done' });
       return `Rule saved to the Operator's running rules document and applied to this session:\n- ${saved}`;
+    }
+
+    if (name === 'schedule_task') {
+      if (!this.cb.createSchedule) return 'ERROR: scheduling is not available from this context.';
+      const parsed = parseScheduleTaskInput(args as ScheduleTaskInput);
+      if (!parsed.ok) return `ERROR: schedule_task ${parsed.error}.`;
+      const task = this.cb.createSchedule(parsed.label, parsed.prompt, parsed.schedule);
+      const when = parsed.schedule.kind === 'cron' ? `cron "${parsed.schedule.expr}"` : `every ${parsed.schedule.minutes} minute(s)`;
+      this.trackActivity({ id: nextId('act'), kind: 'thinking', detail: `Scheduled: ${task.label}`, status: 'done' });
+      return `Scheduled "${task.label}" (${when}). It'll fire automatically from now on — the Operator can review or edit it any time in the Scheduler panel.`;
     }
 
     if (name === 'log_lesson') {

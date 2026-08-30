@@ -1,4 +1,5 @@
 import path from 'node:path';
+import fs from 'node:fs/promises';
 import { TerminalSession } from './terminal-session';
 import { DiffStore, nextId } from './diff-store';
 import { AgentSession, type WorkspaceContext } from './agent-service';
@@ -8,7 +9,14 @@ import { slugify, type ExtractedPage } from './page-extract';
 import { oneOffCompletion, activeReasoningLevel } from './chat-provider';
 import { runCodexTurn, type CodexApprovalBridge } from './codex-app-server';
 import { getCachedPermissionOverrides, getCachedBashAllowlist } from './perm-store';
-import { loadScheduledTasks, saveScheduledTasks, computeNextRun } from './scheduler-store';
+import {
+  loadScheduledTasks,
+  saveScheduledTasks,
+  computeNextRun,
+  parseScheduleTaskInput,
+  SCHEDULE_REQUEST_FILENAME,
+  type ScheduleTaskInput,
+} from './scheduler-store';
 import { loadFocusBoard, saveFocusBoard } from './focus-board';
 import { fileBugReport as fileBugReportOnDisk, type BugReportInput } from './bug-store';
 import {
@@ -1045,6 +1053,56 @@ export class Project {
       task.nextRunAt = computeNextRun(task.schedule, now);
       void this.fireSchedule(task);
     }
+    void this.checkScheduleRequestFile();
+  }
+
+  /**
+   * Codex has no schedule_task tool (it only gets read/write/shell, never
+   * Forge's function-calling tools), so it's told (buildCodexPreamble in
+   * agent-service.ts) to write SCHEDULE_REQUEST_FILENAME instead — a normal
+   * file write, gated by the same edit review/approval as anything else it
+   * touches. Picked up here on the same tick as everything else so a request
+   * lands within ~20s of being approved, whether or not anything is due to
+   * fire. The file is removed either way (success or a bad request) so a
+   * malformed one can never be retried in a loop.
+   */
+  private async checkScheduleRequestFile() {
+    if (!this.rootPath) return;
+    const filePath = path.join(this.rootPath, SCHEDULE_REQUEST_FILENAME);
+    let raw: string;
+    try {
+      raw = await fs.readFile(filePath, 'utf8');
+    } catch {
+      return; // the normal case — no request pending
+    }
+    await fs.rm(filePath, { force: true }).catch(() => {});
+
+    let input: ScheduleTaskInput;
+    try {
+      input = JSON.parse(raw);
+    } catch {
+      this.reportScheduleRequestResult(`${SCHEDULE_REQUEST_FILENAME} wasn't valid JSON — nothing was scheduled.`);
+      return;
+    }
+    const parsed = parseScheduleTaskInput(input);
+    if (!parsed.ok) {
+      this.reportScheduleRequestResult(`Couldn't create the scheduled task from ${SCHEDULE_REQUEST_FILENAME}: ${parsed.error}.`);
+      return;
+    }
+    this.createSchedule(parsed.label, parsed.prompt, parsed.schedule);
+    const when = parsed.schedule.kind === 'cron' ? `cron "${parsed.schedule.expr}"` : `every ${parsed.schedule.minutes} minute(s)`;
+    this.reportScheduleRequestResult(`Scheduled "${parsed.label}" (${when}).`);
+  }
+
+  /** Posts a **Scheduler:** confirmation/error into whichever session is currently active — the one the Operator was talking to when they asked for the reminder. */
+  private reportScheduleRequestResult(text: string) {
+    const sessionId = this.activeSessionId;
+    const session = sessionId ? this.sessions.find((s) => s.id === sessionId) : undefined;
+    if (!sessionId || !session) return;
+    const msg: ChatMessage = { role: 'assistant', text: `**Scheduler:** ${text}` };
+    session.chat.push(msg);
+    this.emit.message(this.id, sessionId, msg);
+    void this.persist();
   }
 
   // ── Cross-agent message board ───────────────────────────────────────────
@@ -1497,6 +1555,7 @@ export class Project {
         fileBugReport: (report) => this.fileBugReport(report),
         startFocusAgent: (task, label, budgetMinutes) => this.startFocusAgent(task, label, budgetMinutes),
         startBuilder: (task) => this.startBuilder(sessionId, task),
+        createSchedule: (label, prompt, schedule) => this.createSchedule(label, prompt, schedule),
       }, false, findSession()?.title, this.workspaceLink);
       const session = findSession();
       if (session) {

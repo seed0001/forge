@@ -1,5 +1,6 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
+import { execFile } from 'node:child_process';
 import type { FileNode } from './ipc-channels';
 
 /** Heavy or generated directories that are never useful to browse. */
@@ -142,4 +143,43 @@ export async function readFileDetailed(rootPath: string, filePath: string): Prom
 export async function readFileSafe(rootPath: string, filePath: string): Promise<string> {
   const result = await readFileDetailed(rootPath, filePath);
   return result.ok ? result.content : '';
+}
+
+export interface GitResult {
+  /** true when git exited 0. A non-zero exit (merge conflict, nothing to commit) is still a real result, not a thrown error. */
+  ok: boolean;
+  exitCode: number;
+  stdout: string;
+  stderr: string;
+}
+
+/**
+ * Run one `git` invocation in the project root, as an argv array — never a
+ * shell string, so nothing the model passes is word-split, globbed, or able to
+ * chain a second command. Killed on a deadline; output capped. A non-zero exit
+ * resolves normally (with ok:false) — only a failure to spawn git at all
+ * rejects.
+ */
+export function runGit(rootPath: string, argv: string[], timeoutMs = 20_000): Promise<GitResult> {
+  const MAX_BYTES = 1_000_000;
+  return new Promise((resolve, reject) => {
+    execFile(
+      'git',
+      argv,
+      { cwd: rootPath, timeout: timeoutMs, maxBuffer: MAX_BYTES, windowsHide: true },
+      (err, stdout, stderr) => {
+        const e = err as (Error & { code?: number | string; killed?: boolean }) | null;
+        if (e && (e.code === 'ENOENT' || typeof e.code === 'string')) {
+          reject(new Error(e.code === 'ENOENT' ? 'git is not installed or not on PATH' : String(e)));
+          return;
+        }
+        resolve({
+          ok: !e,
+          exitCode: typeof e?.code === 'number' ? e.code : e ? 1 : 0,
+          stdout: String(stdout ?? ''),
+          stderr: String(stderr ?? ''),
+        });
+      }
+    );
+  });
 }

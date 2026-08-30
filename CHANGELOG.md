@@ -2,6 +2,10 @@
 
 Every released version of Forge, newest first. Dates are when the build went out.
 
+## 0.2.43 — 2026-08-29
+
+- **The agent can use git.** New `git` tool: he runs one git command in the project root as an argv array — `["commit", "-m", "..."]`, `["diff", "--staged"]`, `["switch", "-c", "feature"]`. Read-only commands (`status`, `diff`, `log`, `show`, `blame`, and bare `branch`/`tag` listings) always run, even in Plan mode. Anything that changes the repo goes through the same approval gate and Plan-mode block as `run_command`, is written to `AUDIT.md`, and can be auto-approved via the bash allowlist. Network commands — `push`, `pull`, `fetch`, `clone`, `remote`, `submodule` — are blocked outright; he stages and commits locally and tells you it's ready to push. Nothing is run through a shell, so args are never word-split or chained. Subagents and Focus agents get the tool too.
+
 ## 0.2.42 — 2026-08-30
 
 - **Plan / Build mode.** A new toggle in the composer, next to the autonomy slider. Every project now starts in **Plan** mode: the agent can read files, list/glob/grep, and research on the web, but every tool that changes something — `propose_edit`, `edit_file`, `run_command`, `generate_image`, `generate_music` — is turned off, no matter the autonomy level. He's told up front that he's planning, so he gathers what he needs and then lays out the plan and asks you to switch. Flip the toggle to **Build** (any time) and he has full access again, governed by autonomy as before. Subagents and Focus agents inherit the project's mode. The setting is per-project and resets to Plan on restart, same as the autonomy level.

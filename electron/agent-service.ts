@@ -1,6 +1,6 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
-import { readFileDetailed, readFileBinaryDetailed, writeBinaryFile, listTree } from './fs-service';
+import { readFileDetailed, readFileBinaryDetailed, writeBinaryFile, listTree, runGit } from './fs-service';
 import { readRules, appendRule } from './rules-store';
 import { audit, isAuditLogPath } from './audit-service';
 import { computeHunks, countChanges } from './diff-service';
@@ -426,6 +426,30 @@ const BASE_TOOLS = [
         type: 'object',
         properties: { command: { type: 'string' } },
         required: ['command'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'git',
+      description:
+        'Run one git command in the project root, passed as an argv array (no shell — nothing is word-split or chained). ' +
+        'Use this for version control: status, diff, log, show, blame, add, restore, checkout, switch, branch, commit, ' +
+        'stash, reset, merge, rebase, cherry-pick, revert, tag, mv, rm, clean, init, apply. Read-only commands ' +
+        '(status/diff/log/show/blame and branch/tag listings) always run; commands that change the repo follow the same ' +
+        'approval and Plan-mode rules as run_command. Network commands (push, pull, fetch, clone, remote, submodule) are ' +
+        'blocked — this agent has no network git access. Output is capped and returned as [UNTRUSTED] data.',
+      parameters: {
+        type: 'object',
+        properties: {
+          args: {
+            type: 'array',
+            items: { type: 'string' },
+            description: 'The git arguments as separate strings, e.g. ["commit", "-m", "Fix the parser"] or ["diff", "--staged"].',
+          },
+        },
+        required: ['args'],
       },
     },
   },
@@ -1040,6 +1064,33 @@ function untrusted(body: string): string {
 }
 
 
+/** git subcommands that only read the repo — always allowed, regardless of Plan mode. */
+const GIT_READONLY = new Set([
+  'status', 'diff', 'log', 'show', 'blame', 'shortlog', 'describe', 'rev-parse', 'rev-list',
+  'ls-files', 'ls-tree', 'cat-file', 'symbolic-ref', 'name-rev', 'whatchanged', 'reflog',
+  'grep', 'annotate', 'merge-base', 'for-each-ref', 'show-ref', 'var',
+]);
+
+/** git subcommands that reach the network or reconfigure the repo — never allowed here. */
+const GIT_BLOCKED = new Set([
+  'push', 'pull', 'fetch', 'clone', 'remote', 'submodule', 'daemon', 'request-pull',
+  'send-email', 'svn', 'p4', 'credential', 'config', 'gc', 'filter-branch', 'filter-repo',
+  'instaweb', 'update-server-info',
+]);
+
+/** True when `git <argv>` only inspects the repo — read-only subcommand, or a bare branch/tag/stash listing. */
+function isReadOnlyGit(argv: string[]): boolean {
+  const sub = argv[0];
+  if (GIT_READONLY.has(sub)) return true;
+  const rest = argv.slice(1);
+  // `branch` / `tag` with no positional args (or only listing flags) just lists.
+  if ((sub === 'branch' || sub === 'tag') && !rest.some((a) => !a.startsWith('-'))) {
+    return !rest.some((a) => /^-(?!-list$|-all$|-verbose$|a$|l$|v$|-contains$|-merged$|-no-merged$)/.test(a) && !a.startsWith('--format'));
+  }
+  if (sub === 'stash' && (rest.length === 0 || rest[0] === 'list' || rest[0] === 'show')) return true;
+  return false;
+}
+
 /** Standard refusal for a create/generate tool called while the project is in Plan mode. */
 const PLAN_MODE_BLOCKED = (tool: string): string =>
   `ERROR: ${tool} is disabled in Plan mode — Plan mode is for reading and research only. ` +
@@ -1086,6 +1137,11 @@ function buildSystemPrompt(rootPath: string, isSubagent = false): string {
     '  approval first — if the result says it was not approved, stop and ask what they want',
     '  instead; do not retry or work around it. It may also be blocked outright if the Operator has',
     '  disabled shell commands for this workspace.',
+    '- git runs one git command in the project root, given as an argv array (["commit", "-m", "..."]).',
+    '  Read-only commands (status, diff, log, show, blame, branch/tag listings) always run. Commands that',
+    '  change the repo follow the same approval and Plan-mode rules as run_command. Network commands',
+    '  (push, pull, fetch, clone, remote, submodule) are blocked — you have no network git access, so do',
+    '  not offer to push; stage and commit locally and tell the Operator it is ready to push.',
     '- propose_edit does NOT write to disk by default. It creates a diff the user accepts or',
     '  rejects, per file or per hunk. Send the complete intended file contents, never a fragment or',
     '  elision. Depending on the Operator\'s permission settings, it may instead be written to disk',
@@ -2692,6 +2748,68 @@ export class AgentSession {
         this.trackActivity({ id: actId, kind: 'generate', detail: 'Music generation failed', status: 'error' });
         return `ERROR: music generation request failed — ${err instanceof Error ? err.message : String(err)}`;
       }
+    }
+
+    if (name === 'git') {
+      const argv = (Array.isArray(args.args) ? args.args : [])
+        .map((a) => String(a))
+        .filter((a) => a.length > 0);
+      if (!argv.length) return 'ERROR: git requires a non-empty "args" array, e.g. ["status"].';
+
+      const sub = argv[0];
+      const pretty = `git ${argv.join(' ')}`;
+
+      if (sub.startsWith('-')) {
+        return `ERROR: pass the git subcommand first, e.g. ["status"] or ["log", "-n", "5"] — not a bare flag ("${sub}").`;
+      }
+      if (GIT_BLOCKED.has(sub)) {
+        this.trackActivity({ id: nextId('act'), kind: 'run', detail: `Blocked: ${pretty}`, status: 'error' });
+        return `ERROR: "git ${sub}" is not available — this agent has no network git access and cannot reconfigure the repo. Blocked: ${[...GIT_BLOCKED].join(', ')}.`;
+      }
+
+      const readOnly = isReadOnlyGit(argv);
+      const bashPerm = this.cb.getPermission('bash');
+
+      if (bashPerm === 'deny') {
+        this.trackActivity({ id: nextId('act'), kind: 'run', detail: `Blocked: ${pretty}`, status: 'error' });
+        return `ERROR: git is disabled for this workspace (the "bash" permission is set to deny).`;
+      }
+
+      if (!readOnly) {
+        if (this.cb.getMode() === 'plan') return PLAN_MODE_BLOCKED(`git ${sub}`);
+        if (bashPerm === 'ask') {
+          const allowlisted = matchesAllowlist(pretty, this.cb.getBashAllowlist());
+          if (allowlisted) {
+            this.trackActivity({ id: nextId('act'), kind: 'run', detail: `Auto-approved (allowlisted): ${pretty}`, status: 'done' });
+          } else {
+            const waitId = nextId('act');
+            this.trackActivity({ id: waitId, kind: 'run', detail: `Waiting for approval: ${pretty}`, status: 'active' });
+            const approved = await this.cb.requestActionApproval('bash', pretty);
+            if (this.aborted) return 'Stopped by the Operator before this command ran.';
+            if (!approved) {
+              this.trackActivity({ id: waitId, kind: 'run', detail: `Denied: ${pretty}`, status: 'error' });
+              return `The Operator did not approve this command. Do not run it and do not try an equivalent workaround — ask what they'd like instead.`;
+            }
+            this.trackActivity({ id: waitId, kind: 'run', detail: `Approved: ${pretty}`, status: 'done' });
+          }
+        }
+      }
+
+      const actId = nextId('act');
+      this.trackActivity({ id: actId, kind: 'run', detail: `Ran ${pretty}`, status: 'active' });
+      let result;
+      try {
+        result = await runGit(this.rootPath, argv);
+      } catch (err) {
+        this.trackActivity({ id: actId, kind: 'run', detail: `Ran ${pretty}`, status: 'error' });
+        return `ERROR: ${err instanceof Error ? err.message : String(err)}`;
+      }
+      this.trackActivity({ id: actId, kind: 'run', detail: `Ran ${pretty}`, status: result.ok ? 'done' : 'error' });
+      if (!readOnly) await audit(this.rootPath, 'command', `\`${pretty}\``, `exit ${result.exitCode}`);
+      const combined = [result.stdout, result.stderr].filter(Boolean).join('\n').trim().slice(0, 8000);
+      return combined
+        ? `Exit code ${result.exitCode}. Output:\n${untrusted(combined)}`
+        : `(no output, exit code ${result.exitCode})`;
     }
 
     if (name === 'run_command') {

@@ -2,6 +2,10 @@
 
 Every released version of Forge, newest first. Dates are when the build went out.
 
+## 0.2.47 — 2026-08-29
+
+- **The Activity panel no longer gets stuck on "Running…" after a turn finishes.** The turn card only stopped showing "Running…" (and its ticking clock) when it received a run-summary event — and that event was skipped whenever there was nothing to summarise, which is exactly the case for a Codex turn or a quick text-only reply. Every way a turn can end now emits a closing marker (empty when there's genuinely nothing to summarise, so it doesn't add a visible line), `stop()` and the turn's own cleanup both guarantee one, and the renderer independently closes any still-open turn card the moment the run goes idle.
+
 ## 0.2.46 — 2026-08-29
 
 - **The side panels now have visible scrollbars.** The Activity, Roadmap, Focus, and Sessions panels always could scroll, but the scrollbar thumb (`#262626` on a near-black panel) was almost invisible — so a panel with more content than fits just looked like it was cut off at the bottom with no way down. The thumb is now a clearly visible grey, slightly wider, with a faint track behind it, and every scroll area reserves its gutter so content doesn't jump when the bar appears. Each panel is also hard-capped to the window height as a belt-and-suspenders guard so its body can never grow past the viewport unscrolled.

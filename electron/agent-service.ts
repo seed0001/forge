@@ -1423,6 +1423,14 @@ export class AgentSession {
   private liveRows = new Map<string, ActivityEvent>();
   /** True only between send()'s start and the matching finally — so stop() on an idle session is a no-op instead of emitting a phantom "Stopped by you" row. */
   private turnRunning = false;
+  /**
+   * Whether this turn has already emitted its run-closing `summary` activity
+   * event. The Activity panel's open turn card only stops showing "Running…"
+   * when it receives one, so every turn-end path must produce exactly one —
+   * including a Codex turn or a fast text-only reply, where buildActivitySummary
+   * used to return null and the event was skipped.
+   */
+  private turnClosed = false;
   /** True for a turn where the project budget is spent (and no overage authorized): the agent may reply in words but every tool except set_budget is blocked. Recomputed at the top of each turn. */
   private budgetLocked = false;
   /** True once this send() has announced "we hit the budget", so it says it once and then stops rather than every turn. */
@@ -1926,13 +1934,13 @@ export class AgentSession {
     }
 
     this.trackActivity({ id: nextId('act'), kind: 'stopped', detail: 'Stopped by you', status: 'error' });
+    // A manual stop isn't a failure — the closing summary row stays 'done'
+    // (the distinct 'stopped' row above already marks that you halted it), so
+    // reopening the project later doesn't read as a crash. Always emit it, even
+    // with nothing to summarise, so the Activity panel's turn card closes.
     const summary = this.buildActivitySummary();
-    if (summary) {
-      // A manual stop isn't a failure — the closing summary row stays 'done'
-      // (the distinct 'stopped' row above already marks that you halted it), so
-      // reopening the project later doesn't read as a crash.
-      this.cb.onActivity({ id: nextId('act'), kind: 'done', detail: summary, status: 'done', summary: true });
-    }
+    this.cb.onActivity({ id: nextId('act'), kind: 'done', detail: summary ?? '', status: 'done', summary: true });
+    this.turnClosed = true;
     this.cb.onStatus(false);
   }
 
@@ -3142,9 +3150,13 @@ export class AgentSession {
     const audio = this.pendingAudio.length ? this.pendingAudio : undefined;
     this.pendingAudio = [];
     const summary = this.buildActivitySummary();
-    if (summary) {
-      this.cb.onActivity({ id: nextId('act'), kind: 'done', detail: summary, status: 'done', summary: true });
-    }
+    // Always emit the run-closing marker — even with nothing to summarise. The
+    // Activity panel only closes its open turn on a summary event; a null one
+    // here (a Codex turn, a sub-second text reply) left the card stuck on
+    // "Running…" with a ticking clock. Empty detail keeps the last real step's
+    // label in the renderer's fold.
+    this.cb.onActivity({ id: nextId('act'), kind: 'done', detail: summary ?? '', status: 'done', summary: true });
+    this.turnClosed = true;
     // Strips any [TRUSTED: ...] / [UNTRUSTED] fence the model echoed back
     // verbatim — internal harness markup, never meant for the Operator to see.
     this.cb.onMessage(stripLeakedTags(text), images, undefined, audio);
@@ -3356,6 +3368,14 @@ export class AgentSession {
         this.turnRunning = false;
         // Clean end: any row still 'active' here is a straggler, not a failure.
         this.settleLiveRows('done', 'done');
+        // Last-resort turn close for a path that returned without a flushMessage
+        // or a stop() (a superseded turn, a Codex turn that early-returned) —
+        // idempotent: the renderer ignores a summary event once the turn is
+        // already closed.
+        if (!this.turnClosed) {
+          this.cb.onActivity({ id: nextId('act'), kind: 'done', detail: '', status: 'done', summary: true });
+          this.turnClosed = true;
+        }
         this.cb.onStatus(false);
       }
     }
@@ -3429,6 +3449,7 @@ export class AgentSession {
   ) {
     this.aborted = false;
     this.liveRows.clear();
+    this.turnClosed = false;
     this.activityTally = {};
     this.activityErrors = 0;
     this.activityAdded = 0;

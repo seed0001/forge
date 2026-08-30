@@ -134,7 +134,7 @@ function seedProcessLog(activity: ActivityEvent[]): ProcessTurn[] {
       id: `pt-seed-${processTurnSeq}`,
       startedAt: Date.now(),
       endedAt: active ? null : Date.now(),
-      label: summary?.detail ?? (active ? 'Working…' : 'Earlier activity'),
+      label: summary?.detail || (active ? 'Working…' : 'Earlier activity'),
       status: active ? 'running' : summary?.status === 'error' ? 'error' : 'done',
       events: steps.slice(-MAX_TURN_EVENTS),
     },
@@ -486,9 +486,19 @@ export const useForge = create<ForgeState>((set, get) => {
         patch(summary.id, (v) => {
           const wasRunning = v.summary.status === 'running';
           const nowRunning = summary.status === 'running';
+          // Safety net: if the run has gone idle but a process-log turn is still
+          // open (no summary event reached us — a Codex turn, a dropped event),
+          // close it here so the Activity card stops showing "Running…".
+          const processLog =
+            wasRunning && !nowRunning && v.processLog.some((t) => t.endedAt === null)
+              ? v.processLog.map((t) =>
+                  t.endedAt === null ? { ...t, endedAt: Date.now(), status: t.status === 'running' ? 'done' : t.status } : t
+                )
+              : v.processLog;
           return {
             ...v,
             summary,
+            processLog,
             runStartedAt: nowRunning ? (wasRunning ? v.runStartedAt : Date.now()) : null,
           };
         });
@@ -513,9 +523,14 @@ export const useForge = create<ForgeState>((set, get) => {
           if (sessionId === v.summary.activeSessionId) {
             // A summary event is the whole run's trail collapsed into one row —
             // replace everything rather than append, so a task with dozens of
-            // tool calls ends as one line instead of a long stacked list.
+            // tool calls ends as one line instead of a long stacked list. A
+            // detail-less summary event exists only to close the process-log
+            // turn (see foldIntoProcessLog) — it carries no line worth showing,
+            // so leave the visible trail as-is rather than blanking it.
             const activity = evt.summary
-              ? [evt]
+              ? evt.detail
+                ? [evt]
+                : v.activity
               : (() => {
                   const idx = v.activity.findIndex((a) => a.id === evt.id);
                   return idx >= 0 ? v.activity.map((a, i) => (i === idx ? evt : a)) : [...v.activity, evt];

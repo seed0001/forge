@@ -245,6 +245,8 @@ export interface ProjectSummary {
   budget: ProjectBudget;
   /** Every session in this project whose agent is currently working — each session runs independently, so more than one can be live at once. */
   runningSessionIds: string[];
+  /** Sessions with a background Codex builder running (delegate_build) — distinct from runningSessionIds; the companion composer stays live while a builder works. */
+  buildingSessionIds: string[];
   /** null until the Operator picks Coding or Browsing from the chooser screen. */
   kind: WorkspaceKind | null;
   /** Where a Browsing project saves markdown clips — separate from rootPath, set the first time "Save as Markdown" is used, never touches sessions/chat. */

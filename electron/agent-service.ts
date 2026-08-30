@@ -182,6 +182,14 @@ export interface AgentCallbacks {
    * spawn_focus_agent, so this would never be called from one.
    */
   startFocusAgent?: (task: string, label: string, budgetMinutes?: number) => FocusAgentSummary;
+  /**
+   * delegate_build fires this — hands a self-contained build task to the
+   * background Codex BUILDER (workspace-write, its own thread). Returns
+   * immediately so the companion turn ends and the Operator can keep chatting;
+   * the builder streams its own activity and folds its result back into the
+   * chat when done. Only present on the primary session's callbacks.
+   */
+  startBuilder?: (task: string) => { ok: boolean; error?: string };
 }
 
 /**
@@ -855,6 +863,30 @@ const BASE_TOOLS = [
   },
 ] as const;
 
+const DELEGATE_BUILD_TOOL = {
+  type: 'function',
+  function: {
+    name: 'delegate_build',
+    description:
+      'Hand a concrete build task to the background Codex builder — a workspace-write agent that edits/' +
+      'builds/tests on disk while you keep talking to the Operator. Use this in BUILD mode when the ' +
+      'Operator wants real work done now. This call returns immediately; the builder runs in the ' +
+      'background and its progress and result appear in the chat. Give it a complete, self-contained ' +
+      'brief: the goal, the relevant context from this conversation, and what "done" looks like. In ' +
+      'PLAN mode this is disabled — plan first, then ask the Operator to switch to Build mode.',
+    parameters: {
+      type: 'object',
+      properties: {
+        task: {
+          type: 'string',
+          description: 'A complete, self-contained build brief — goal, context, and the finished-state criteria.',
+        },
+      },
+      required: ['task'],
+    },
+  },
+} as const;
+
 const SPAWN_FOCUS_TOOL = {
   type: 'function',
   function: {
@@ -1016,7 +1048,7 @@ const SET_BUDGET_TOOL = {
   },
 } as const;
 
-const TOOLS = [...BASE_TOOLS, ADD_RULE_TOOL, SET_BUDGET_TOOL, SPAWN_TOOL, SPAWN_FOCUS_TOOL, PROPOSE_ROADMAP_TOOL, COMPLETE_ROADMAP_ITEM_TOOL];
+const TOOLS = [...BASE_TOOLS, ADD_RULE_TOOL, SET_BUDGET_TOOL, DELEGATE_BUILD_TOOL, SPAWN_TOOL, SPAWN_FOCUS_TOOL, PROPOSE_ROADMAP_TOOL, COMPLETE_ROADMAP_ITEM_TOOL];
 const SUBAGENT_TOOLS = BASE_TOOLS;
 
 interface WebResult {
@@ -1219,6 +1251,22 @@ function buildSystemPrompt(rootPath: string, isSubagent = false): string {
     '  fabrication. If the ABOUT FORGE section does not cover the detail asked, say so plainly.',
     '',
     ...ABOUT_FORGE,
+    ...(isSubagent
+      ? []
+      : [
+          '',
+          'YOU ARE THE COMPANION. You are the conversational agent the Operator talks to — you plan,',
+          'answer, discuss, and read the project, but you do not edit files or run builds yourself.',
+          'Real work is handed to a background BUILDER via delegate_build:',
+          '- PLAN mode: gather requirements, read what you need, and shape a plan. When you have enough',
+          '  to start building, say so plainly and ask the Operator to flip the composer toggle to Build',
+          "  mode — you cannot switch it yourself. Do not call delegate_build here; it's disabled.",
+          '- BUILD mode: for each message, decide — is this just conversation, or does the Operator want',
+          '  real work done now? If it is work, call delegate_build with a complete self-contained brief.',
+          '  It runs in the background; you keep talking. If it is conversation, just reply.',
+          '- The builder edits/builds/tests on disk in its own Codex thread. Its progress and result show',
+          '  up in this chat. Never try to do the build yourself or wait on it — hand it off and move on.',
+        ]),
     '',
     'TOOLS:',
     '- list_files shows names only — never contents. It is a starting point, never a source of',
@@ -1500,11 +1548,17 @@ export class AgentSession {
   private budgetStopIssued = false;
 
   /**
-   * The Codex CLI thread id for this session, once it has run on the `codex`
-   * provider — persisted (see project.ts) so follow-ups resume the same Codex
-   * thread. Null until the first Codex turn's `thread.started` event.
+   * The Codex CLI thread for the COMPANION — the read-only conversational
+   * agent the Operator talks to. Persisted (project.ts) so follow-ups resume
+   * it. Null until the first companion Codex turn's `thread.started` event.
    */
   private codexThreadId: string | null = null;
+  /**
+   * The Codex CLI thread for the BUILDER — the workspace-write background
+   * agent `delegate_build` hands work to. Separate identity and context from
+   * the companion; also persisted and resumed across builds.
+   */
+  private codexBuilderThreadId: string | null = null;
   /** The in-flight Codex child process handle, so stop() can kill it. Null when no Codex turn is running. */
   private codexChild: CodexHandle | null = null;
 
@@ -1560,14 +1614,23 @@ export class AgentSession {
     this.messages = [...preamble, ...(history as unknown as Message[])];
   }
 
-  /** The Codex CLI thread id to persist with this session (null if it has never run on the codex provider). */
-  exportCodexThreadId(): string | null {
-    return this.codexThreadId;
+  /** The Codex CLI thread ids (companion + builder) to persist with this session. */
+  exportCodexThreads(): { companion: string | null; builder: string | null } {
+    return { companion: this.codexThreadId, builder: this.codexBuilderThreadId };
   }
 
-  /** Restore the persisted Codex thread id so the next codex turn resumes it. */
-  restoreCodexThreadId(id: string | null) {
-    this.codexThreadId = id;
+  /** Restore the persisted Codex thread ids so the next companion/builder turn resumes them. */
+  restoreCodexThreads(threads: { companion: string | null; builder: string | null }) {
+    this.codexThreadId = threads.companion;
+    this.codexBuilderThreadId = threads.builder;
+  }
+
+  /** The builder thread id — read by project.ts's background builder so a delegated build resumes the same Codex thread. */
+  builderThreadId(): string | null {
+    return this.codexBuilderThreadId;
+  }
+  setBuilderThreadId(id: string | null) {
+    this.codexBuilderThreadId = id;
   }
 
   /**
@@ -2234,6 +2297,32 @@ export class AgentSession {
       if (this.isSubagent) return 'ERROR: subagents cannot spawn further subagents.';
       const model = typeof args.model === 'string' && args.model.trim() ? args.model.trim() : undefined;
       return this.runSubagent(task, model);
+    }
+
+    if (name === 'delegate_build') {
+      const task = String(args.task ?? '').trim();
+      if (!task) return 'ERROR: delegate_build requires a "task" describing what to build.';
+      if (this.isSubagent || !this.cb.startBuilder) return 'ERROR: only the primary companion can delegate a build.';
+      if (this.cb.getMode() === 'plan') {
+        return (
+          'ERROR: delegate_build is disabled in Plan mode. Finish planning, then ask the Operator to ' +
+          'switch to Build mode (the toggle in the composer) — you cannot switch it yourself.'
+        );
+      }
+      const res = this.cb.startBuilder(task);
+      if (!res.ok) return `ERROR: could not start the builder — ${res.error ?? 'unknown error'}.`;
+      this.trackActivity({
+        id: nextId('act'),
+        kind: 'thinking',
+        detail: `Delegated to the builder: ${task.slice(0, 80)}`,
+        status: 'done',
+      });
+      return (
+        'The build has been handed to the background builder. It is running now, in its own workspace-' +
+        'write Codex thread — do NOT wait for it here or try to do the work yourself. Tell the Operator ' +
+        "it's underway, then keep the conversation going; the builder's progress and result will appear " +
+        'in the chat, and you can check the message board for updates.'
+      );
     }
 
     if (name === 'spawn_focus_agent') {
@@ -3464,9 +3553,10 @@ export class AgentSession {
    * panel and AUDIT.md, undoable via git, but not held for per-hunk review.
    */
   private async runCodexTurn(userText: string, cfg: ChatProviderConfig) {
-    const editDenied = this.cb.getPermission('edit') === 'deny';
-    const bashDenied = this.cb.getPermission('bash') === 'deny';
-    const sandbox: CodexSandbox = editDenied || bashDenied ? 'read-only' : 'workspace-write';
+    // The primary Codex agent is the COMPANION — always read-only. It reads the
+    // project to answer and plans; it never edits. Real work goes to a
+    // background builder via delegate_build (workspace-write, its own thread).
+    const sandbox: CodexSandbox = 'read-only';
 
     // On a fresh Codex thread, prepend Forge's identity + context so the
     // companion answers as Forge (persona, ABOUT FORGE, rules, knowledge base),

@@ -37,6 +37,12 @@ export interface Session {
    * restart) resumes the same Codex thread via `codex exec resume <id>`.
    */
   codexThreadId?: string | null;
+  /**
+   * The Codex CLI thread for this session's background BUILDER (workspace-write),
+   * separate from the companion thread above. Persisted so a later delegate_build
+   * resumes the same builder thread. See COMPANION-ARCHITECTURE.md.
+   */
+  codexBuilderThreadId?: string | null;
 }
 
 export interface SessionSummary {

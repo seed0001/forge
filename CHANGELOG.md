@@ -2,6 +2,10 @@
 
 Every released version of Forge, newest first. Dates are when the build went out.
 
+## 0.2.49 — 2026-08-30
+
+- **Companion + background builder.** On the `codex` provider, the agent you talk to is now a **read-only companion** — it plans, answers, and reads the project, but never edits. Real work is handed to a **background builder** via a new `delegate_build` tool: a workspace-write Codex agent on its own thread that edits/builds/tests on disk **while you keep talking to the companion**. The composer stays live; the builder's progress shows in the Activity trail tagged `[builder]`, and its result folds back into the chat as a **Builder:** message. In **Build** mode the companion decides per message whether to reply or delegate; in **Plan** mode delegation is disabled and the companion asks you to flip the Build toggle when it's ready to start. Companion and builder keep separate, persisted Codex threads. See `COMPANION-ARCHITECTURE.md` for the full design and what's still to polish.
+
 ## 0.2.48 — 2026-08-30
 
 - **The Codex companion now knows it's Forge.** Running on the `codex` provider, turns went straight to `codex exec` with just your message — so it answered as "Codex", ignored your persona, and described ChatGPT/Codex's own features when asked about memory or scheduling. The first message of every Codex thread now carries a Forge preamble: who it is (Forge's companion, not a generic Codex assistant), your persona, the authoritative ABOUT FORGE description, your standing rules, and the project's knowledge base + working-memory files — the same context the other providers get every turn. `codex exec resume` carries it forward, so later messages stay lean. First step toward the companion + background-builder architecture (see `COMPANION-ARCHITECTURE.md`).

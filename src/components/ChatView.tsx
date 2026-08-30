@@ -101,6 +101,12 @@ export function ChatView() {
   // may be running in the background while this one sits idle, and the
   // composer/Stop button must reflect the session actually on screen.
   const running = !!view && view.summary.activeSessionId !== null && view.summary.runningSessionIds.includes(view.summary.activeSessionId);
+  // A background builder (delegate_build) is working on this session — the
+  // composer stays live so the Operator can keep talking to the companion.
+  const building =
+    !!view &&
+    view.summary.activeSessionId !== null &&
+    (view.summary.buildingSessionIds ?? []).includes(view.summary.activeSessionId);
   const diffs = Object.values(view?.pendingDiffs ?? {});
   const added = diffs.reduce((n, d) => n + d.added, 0);
   const removed = diffs.reduce((n, d) => n + d.removed, 0);
@@ -405,6 +411,13 @@ export function ChatView() {
               <span className="live-dot" style={{ background: mood.colors[0] }} />
               {mood.label}
               {running && <span className="live-sub">· you can leave this tab</span>}
+            </div>
+          )}
+          {building && (
+            <div className="live-pill" style={{ borderColor: '#d7b56d' }}>
+              <span className="live-dot" style={{ background: '#d7b56d' }} />
+              Builder working in the background
+              <span className="live-sub">· keep chatting</span>
             </div>
           )}
           <div

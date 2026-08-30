@@ -38,36 +38,41 @@ companion knows what was built.
   (keep talking) or builder (do work now, in the background). The Operator can
   keep chatting with the companion while the builder runs.
 
-## Current state (v0.2.48)
+## Current state (v0.2.49) — working end-to-end
 
-**Done — the companion carries Forge's identity.** `runCodexTurn` now prepends
-`buildCodexPreamble()` (persona, `ABOUT_FORGE`, grounding, Operator rules,
-project knowledge base + working-memory files) to the first message of a Codex
-thread. `codex exec resume` carries it forward. This fixes "it thinks it's
-Codex / ignores the persona / describes ChatGPT's features".
+- **Companion identity.** `runCodexTurn` prepends `buildCodexPreamble()`
+  (persona, `ABOUT_FORGE`, grounding, Operator rules, KB + working-memory
+  files) to the first message of the companion thread. `ABOUT_FORGE` is a
+  shared const across `buildSystemPrompt` and `buildCodexPreamble`.
+- **The companion is always read-only.** `runCodexTurn`'s sandbox is fixed at
+  `read-only`. The primary Codex agent plans and answers; it never edits.
+- **Separate threads.** `codexThreadId` (companion) + `codexBuilderThreadId`
+  (builder), both persisted and resumed (`exportCodexThreads` /
+  `restoreCodexThreads`).
+- **Background builder.** `delegate_build(task)` — primary agent, Build mode
+  only — calls `Workspace.startBuilder()`, which fires a detached
+  `runCodexTurn` at `workspace-write` on the builder thread. Non-blocking: the
+  companion turn ends at once and the composer stays live. `runningSessionIds`
+  deliberately excludes a session that only has a builder attached;
+  `buildingSessionIds` is the separate signal (composer pill). Builder activity
+  is tagged `[builder]` in the trail; its final report is pushed to the chat as
+  a **Builder:** message and posted to the board.
+- **Routing is tool-based**, not a separate triage pass. Build mode: the
+  companion decides per message to reply or `delegate_build`. Plan mode:
+  `delegate_build` is hard-blocked; the companion asks the Operator to flip the
+  existing composer Build toggle.
 
-`ABOUT_FORGE` is now a shared const used by both `buildSystemPrompt` (HTTP
-loop) and `buildCodexPreamble` (Codex companion).
+## Remaining polish
 
-## Remaining slices
-
-1. **Split the thread id.** `codexThreadId` → `companionThreadId` +
-   `builderThreadId`, persisted separately (session-store). Companion turns
-   resume the companion thread; builder turns resume the builder thread.
-2. **Background builder.** A `delegate_build` path that spawns `codex exec`
-   workspace-write on `builderThreadId` **without blocking the turn** — reuse
-   the Focus-agent machinery (own background session, non-blocking, posts to
-   the board / folds a result note into the companion thread). The Operator
-   keeps chatting meanwhile.
-3. **Triage in Build mode.** Port Joe's `triage.ts` — a read-only,
-   schema-forced Codex pass returning `{ route: chat|build, say, proceed,
-   task }`. Only runs when the project is in Build mode.
-4. **Build-handoff proposal + button.** In Chat mode the companion can emit a
-   `build-handoff` (like `propose_roadmap`): a short "ready to build — here's
-   the plan" card with Approve/Not yet. Approve → Build mode + first builder
-   task.
-5. **Cross-feed.** After every builder run, `codex exec resume
-   <companionThreadId>` with a "context only" summary of what changed.
+1. **Dedicated build-handoff card** — a `propose_build` tool + Approve/Not-yet
+   card, instead of "please flip the toggle".
+2. **Automatic cross-feed** — `codex exec resume <companionThreadId>` with a
+   "context only" summary after each build (today the companion sees the
+   Builder: chat message + board post on its next turn).
+3. **Builder stop control** in the UI (`BuilderRuntime.kill` exists; only
+   teardown / session-delete call it).
+4. **Builder status as its own Activity turn card** with a real close event.
+5. **Builder cost** folded into the session budget meter.
 
 ## Notes carried from Joe
 

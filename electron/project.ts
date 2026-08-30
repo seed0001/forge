@@ -5,7 +5,8 @@ import { AgentSession, type WorkspaceContext } from './agent-service';
 import { writeFile } from './fs-service';
 import { isAuditLogPath } from './audit-service';
 import { slugify, type ExtractedPage } from './page-extract';
-import { oneOffCompletion } from './chat-provider';
+import { oneOffCompletion, activeReasoningLevel } from './chat-provider';
+import { runCodexTurn } from './codex-runner';
 import { getCachedPermissionOverrides, getCachedBashAllowlist } from './perm-store';
 import { loadScheduledTasks, saveScheduledTasks, computeNextRun } from './scheduler-store';
 import { loadFocusBoard, saveFocusBoard } from './focus-board';
@@ -160,6 +161,15 @@ interface SessionRuntime {
   pendingFollowups: string[];
 }
 
+/** One background Codex builder run — a workspace-write delegate_build handoff, see Workspace.startBuilder. */
+interface BuilderRuntime {
+  parentSessionId: string;
+  task: string;
+  startedAt: number;
+  kill: () => void;
+  done: boolean;
+}
+
 /** One running (or finished) background Focus agent — see Workspace.startFocusAgent/runFocusLoop. */
 interface FocusAgentRuntime {
   id: string;
@@ -216,6 +226,8 @@ export class Project {
   private board: FocusMessage[] = [];
   private focusAgents = new Map<string, FocusAgentRuntime>();
   private focusSeq = 0;
+  /** Background Codex builders, keyed by the parent (companion) session id — one at a time per session. */
+  private builders = new Map<string, BuilderRuntime>();
   /**
    * Outstanding ask_and_wait calls, keyed by the board message id of the
    * question itself — a reply's in_reply_to matching one of these keys is
@@ -258,15 +270,25 @@ export class Project {
     this.diffs = new DiffStore();
   }
 
-  /** True if ANY session in this workspace has an agent actively working. */
+  /** True if ANY session in this workspace has an agent actively working, or a background builder is running. */
   get agentRunning(): boolean {
     for (const rt of this.runtimes.values()) if (rt.running) return true;
-    return false;
+    return this.builders.size > 0;
   }
 
-  /** Ids of every session currently running — lets the renderer show exactly which session(s) are live, not just "something in this workspace." */
+  /**
+   * Ids of every session whose own companion turn is running. Deliberately
+   * does NOT include a session that merely has a background builder attached —
+   * the whole point of delegate_build is that the Operator keeps chatting with
+   * the companion while the builder works, so the composer must stay live.
+   */
   get runningSessionIds(): string[] {
     return [...this.runtimes.entries()].filter(([, rt]) => rt.running).map(([sid]) => sid);
+  }
+
+  /** Session ids with a background builder currently running — for a distinct "building…" indicator, separate from the companion's own running state. */
+  get buildingSessionIds(): string[] {
+    return [...this.builders.keys()];
   }
 
   private runtime(sessionId: string): SessionRuntime {
@@ -302,6 +324,8 @@ export class Project {
     this.runtimes.clear();
     for (const rt of this.focusAgents.values()) rt.agent.stop();
     this.focusAgents.clear();
+    for (const b of this.builders.values()) b.kill();
+    this.builders.clear();
     this.sessions = await loadSessions(rootPath);
     this.budget = await loadBudget(rootPath);
     this.activeSessionId = this.sessions[0]?.id ?? null;
@@ -426,6 +450,8 @@ export class Project {
   deleteSession(sessionId: string) {
     const rt = this.runtimes.get(sessionId);
     rt?.agent?.stop();
+    this.builders.get(sessionId)?.kill();
+    this.builders.delete(sessionId);
     rt?.terminal.kill();
     for (const [, entry] of rt?.pendingApprovals ?? []) entry.resolve(false);
     this.flushSubagentApprovalsFor(sessionId);
@@ -455,7 +481,9 @@ export class Project {
       const session = this.sessions.find((s) => s.id === sessionId);
       if (session) {
         session.messages = rt.agent.exportHistory();
-        session.codexThreadId = rt.agent.exportCodexThreadId();
+        const threads = rt.agent.exportCodexThreads();
+        session.codexThreadId = threads.companion;
+        session.codexBuilderThreadId = threads.builder;
         session.updatedAt = Date.now();
       }
     }
@@ -516,6 +544,7 @@ export class Project {
       mode: this.mode,
       budget: this.budget,
       runningSessionIds: this.runningSessionIds,
+      buildingSessionIds: this.buildingSessionIds,
       kind: this.kind,
       clipsFolder: this.clipsFolder,
     };
@@ -1116,6 +1145,112 @@ export class Project {
     this.emitFocus();
   }
 
+  /**
+   * Hand a build task to a background Codex builder — workspace-write, its own
+   * persisted Codex thread, non-blocking. Called by the companion's
+   * delegate_build tool (see COMPANION-ARCHITECTURE.md). Activity and the final
+   * result fold into the PARENT (companion) session's chat so the Operator
+   * sees it inline while they keep talking. One builder at a time per session.
+   */
+  startBuilder(parentSessionId: string, task: string): { ok: boolean; error?: string } {
+    if (!this.rootPath) return { ok: false, error: 'no workspace folder open' };
+    if (this.builders.has(parentSessionId)) {
+      return { ok: false, error: 'a build is already running for this session — wait for it to finish' };
+    }
+    const parentAgent = this.runtimes.get(parentSessionId)?.agent;
+    if (!parentAgent) return { ok: false, error: 'companion agent not initialised' };
+
+    const rootPath = this.rootPath;
+    const findSession = () => this.sessions.find((s) => s.id === parentSessionId);
+    let aborted = false;
+    const freshThread = parentAgent.builderThreadId() === null;
+
+    const brief =
+      (freshThread
+        ? "You are Forge's background BUILDER — a workspace-write Codex agent. The companion (which the " +
+          'Operator talks to) has handed you a task. Do the whole thing: make the edits, run the ' +
+          'builds/tests you need, and finish. Work on disk directly. When done, report concisely what ' +
+          'you changed (files, commands) and anything the Operator should know.\n\n'
+        : '') + `Task from the companion:\n${task}`;
+
+    const runId = nextId('build');
+    const pushActivity = (evt: ActivityEvent) => {
+      const tagged: ActivityEvent = { ...evt, detail: `[builder] ${evt.detail}` };
+      const session = findSession();
+      if (session) {
+        const i = session.activity.findIndex((a) => a.id === tagged.id);
+        if (i >= 0) session.activity[i] = tagged;
+        else session.activity.push(tagged);
+        if (session.activity.length > 200) session.activity.shift();
+      }
+      this.emit.activity(this.id, parentSessionId, tagged);
+    };
+
+    pushActivity({ id: runId, kind: 'thinking', detail: `Building: ${task.slice(0, 80)}`, status: 'active' });
+
+    const { done, handle } = runCodexTurn({
+      rootPath,
+      prompt: brief,
+      threadId: parentAgent.builderThreadId(),
+      sandbox: 'workspace-write',
+      model: process.env.CODEX_MODEL || undefined,
+      reasoning: activeReasoningLevel(),
+      isAborted: () => aborted,
+      onThreadId: (id) => parentAgent.setBuilderThreadId(id),
+      onActivity: pushActivity,
+      onTerminal: (evt) => this.recordTerminal(evt),
+    });
+
+    const rt: BuilderRuntime = {
+      parentSessionId,
+      task,
+      startedAt: Date.now(),
+      done: false,
+      kill: () => {
+        aborted = true;
+        handle.kill();
+      },
+    };
+    this.builders.set(parentSessionId, rt);
+    this.emit.status(this.id);
+
+    void (async () => {
+      let resultText = '';
+      try {
+        const result = await done;
+        resultText = result.error
+          ? `The builder hit an error: ${result.error}`
+          : result.text || 'The builder finished but reported nothing.';
+        if (typeof result.promptTokens === 'number') {
+          /* builder token usage is its own thread's — not folded into the companion's context meter */
+        }
+      } catch (err) {
+        resultText = `The builder failed to run: ${(err as Error).message}`;
+      } finally {
+        rt.done = true;
+        this.builders.delete(parentSessionId);
+      }
+
+      pushActivity({
+        id: runId,
+        kind: 'thinking',
+        detail: `Build finished: ${task.slice(0, 80)}`,
+        status: aborted ? 'error' : 'done',
+      });
+
+      const msg: ChatMessage = { role: 'assistant', text: `**Builder:** ${resultText}` };
+      const session = findSession();
+      session?.chat.push(msg);
+      this.emit.message(this.id, parentSessionId, msg);
+      this.postToBoard('Builder', resultText.slice(0, 2000));
+      void this.persist();
+      this.emit.status(this.id);
+      this.emit.sessions(this.id);
+    })();
+
+    return { ok: true };
+  }
+
   startFocusAgent(task: string, label: string, budgetMinutes = 30): FocusAgentSummary {
     this.focusSeq += 1;
     const id = `${this.id}-focus${this.focusSeq}-${Date.now().toString(36)}`;
@@ -1325,11 +1460,15 @@ export class Project {
         askAndWait: (from, question, timeoutMinutes) => this.requestFocusAnswer(from, question, timeoutMinutes),
         fileBugReport: (report) => this.fileBugReport(report),
         startFocusAgent: (task, label, budgetMinutes) => this.startFocusAgent(task, label, budgetMinutes),
+        startBuilder: (task) => this.startBuilder(sessionId, task),
       }, false, findSession()?.title, this.workspaceLink);
       const session = findSession();
       if (session) {
         rt.agent.restoreHistory(session.messages);
-        rt.agent.restoreCodexThreadId(session.codexThreadId ?? null);
+        rt.agent.restoreCodexThreads({
+          companion: session.codexThreadId ?? null,
+          builder: session.codexBuilderThreadId ?? null,
+        });
       }
     }
     return rt.agent;

@@ -214,6 +214,7 @@ const EMPTY: ProviderSettings = {
   TTS_XTTS_VOICE: '',
   MAX_TOOL_CALLS: '',
   MAX_COST_PER_TASK_USD: '',
+  AGENT_PERSONA: '',
 };
 
 export function SettingsOverlay() {
@@ -450,6 +451,41 @@ export function SettingsOverlay() {
               })}
             </div>
           ))
+        )}
+
+        {saved && category === 'agent' && (
+          <div className="settings-section">
+            <div className="settings-section-head">
+              <div className="row" style={{ gap: 'var(--s2)' }}>
+                <span
+                  className="settings-dot"
+                  style={{ background: draft.AGENT_PERSONA.trim() ? 'var(--green)' : 'var(--fg-3)' }}
+                />
+                <span className="settings-section-name">Persona</span>
+              </div>
+            </div>
+            <div className="settings-section-blurb">
+              An optional note on the voice the agent writes in — spliced into its system prompt so it
+              can talk with some flavor. Leave blank for the default neutral voice. It never overrides
+              the grounding or safety rules.
+            </div>
+            <label className="settings-field">
+              <span className="settings-field-label">Persona note</span>
+              <div className="settings-input-wrap">
+                <textarea
+                  className="settings-input"
+                  rows={4}
+                  placeholder="e.g. Dry, a little sardonic. Favors short sentences. Drops the occasional wry aside."
+                  spellCheck={false}
+                  value={draft.AGENT_PERSONA}
+                  onChange={(e) => setDraft((d) => ({ ...d, AGENT_PERSONA: e.target.value }))}
+                />
+              </div>
+              <span className="settings-field-hint">
+                Newlines are collapsed to spaces when saved. Takes effect on the next request.
+              </span>
+            </label>
+          </div>
         )}
 
         {saved && category === 'voice' && (

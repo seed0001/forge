@@ -607,6 +607,13 @@ export interface ProviderSettings {
   MAX_TOOL_CALLS: string;
   /** Blank means no limit. A soft warning fires once a task's own spend crosses this; a hard stop fires past 2x it. */
   MAX_COST_PER_TASK_USD: string;
+  /**
+   * Optional free-text persona note spliced into the agent's system prompt —
+   * lets the Operator give the agent some voice/flavor in how it talks.
+   * Blank means the default neutral voice. Stored as a single line (newlines
+   * are collapsed to spaces on save so it stays a valid .env value).
+   */
+  AGENT_PERSONA: string;
 }
 
 export const SETTINGS_KEYS = [
@@ -628,6 +635,7 @@ export const SETTINGS_KEYS = [
   'TTS_XTTS_VOICE',
   'MAX_TOOL_CALLS',
   'MAX_COST_PER_TASK_USD',
+  'AGENT_PERSONA',
 ] as const satisfies readonly (keyof ProviderSettings)[];
 
 /**

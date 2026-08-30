@@ -2,6 +2,10 @@
 
 Every released version of Forge, newest first. Dates are when the build went out.
 
+## 0.2.40 — 2026-08-29
+
+- **You can give the agent a persona.** New **Settings › Agent › Persona** box takes a free-text note on the voice the agent should write in — say "dry and a little sardonic, short sentences, the occasional wry aside" — and it's spliced into the system prompt as a `PERSONA` block so replies get some flavor. Leave it blank for the default neutral voice. It's told to let the persona colour phrasing only, never to bend facts, grounding, or the safety rules. Stored as `AGENT_PERSONA` in `forge/.env`; takes effect on the next request, no restart.
+
 ## 0.2.39 — 2026-08-29
 
 - **The agent narrates what it's about to do, right in the Activity trail.** It already sent a one-or-two-sentence "here's what I'm about to do and why" note to the chat before each batch of tool calls; that same statement of intent now also shows up as its own row in the Activity panel, inline with the tool calls it describes — so a long tool-call loop reads as a followable story instead of a wall of silent `read`/`grep`/`run` rows. The style guidance was tightened too: on a long run the agent is told to narrate *more* often, not less, and to say so whenever the picture changes (found it, hit a dead end, new plan, new sub-task) before acting on it.

@@ -831,6 +831,7 @@ app.whenReady().then(async () => {
       // The sentinel is only ever something settingsGet handed back for an
       // untouched field — never persist it as if it were a real new key.
       if (secretKeys.has(key) && value === SECRET_SENTINEL) continue;
+      if (key === 'AGENT_PERSONA') value = value.replace(/\s+/g, ' ').trim();
       if (key === 'MAX_TOOL_CALLS' && value) {
         const n = Number.parseInt(value, 10);
         value = Number.isFinite(n) ? String(Math.min(Math.max(n, 1), MAX_TOOL_CALLS_LIMIT)) : '';

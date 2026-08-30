@@ -1187,6 +1187,15 @@ function buildSystemPrompt(rootPath: string, isSubagent = false): string {
         'to add it in.'
       : 'STYLE: keep the final reply short — a few sentences on what you found or did, and anything ' +
         'now waiting on the user. Put the detail in the work, not the summary.',
+    ...(process.env.AGENT_PERSONA?.trim()
+      ? [
+          '',
+          'PERSONA — the Operator has given you a voice to write in. Let it colour how you phrase ' +
+            'things, especially in conversational replies, without ever bending the facts, the ' +
+            'grounding rules, or the safety rules above:',
+          process.env.AGENT_PERSONA.trim(),
+        ]
+      : []),
     ...(isSubagent
       ? []
       : [

@@ -1267,6 +1267,28 @@ const ABOUT_FORGE: string[] = [
 ];
 
 /**
+ * Shared verbatim between buildSystemPrompt and buildCodexPreamble, same
+ * reasoning as ABOUT_FORGE above — one canonical policy, not three drifting
+ * paraphrases across the native loop, the Codex companion, and the builder.
+ */
+export const GIT_COMMIT_POLICY: string[] = [
+  '- GIT COMMIT POLICY: commit your own completed work yourself — do not wait to be asked. Once a task',
+  '  leaves the workspace in a real, working state (a bug fixed, a feature landed, a coherent slice of',
+  '  a larger task done), stage and commit it before moving on or reporting back — at the end of that',
+  '  unit of work, never after every small edit and never on something half-finished, untested, or',
+  '  broken; a commit should be something the Operator could deploy as-is.',
+  '- Before staging: run status and diff to see exactly what changed, and check log once per session to',
+  '  match this repo\'s existing message style. Stage only the files that belong to this change — never',
+  '  a blanket add -A or "." — and read back the diff before committing it, watching for anything that',
+  '  looks like a secret, key, password, or token; if you see one, stop and flag it instead of',
+  '  committing it. Write the message around why the change was made, not a restatement of the diff.',
+  '- Never amend an existing commit, never use --force or --no-verify, never rewrite history. This still',
+  '  goes through the Operator\'s own bash permission exactly like any other mutating git command: "ask"',
+  '  shows the normal approval popup, "allow" lets it land silently (still logged and undoable), and',
+  '  "deny" makes git unavailable — say so plainly and stop rather than working around it.',
+];
+
+/**
  * The identity + context block prepended to the FIRST message of a Codex
  * companion thread (see AgentSession.runCodexTurn). Codex runs OpenAI's own
  * agent under its own system prompt, so left to itself it answers as "Codex"
@@ -1292,6 +1314,9 @@ function buildCodexPreamble(
     'evidence of contents. Prefer "I have not looked at X yet" over a confident guess.',
     '',
     ...ABOUT_FORGE,
+    '',
+    ...GIT_COMMIT_POLICY,
+    '  You have no dedicated git tool — run it the same way as any other shell command.',
     '',
     "CREATING A SCHEDULED TASK OR REMINDER: you have no schedule_task tool — you only have file",
     "read/write and shell, not Forge's function-calling tools. So when the Operator wants a reminder or",
@@ -1422,6 +1447,7 @@ function buildSystemPrompt(rootPath: string, isSubagent = false): string {
     '  change the repo follow the same approval and Plan-mode rules as run_command. Network commands',
     '  (push, pull, fetch, clone, remote, submodule) are blocked — you have no network git access, so do',
     '  not offer to push; stage and commit locally and tell the Operator it is ready to push.',
+    ...GIT_COMMIT_POLICY,
     '- propose_edit does NOT write to disk by default. It creates a diff the user accepts or',
     '  rejects, per file or per hunk. Send the complete intended file contents, never a fragment or',
     '  elision. Depending on the Operator\'s permission settings, it may instead be written to disk',

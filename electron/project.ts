@@ -2,7 +2,7 @@ import path from 'node:path';
 import fs from 'node:fs/promises';
 import { TerminalSession } from './terminal-session';
 import { DiffStore, nextId } from './diff-store';
-import { AgentSession, type WorkspaceContext } from './agent-service';
+import { AgentSession, GIT_COMMIT_POLICY, type WorkspaceContext } from './agent-service';
 import { writeFile } from './fs-service';
 import { isAuditLogPath } from './audit-service';
 import { slugify, type ExtractedPage } from './page-extract';
@@ -1304,8 +1304,11 @@ export class Project {
         ? "You are Forge's background BUILDER. The companion (which the Operator talks to) has handed " +
           'you a task. Do the whole thing: make the edits, run the builds/tests you need, and finish. ' +
           'Edits and commands go through the same Operator review/approval as everything else in Forge ' +
-          "— propose them and wait, don't assume they landed. When done, report concisely what you " +
-          'changed (files, commands) and anything the Operator should know.\n\n'
+          "— propose them and wait, don't assume they landed. Before you report back, commit the " +
+          "finished work yourself (you have no dedicated git tool — run it the same way as any other " +
+          `shell command):\n${GIT_COMMIT_POLICY.join('\n')}\n\n` +
+          'When done, report concisely what you changed (files, commands) and anything the Operator ' +
+          'should know.\n\n'
         : '') + `Task from the companion:\n${task}`;
 
     const approvals: CodexApprovalBridge = {

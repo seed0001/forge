@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.2.55 - 2026-09-04
+
+- **Batch 3 harness hardening (permission & mode gates).** Closing real holes found while trying to break Plan/Build, approvals, allowlists, and the git tool:
+  - **Approval TOCTOU fixed.** Flipping to Plan or bash?deny while an Approve card is open no longer lets the approved `run_command` / mutating `git` still execute — mode and permissions are re-checked after Approve.
+  - **Newline/CR shell chaining blocked on allowlist.** `isShellChained` now treats line breaks (including Unicode separators) as chaining, so a prefix like `ls*` cannot auto-approve `ls` + a second line. Shared with the terminal plain-`cd` check.
+  - **Read-only git no longer smuggles host helpers.** `git diff --ext-diff`, `--textconv`, `--exec`, and `-c`/`--config` overrides force the normal Plan/ask path instead of the readonly short-circuit.
+  - **Subagent ask is fail-closed for every category.** Webfetch/search no longer auto-resolve true when the category is ask; missing approval channel denies.
+  - **Plan mode side doors closed.** `schedule_task`, `add_rule`, memory create/update/delete, `spawn_focus_agent`, and `file_bug_report` are blocked in Plan (list/search stay).
+- Documented cases 56–80 and Findings F1–F5 in `EDGE-CASES.md`.
 Every released version of Forge, newest first. Dates are when the build went out.
 
 ## 0.2.54 â€” 2026-08-31

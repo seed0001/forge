@@ -4,6 +4,7 @@ import path from 'node:path';
 import fs from 'node:fs';
 import type { TermDataEvent } from './ipc-channels';
 import { SECRET_SETTINGS_KEYS } from './ipc-channels';
+import { isShellChained } from './perm-store';
 
 // stdin is 'ignore' (see the spawn call), stdout/stderr are pipes.
 type ShellChild = ChildProcessByStdio<null, Readable, Readable>;
@@ -172,7 +173,7 @@ export class TerminalSession {
     // grabbing it here would treat "build && cmake .." as the path (a
     // guaranteed failure) and the chained command would never run.
     const isPlainCd =
-      (trimmed === 'cd' || trimmed.startsWith('cd ')) && !/[;&|`\n]|\$\(|<|>/.test(trimmed);
+      (trimmed === 'cd' || trimmed.startsWith('cd ')) && !isShellChained(trimmed);
     if (isPlainCd) {
       let target = trimmed.slice(2).trim();
       // `cd /d X:\path` is the cmd.exe idiom for switching drive *and*

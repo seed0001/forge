@@ -111,12 +111,16 @@ export function matchesAllowlist(command: string, patterns: string[]): boolean {
 
 /**
  * True if `command` contains a shell metacharacter that could chain on or
- * substitute in another command — ; & | a backtick, $(...), or a redirect.
+ * substitute in another command — ; & | a backtick, $(...), a redirect, or a
+ * line break (\n / \r / Unicode line separators). Newlines matter because
+ * spawn({ shell: true }) runs each line; an allowlist prefix must never
+ * auto-approve `ls\nrm ...`. Shared with terminal-session's plain-cd check.
  * An allowlist pattern matching only the FRONT of such a command (e.g. "git
- * status* " matching "git status && rm -rf /") must never be treated as a
+ * status*" matching "git status && rm -rf /") must never be treated as a
  * match for the whole command, so callers check this before honoring any
  * allowlist match.
  */
 export function isShellChained(command: string): boolean {
-  return /[;&|`]|\$\(|<|>/.test(command);
+  // Also treat U+2028 LINE SEPARATOR and U+2029 PARAGRAPH SEPARATOR as breaks.
+  return /[;&|`\n\r\u2028\u2029]|\$\(|<|>/.test(command);
 }

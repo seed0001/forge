@@ -197,9 +197,132 @@ it's false. Also makes double-clicking Stop a clean no-op on the second click.
 
 ---
 
+## Batch 3 — permission & mode gates (25 cases)
+
+### Mid-turn Plan/Build & autonomy flips
+
+| # | Case | Result | Notes |
+|---|------|--------|-------|
+| 56 | Plan mode hard-denies bash+edit even when Settings override is allow | ✅ | `resolvePermission` checks `mode===plan` BEFORE overrides (`project.ts`) |
+| 57 | Plan mode still allows research (webfetch / web_search) | ✅ | Plan only forces deny on bash/edit; webfetch resolves normally |
+| 58 | Mid-turn Plan→Build: later tool calls in same turn see Build | ✅ | `getPermission`/`getMode` close over live `this.mode` per call |
+| 59 | Mid-turn Build→Plan between tool calls blocks write/run tools | ✅ | Next `run_command` → bash deny; mutating git → Plan blocked; edits deny |
+| 60 | Build→Plan AFTER Approve on pending bash card, before runShell | 🔧 | **Finding F1** — post-await re-check of `getPermission`/`getMode` |
+| 61 | Mid-turn Manual→Auto: subsequent edits auto-apply | ✅ | Fresh `getPermission(edit)` → allow → `applyEditAuto` |
+| 62 | Mid-turn Auto→Manual while turn mid-flight | ✅ | Next edit queues for review; bash returns to ask (absent override) |
+| 63 | Flip bash override to deny while approval card open, then Approve | 🔧 | **Finding F1** — same TOCTOU fix as #60 |
+| 64 | Always-allow bash, then flip to Plan | ✅ | Plan forces deny before `requestActionApproval`; always-allow never reached |
+| 65 | Double-resolve / late click on same approval requestId | ✅ | `resolveApproval` deletes map entry then resolves; second click no-ops |
+| 66 | Stop while blocked on approval | ✅ | Stop/delete flushes `pendingApprovals` as false; tool path checks aborted after await |
+
+### Subagent / allowlist / shell chaining
+
+| # | Case | Result | Notes |
+|---|------|--------|-------|
+| 67 | Subagent bash ask unanswered → denied (fail-closed) | ✅ | `requestSubagentApproval` timeout 3 min → `resolve(false)` |
+| 68 | Subagent webfetch when category is ask | 🔧 | **Finding F4** — route all ask categories through fail-closed subagent channel |
+| 69 | Allowlist exact/prefix match for non-chained command under bash=ask | ✅ | `matchesAllowlist && !isShellChained` on `run_command` |
+| 70 | Allowlist + classic shell chain (`&&`, `;`, pipe, `$(...)`, backticks, `<>`) | ✅ | `isShellChained` catches metacharacters → must prompt |
+| 71 | Allowlist prefix on newline/CR-chained command (`ls\nrm ...`) | 🔧 | **Finding F2** — `isShellChained` now includes `\n`/`\r`/Unicode separators |
+| 72 | Allowlist pattern `*` | ✅ (weak) | `"*"` → `startsWith("")` matches every command; ask≈allow. Documented residual (Finding F7) |
+
+### Git argv / readonly gadgets
+
+| # | Case | Result | Notes |
+|---|------|--------|-------|
+| 73 | Git tool: argv via execFile (no shell word-split / `&&`) | ✅ | `runGit` → `execFile("git", argv, ...)`; leading-flag `argv[0]` rejected |
+| 74 | Git network/config class blocked (push/pull/fetch/clone/remote/config/…) | ✅ | `GIT_BLOCKED` on `argv[0]` before perms |
+| 75 | Read-only git (status/log/…) allowed in Plan | ✅ | Intentional; still blocked if bash=deny |
+| 76 | `git diff --ext-diff` (readonly set, no flag audit) | 🔧 | **Finding F3** — `gitHasExecutionEnablers` forces non-readonly |
+| 77 | Mutating git under balanced/auto bash=allow (bisect run, `!` aliases, clean -fdx) | ✅ (weak) | execFile is clean; policy gap when bash=allow (Finding F6) — not Batch 3 scope |
+| 78 | Git allowlist path omits `isShellChained` | ✅ | OK for execution (no shell). Residual: `git *` under bash=ask auto-approves destructive subs |
+
+### Plan mode side doors
+
+| # | Case | Result | Notes |
+|---|------|--------|-------|
+| 79 | Plan blocks generate_image / generate_music / delegate_build | ✅ | Explicit `getMode()===plan` checks |
+| 80 | Plan still allows schedule_task, add_rule, memory_* writes, spawn_focus_agent, file_bug_report | 🔧 | **Finding F5** — mutators gated; memory list/search remain |
+
+**Batch 3: 25/25 passing after fixes (5 findings F1–F5 fixed; F6/F7 residual/weak documented).**
+
+---
+
+### Finding F1 — Approval TOCTOU: mode/perm not re-checked after Approve
+*Cases 60, 63 · `electron/agent-service.ts` (run_command, mutating git) · severity: high*
+
+Gate logic snapshotted `bashPerm`, awaited approval, then executed with no second
+`getPermission()` / `getMode()`. During the await the Operator could flip to Plan
+or set bash=deny; Approving still ran the command.
+
+**Fix:** After `requestActionApproval` resolves true (run_command + mutating git),
+re-read `getPermission("bash")` and `getMode()`. If now deny or Plan, refuse with
+the same error strings as the pre-await path. Always-allow cannot outrank a live
+deny/Plan.
+
+### Finding F2 — Newline/CR bypass of isShellChained → allowlist auto-approve
+*Case 71 · `electron/perm-store.ts` isShellChained · severity: high*
+
+`isShellChained` omitted `\n`/`\r` while `spawn({shell:true})` runs multiple lines.
+Under bash=ask + pattern `ls*`, `ls\nrm -rf ...` auto-approved. TerminalSession's
+plain-cd check already treated newline as a chain marker.
+
+**Fix:** Extended the regex to `\n`, `\r`, and Unicode line/paragraph separators
+(`U+2028`/`U+2029`). `terminal-session.ts` plain-cd check now imports the shared
+`isShellChained` helper.
+
+### Finding F3 — Read-only git can still execute host helpers
+*Case 76 · `electron/agent-service.ts` GIT_READONLY / isReadOnlyGit · severity: high*
+
+`GIT_READONLY.has("diff")` skipped Plan + ask with no inspection of `--ext-diff`,
+`--textconv`, `-c` / `--config`, or `--exec` — host helpers could run while labeled
+read-only, including in Plan.
+
+**Fix:** Added `gitHasExecutionEnablers(argv)`. If any of those flags are present,
+`isReadOnlyGit` returns false so Plan/ask gates apply (no readonly short-circuit).
+
+### Finding F4 — Subagent webfetch ask auto-approved
+*Case 68 · `electron/agent-service.ts` runSubagent · severity: medium*
+
+Subagent `requestActionApproval` did `Promise.resolve(true)` for every non-bash
+category. webfetch=ask became allow for subagent network/media tools (deny still
+worked via `getPermission`).
+
+**Fix:** Route all ask categories through `requestSubagentCommandApproval` (same
+fail-closed 3 min timeout as bash). Non-bash descriptions are prefixed
+`[category]`. Missing channel → deny (never auto-true).
+
+### Finding F5 — Plan mode side doors (schedule / rules / memory / focus spawn)
+*Case 80 · `electron/agent-service.ts` callTool · severity: medium*
+
+Plan hard-denied bash/edit and blocked generate_image/music/delegate_build, but
+`schedule_task`, `add_rule`, `memory_*` mutators, `spawn_focus_agent`, and
+`file_bug_report` had no `getMode()===plan` check — durable side effects while
+"only planning."
+
+**Fix:** Gate those mutators with `PLAN_MODE_BLOCKED`. Read-only memory paths
+(`memory_topic` list, `memory_record` search) and `list_scheduled_tasks` stay allowed.
+
+### Residual (not fixed in Batch 3)
+
+- **F6** (case 77, medium/policy): balanced defaults bash=allow → `git bisect run` /
+  pre-existing `!` aliases promptless. execFile path is correct; policy follow-up.
+- **F7** (case 72, low): allowlist pattern `*` matches everything. Document or
+  reject on save later.
+
+---
+
+## Batch 3 verification
+
+| Check | Result |
+|------|------|
+| `npx tsc --noEmit` | exit 0 |
+| `npm run build` | exit 0 (vite + build-main.mjs; pre-existing chunk-size warning only) |
+
+---
+
 ## Next batches (planned)
 
-- **Batch 3:** permission & mode gates (mid-turn flips, approval races, allowlist / shell-chaining, git argv smuggling)
 - **Batch 4:** budget accounting (mid-turn cap crossing, subagent fan-out overrun, malformed `set_budget`)
 - **Batch 5:** context/compaction recovery, byte-budget, provider malformed responses
 - **Batch 6:** subagent / focus-agent concurrency, message-board deadlocks, orphan cleanup

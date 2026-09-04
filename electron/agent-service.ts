@@ -1212,8 +1212,29 @@ const GIT_BLOCKED = new Set([
   'instaweb', 'update-server-info',
 ]);
 
+/**
+ * Flags / options that can cause an otherwise "read-only" git subcommand to
+ * invoke host helpers (external diff, textconv, config overrides, --exec).
+ * When present, isReadOnlyGit must return false so Plan/ask gates still apply.
+ */
+function gitHasExecutionEnablers(argv: string[]): boolean {
+  for (let i = 0; i < argv.length; i++) {
+    const a = argv[i];
+    if (a === '--ext-diff' || a.startsWith('--ext-diff=')) return true;
+    if (a === '--textconv' || a.startsWith('--textconv=')) return true;
+    if (a === '--exec' || a.startsWith('--exec=')) return true;
+    // -c / --config can enable helpers (diff.external, *.textconv, alias.*).
+    if (a === '-c' || a === '--config' || a.startsWith('--config=')) return true;
+    // Combined short form: -ckey=value (rare but valid).
+    if (a.startsWith('-c') && a.length > 2 && !a.startsWith('--')) return true;
+  }
+  return false;
+}
+
 /** True when `git <argv>` only inspects the repo — read-only subcommand, or a bare branch/tag/stash listing. */
 function isReadOnlyGit(argv: string[]): boolean {
+  // Never short-circuit Plan/ask when argv can invoke external helpers.
+  if (gitHasExecutionEnablers(argv)) return false;
   const sub = argv[0];
   if (GIT_READONLY.has(sub)) return true;
   const rest = argv.slice(1);
@@ -2293,14 +2314,14 @@ export class AgentSession {
         runShell: this.cb.runShell,
         getPermission: this.cb.getPermission,
         getMode: this.cb.getMode, // A subagent inherits Plan/Build from the project it runs in.
-        // 'bash' goes through the same distinct, fail-closed subagent channel as before.
-        // 'webfetch' has no equivalent subagent-specific channel yet, so an 'ask' resolution
-        // is treated as allowed for a subagent — 'deny' still blocks it outright either way,
-        // since that check happens in getPermission before this is ever reached.
-        requestActionApproval: (category, description) =>
-          category === 'bash' && this.cb.requestSubagentCommandApproval
-            ? this.cb.requestSubagentCommandApproval(description, label)
-            : Promise.resolve(true),
+        // All ask categories (bash, webfetch, …) go through the fail-closed subagent
+        // approval channel (3 min timeout → deny). Never auto-true an ask — that made
+        // webfetch=ask behave as allow for subagents.
+        requestActionApproval: (category, description) => {
+          if (!this.cb.requestSubagentCommandApproval) return Promise.resolve(false);
+          const shown = category === 'bash' ? description : `[${category}] ${description}`;
+          return this.cb.requestSubagentCommandApproval(shown, label);
+        },
         getBashAllowlist: this.cb.getBashAllowlist,
         applyEditAuto: this.cb.applyEditAuto,
         requestEditApproval: this.cb.requestEditApproval,
@@ -2497,6 +2518,7 @@ export class AgentSession {
     }
 
     if (name === 'spawn_focus_agent') {
+      if (this.cb.getMode() === 'plan') return PLAN_MODE_BLOCKED('spawn_focus_agent');
       const task = String(args.task ?? '').trim();
       const label = String(args.label ?? '').trim();
       if (!task) return 'ERROR: spawn_focus_agent requires a "task".';
@@ -2557,6 +2579,7 @@ export class AgentSession {
     }
 
     if (name === 'file_bug_report') {
+      if (this.cb.getMode() === 'plan') return PLAN_MODE_BLOCKED('file_bug_report');
       const title = String(args.title ?? '').trim();
       const description = String(args.description ?? '').trim();
       if (!title || !description) return 'ERROR: file_bug_report requires "title" and "description".';
@@ -2613,6 +2636,11 @@ export class AgentSession {
       const actId = nextId('act');
       const { store, label: scopeLabel } = this.resolveMemoryScope(args);
 
+      // Plan mode: allow list (read), block create/delete (durable side effects).
+      if ((action === 'create' || action === 'delete') && this.cb.getMode() === 'plan') {
+        return PLAN_MODE_BLOCKED(`memory_topic ${action}`);
+      }
+
       if (action === 'create') {
         const topicName = String(args.name ?? '').trim();
         if (!topicName) return 'ERROR: memory_topic create requires a "name".';
@@ -2645,6 +2673,11 @@ export class AgentSession {
       const action = String(args.action ?? '');
       const actId = nextId('act');
       const { store, label: scopeLabel } = this.resolveMemoryScope(args);
+
+      // Plan mode: allow search (read), block add/update/delete.
+      if ((action === 'add' || action === 'update' || action === 'delete') && this.cb.getMode() === 'plan') {
+        return PLAN_MODE_BLOCKED(`memory_record ${action}`);
+      }
 
       if (action === 'add') {
         const kind = String(args.kind ?? '') as RecordKind;
@@ -2707,6 +2740,7 @@ export class AgentSession {
     }
 
     if (name === 'add_rule') {
+      if (this.cb.getMode() === 'plan') return PLAN_MODE_BLOCKED('add_rule');
       const rule = String(args.rule ?? '').trim();
       const actId = nextId('act');
       if (!rule) return 'ERROR: add_rule requires a non-empty "rule".';
@@ -2721,6 +2755,7 @@ export class AgentSession {
     }
 
     if (name === 'schedule_task') {
+      if (this.cb.getMode() === 'plan') return PLAN_MODE_BLOCKED('schedule_task');
       if (!this.cb.createSchedule) return 'ERROR: scheduling is not available from this context.';
       const parsed = parseScheduleTaskInput(args as ScheduleTaskInput);
       if (!parsed.ok) return `ERROR: schedule_task ${parsed.error}.`;
@@ -3200,6 +3235,16 @@ export class AgentSession {
               this.trackActivity({ id: waitId, kind: 'run', detail: `Denied: ${pretty}`, status: 'error' });
               return `The Operator did not approve this command. Do not run it and do not try an equivalent workaround — ask what they'd like instead.`;
             }
+            // TOCTOU: mode/perm may have flipped while the approval card was open.
+            // Always-allow must not outrank a live deny/Plan.
+            if (this.cb.getPermission('bash') === 'deny') {
+              this.trackActivity({ id: waitId, kind: 'run', detail: `Blocked after approve: ${pretty}`, status: 'error' });
+              return `ERROR: git is disabled for this workspace (the "bash" permission is set to deny).`;
+            }
+            if (this.cb.getMode() === 'plan') {
+              this.trackActivity({ id: waitId, kind: 'run', detail: `Blocked after approve (Plan): ${pretty}`, status: 'error' });
+              return PLAN_MODE_BLOCKED(`git ${sub}`);
+            }
             this.trackActivity({ id: waitId, kind: 'run', detail: `Approved: ${pretty}`, status: 'done' });
           }
         }
@@ -3243,6 +3288,17 @@ export class AgentSession {
           if (!approved) {
             this.trackActivity({ id: waitId, kind: 'run', detail: `Denied: ${command}`, status: 'error' });
             return `The Operator did not approve this command. Do not run it and do not try an equivalent workaround — ask what they'd like instead.`;
+          }
+          // TOCTOU: mode/perm may have flipped while the approval card was open.
+          // Always-allow must not outrank a live deny/Plan. Plan forces bash=deny via
+          // resolvePermission, but re-check both for explicit error strings.
+          if (this.cb.getPermission('bash') === 'deny') {
+            this.trackActivity({ id: waitId, kind: 'run', detail: `Blocked after approve: ${command}`, status: 'error' });
+            return `ERROR: shell commands are disabled for this workspace (the "bash" permission is set to deny).`;
+          }
+          if (this.cb.getMode() === 'plan') {
+            this.trackActivity({ id: waitId, kind: 'run', detail: `Blocked after approve (Plan): ${command}`, status: 'error' });
+            return PLAN_MODE_BLOCKED('run_command');
           }
           this.trackActivity({ id: waitId, kind: 'run', detail: `Approved: ${command}`, status: 'done' });
         }
